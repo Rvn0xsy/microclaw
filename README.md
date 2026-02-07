@@ -1,4 +1,5 @@
 # MicroClaw
+<img src="icon.png" alt="MicroClaw logo" width="56" align="right" />
 
 [English](README.md) | [中文](README_CN.md)
 
@@ -14,18 +15,18 @@
   <img src="screenshots/screenshot2.png" width="45%" />
 </p>
 
-An agentic AI assistant that lives in your Telegram chats, inspired by [nanoclaw](https://github.com/gavrielc/nanoclaw/) and incorporating some of its design ideas. MicroClaw connects Claude to Telegram with full tool execution: run shell commands, read/write/edit files, search codebases, browse the web, schedule tasks, and maintain persistent memory across conversations.
+An agentic AI assistant for chat surfaces, inspired by [nanoclaw](https://github.com/gavrielc/nanoclaw/) and incorporating some of its design ideas. MicroClaw is Telegram-first (with optional WhatsApp Cloud API webhook support) and works with multiple LLM providers (Anthropic + OpenAI-compatible APIs). It supports full tool execution: run shell commands, read/write/edit files, search codebases, browse the web, schedule tasks, and maintain persistent memory across conversations.
 
 ## How it works
 
 ```
-Telegram message
+Chat message (Telegram / WhatsApp)
     |
     v
  Store in SQLite --> Load chat history + memory
                          |
                          v
-                   Claude API (with tools)
+               Selected LLM API (with tools)
                          |
                     stop_reason?
                    /            \
@@ -36,10 +37,10 @@ Telegram message
                               |
                               v
                         Feed results back
-                        to Claude (loop)
+                        to model (loop)
 ```
 
-Every message triggers an **agentic loop**: Claude can call tools, inspect the results, call more tools, and reason through multi-step tasks before responding. Up to 25 iterations per request by default.
+Every message triggers an **agentic loop**: the model can call tools, inspect the results, call more tools, and reason through multi-step tasks before responding. Up to 25 iterations per request by default.
 
 ## Blog post
 
@@ -48,7 +49,7 @@ For a deeper dive into the architecture, design decisions, and what it's like to
 ## Features
 
 - **Agentic tool use** -- bash commands, file read/write/edit, glob search, regex grep, persistent memory
-- **Session resume** -- full conversation state (including tool interactions) persisted between messages; Claude remembers tool calls across invocations
+- **Session resume** -- full conversation state (including tool interactions) persisted between messages; the agent keeps tool-call state across invocations
 - **Context compaction** -- when sessions grow too large, older messages are automatically summarized to stay within context limits
 - **Sub-agent** -- delegate self-contained sub-tasks to a parallel agent with restricted tools
 - **Agent skills** -- extensible skill system ([Anthropic Skills](https://github.com/anthropics/skills) compatible); skills are auto-discovered from `data/skills/` and activated on demand
@@ -59,7 +60,7 @@ For a deeper dive into the architecture, design decisions, and what it's like to
 - **Group chat catch-up** -- when mentioned in a group, the bot reads all messages since its last reply (not just the last N)
 - **Continuous typing indicator** -- typing indicator stays active for the full duration of processing
 - **Persistent memory** -- CLAUDE.md files at global and per-chat scopes, loaded into every request
-- **Message splitting** -- long responses are automatically split at newline boundaries to fit Telegram's 4096 char limit
+- **Message splitting** -- long responses are automatically split at newline boundaries to fit channel limits (Telegram/WhatsApp)
 
 ## Tools
 
@@ -99,7 +100,7 @@ data/groups/
         CLAUDE.md             # Per-chat memory
 ```
 
-Memory is loaded into Claude's system prompt on every request. Claude can read and update memory through tools -- tell it to "remember that I prefer Python" and it will persist across sessions.
+Memory is loaded into the system prompt on every request. The model can read and update memory through tools -- tell it to "remember that I prefer Python" and it will persist across sessions.
 
 ## Skills
 
@@ -115,8 +116,8 @@ data/skills/
 
 **How it works:**
 1. Skill metadata (name + description) is always included in the system prompt (~100 tokens per skill)
-2. When Claude determines a skill is relevant, it calls `activate_skill` to load the full instructions
-3. Claude follows the skill instructions to complete the task
+2. When the model determines a skill is relevant, it calls `activate_skill` to load the full instructions
+3. The model follows the skill instructions to complete the task
 
 **Built-in skills:** pdf, docx, xlsx, pptx, skill-creator
 
@@ -208,12 +209,12 @@ cp target/release/microclaw /usr/local/bin/
   ```
 - `/setprivacy` -- set to `Disable` if you want the bot to see all group messages (not just @mentions)
 
-### 2. Get an Anthropic API key
+### 2. Get an LLM API key
 
-1. Go to [console.anthropic.com](https://console.anthropic.com/)
-2. Sign up or log in
-3. Navigate to **API Keys** and create a new key
-4. Copy the key (starts with `sk-ant-`)
+Choose a provider and create an API key:
+- Anthropic: [console.anthropic.com](https://console.anthropic.com/)
+- OpenAI: [platform.openai.com](https://platform.openai.com/)
+- Or any OpenAI-compatible provider (OpenRouter, DeepSeek, etc.)
 
 ### 3. Configure (recommended: setup wizard)
 
@@ -288,7 +289,7 @@ All configuration is via environment variables (or `.env` file):
 | `LLM_MODEL` | No | provider-specific | Model name (`CLAUDE_MODEL` fallback still supported) |
 | `LLM_BASE_URL` | No | provider preset default | Custom provider base URL |
 | `DATA_DIR` | No | `./data` | Directory for SQLite DB and memory files |
-| `MAX_TOKENS` | No | `8192` | Max tokens per Claude response |
+| `MAX_TOKENS` | No | `8192` | Max tokens per model response |
 | `MAX_TOOL_ITERATIONS` | No | `25` | Max tool-use loop iterations per message |
 | `MAX_HISTORY_MESSAGES` | No | `50` | Number of recent messages sent as context |
 | `MAX_SESSION_MESSAGES` | No | `40` | Message count threshold that triggers context compaction |
@@ -353,8 +354,10 @@ src/
     main.rs              # Entry point, CLI
     config.rs            # Environment variable loading
     error.rs             # Error types (thiserror)
-    telegram.rs          # Bot handler, agentic tool-use loop, session resume, context compaction, typing indicator
-    claude.rs            # Anthropic Messages API client
+    telegram.rs          # Telegram handler, agentic tool-use loop, session resume, context compaction, typing indicator
+    whatsapp.rs          # Optional WhatsApp Cloud API webhook handler
+    llm.rs               # LLM provider abstraction (Anthropic + OpenAI-compatible)
+    claude.rs            # Canonical message/tool schema + Anthropic-compatible types
     db.rs                # SQLite: messages, chats, scheduled_tasks, sessions
     memory.rs            # CLAUDE.md memory system
     skills.rs            # Agent skills system (discovery, activation)
@@ -379,10 +382,10 @@ src/
 
 Key design decisions:
 - **Session resume** persists full message history (including tool blocks) in SQLite; context compaction summarizes old messages to stay within limits
-- **Direct API calls** to Anthropic (no SDK wrapper) for full control over the tool-use protocol
+- **Provider abstraction** with native Anthropic + OpenAI-compatible endpoints
 - **SQLite with WAL mode** for concurrent read/write from async context
 - **Exponential backoff** on 429 rate limits (3 retries)
-- **Message splitting** for responses exceeding Telegram's 4096 character limit
+- **Message splitting** for long channel responses
 - **`Arc<Database>`** shared across tools and scheduler for thread-safe DB access
 - **Continuous typing indicator** via a spawned task that sends typing action every 4 seconds
 
