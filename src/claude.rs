@@ -360,6 +360,10 @@ mod tests {
             allowed_groups: vec![],
             max_session_messages: 40,
             compact_keep_recent: 20,
+            whatsapp_access_token: None,
+            whatsapp_phone_number_id: None,
+            whatsapp_verify_token: None,
+            whatsapp_webhook_port: 8080,
         };
         let client = ClaudeClient::new(&config);
         assert_eq!(client.model(), "claude-test");

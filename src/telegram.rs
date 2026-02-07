@@ -28,12 +28,18 @@ pub async fn run_bot(
     db: Database,
     memory: MemoryManager,
     skills: SkillManager,
+    mcp_manager: crate::mcp::McpManager,
 ) -> anyhow::Result<()> {
     let bot = Bot::new(&config.telegram_bot_token);
     let db = Arc::new(db);
 
     let claude = ClaudeClient::new(&config);
-    let tools = ToolRegistry::new(&config, bot.clone(), db.clone());
+    let mut tools = ToolRegistry::new(&config, bot.clone(), db.clone());
+
+    // Register MCP tools
+    for (server, tool_info) in mcp_manager.all_tools() {
+        tools.add_tool(Box::new(crate::tools::mcp::McpTool::new(server, tool_info)));
+    }
 
     let state = Arc::new(AppState {
         config,
@@ -47,6 +53,23 @@ pub async fn run_bot(
 
     // Start scheduler
     crate::scheduler::spawn_scheduler(state.clone());
+
+    // Start WhatsApp webhook server if configured
+    if let (Some(token), Some(phone_id), Some(verify)) = (
+        &state.config.whatsapp_access_token,
+        &state.config.whatsapp_phone_number_id,
+        &state.config.whatsapp_verify_token,
+    ) {
+        let wa_state = state.clone();
+        let token = token.clone();
+        let phone_id = phone_id.clone();
+        let verify = verify.clone();
+        let port = state.config.whatsapp_webhook_port;
+        info!("Starting WhatsApp webhook server on port {port}");
+        tokio::spawn(async move {
+            crate::whatsapp::start_whatsapp_server(wa_state, token, phone_id, verify, port).await;
+        });
+    }
 
     let handler = Update::filter_message().endpoint(handle_message);
 

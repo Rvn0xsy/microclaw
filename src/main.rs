@@ -2,12 +2,14 @@ mod claude;
 mod config;
 mod db;
 mod error;
+mod mcp;
 mod memory;
 mod scheduler;
 mod skills;
 mod telegram;
 mod tools;
 mod transcribe;
+mod whatsapp;
 
 use config::Config;
 use tracing::info;
@@ -37,6 +39,8 @@ FEATURES:
     - Group chat catch-up (reads all messages since last reply)
     - Group allowlist (restrict which groups can use the bot)
     - Continuous typing indicator
+    - MCP (Model Context Protocol) server integration
+    - WhatsApp Cloud API support
 
 SETUP:
     1. Copy .env.example to .env
@@ -58,6 +62,16 @@ OPTIONAL ENV VARS:
     TIMEZONE                 IANA timezone for scheduling (default: UTC)
     ALLOWED_GROUPS           Comma-separated chat IDs to allow (empty = all)
     RUST_LOG                 Log level, e.g. debug, info (default: info)
+
+WHATSAPP (optional):
+    WHATSAPP_ACCESS_TOKEN    Meta API access token
+    WHATSAPP_PHONE_NUMBER_ID Phone number ID from Meta dashboard
+    WHATSAPP_VERIFY_TOKEN    Webhook verification token (you choose)
+    WHATSAPP_WEBHOOK_PORT    Webhook server port (default: 8080)
+
+MCP (optional):
+    Place a mcp.json file in DATA_DIR to connect MCP servers.
+    See https://modelcontextprotocol.io for details.
 
 EXAMPLES:
     microclaw start          Start the bot
@@ -106,7 +120,18 @@ async fn main() -> anyhow::Result<()> {
     let discovered = skill_manager.discover_skills();
     info!("Skill manager initialized ({} skills discovered)", discovered.len());
 
-    telegram::run_bot(config, db, memory_manager, skill_manager).await?;
+    // Initialize MCP servers (optional, configured via data_dir/mcp.json)
+    let mcp_config_path = std::path::Path::new(&config.data_dir)
+        .join("mcp.json")
+        .to_string_lossy()
+        .to_string();
+    let mcp_manager = mcp::McpManager::from_config_file(&mcp_config_path).await;
+    let mcp_tool_count: usize = mcp_manager.all_tools().len();
+    if mcp_tool_count > 0 {
+        info!("MCP initialized: {} tools available", mcp_tool_count);
+    }
+
+    telegram::run_bot(config, db, memory_manager, skill_manager, mcp_manager).await?;
 
     Ok(())
 }

@@ -4,6 +4,7 @@ pub mod edit_file;
 pub mod export_chat;
 pub mod glob;
 pub mod grep;
+pub mod mcp;
 pub mod memory;
 pub mod read_file;
 pub mod schedule;
@@ -100,6 +101,10 @@ impl ToolRegistry {
             Box::new(activate_skill::ActivateSkillTool::new(&config.data_dir)),
         ];
         ToolRegistry { tools }
+    }
+
+    pub fn add_tool(&mut self, tool: Box<dyn Tool>) {
+        self.tools.push(tool);
     }
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {

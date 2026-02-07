@@ -15,6 +15,10 @@ pub struct Config {
     pub allowed_groups: Vec<i64>,
     pub max_session_messages: usize,
     pub compact_keep_recent: usize,
+    pub whatsapp_access_token: Option<String>,
+    pub whatsapp_phone_number_id: Option<String>,
+    pub whatsapp_verify_token: Option<String>,
+    pub whatsapp_webhook_port: u16,
 }
 
 impl Config {
@@ -61,6 +65,20 @@ impl Config {
             .parse::<usize>()
             .map_err(|e| MicroClawError::Config(format!("Invalid COMPACT_KEEP_RECENT: {e}")))?;
 
+        let whatsapp_access_token = std::env::var("WHATSAPP_ACCESS_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let whatsapp_phone_number_id = std::env::var("WHATSAPP_PHONE_NUMBER_ID")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let whatsapp_verify_token = std::env::var("WHATSAPP_VERIFY_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let whatsapp_webhook_port = std::env::var("WHATSAPP_WEBHOOK_PORT")
+            .unwrap_or_else(|_| "8080".into())
+            .parse::<u16>()
+            .map_err(|e| MicroClawError::Config(format!("Invalid WHATSAPP_WEBHOOK_PORT: {e}")))?;
+
         let allowed_groups = std::env::var("ALLOWED_GROUPS")
             .unwrap_or_default()
             .split(',')
@@ -86,6 +104,10 @@ impl Config {
             allowed_groups,
             max_session_messages,
             compact_keep_recent,
+            whatsapp_access_token,
+            whatsapp_phone_number_id,
+            whatsapp_verify_token,
+            whatsapp_webhook_port,
         })
     }
 }
@@ -110,6 +132,10 @@ mod tests {
             allowed_groups: vec![],
             max_session_messages: 40,
             compact_keep_recent: 20,
+            whatsapp_access_token: None,
+            whatsapp_phone_number_id: None,
+            whatsapp_verify_token: None,
+            whatsapp_webhook_port: 8080,
         };
         let cloned = config.clone();
         assert_eq!(cloned.telegram_bot_token, "tok");
@@ -143,6 +169,10 @@ mod tests {
             allowed_groups: vec![123, 456],
             max_session_messages: 40,
             compact_keep_recent: 20,
+            whatsapp_access_token: None,
+            whatsapp_phone_number_id: None,
+            whatsapp_verify_token: None,
+            whatsapp_webhook_port: 8080,
         };
         assert_eq!(config.claude_model, "claude-sonnet-4-20250514");
         assert_eq!(config.data_dir, "./data");
