@@ -118,8 +118,8 @@ class Microclaw < Formula
 end
 RUBY
 
-git add "$FORMULA_PATH"
-git commit -m "microclaw $NEW_VERSION"
+git add .
+git commit -m "microclaw homebrew release $NEW_VERSION"
 git push
 
 echo ""
