@@ -30,6 +30,15 @@ pub fn init_logging(runtime_data_dir: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn init_console_logging() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive(tracing::Level::INFO.into()),
+        )
+        .init();
+}
+
 #[derive(Debug)]
 struct HourlyState {
     current_hour_key: String,

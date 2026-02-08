@@ -231,6 +231,7 @@ fn render_linux_unit(ctx: &ServiceContext) -> String {
     unit.push_str("Type=simple\n");
     unit.push_str(&format!("WorkingDirectory={}\n", ctx.working_dir.display()));
     unit.push_str(&format!("ExecStart={} start\n", ctx.exe_path.display()));
+    unit.push_str("Environment=MICROCLAW_GATEWAY=1\n");
     if let Some(config_path) = &ctx.config_path {
         unit.push_str(&format!(
             "Environment=MICROCLAW_CONFIG={}\n",
@@ -380,16 +381,18 @@ fn render_macos_plist(ctx: &ServiceContext) -> String {
         ),
     ];
 
+    items.push("  <key>EnvironmentVariables</key>".to_string());
+    items.push("  <dict>".to_string());
+    items.push("    <key>MICROCLAW_GATEWAY</key>".to_string());
+    items.push("    <string>1</string>".to_string());
     if let Some(config_path) = &ctx.config_path {
-        items.push("  <key>EnvironmentVariables</key>".to_string());
-        items.push("  <dict>".to_string());
         items.push("    <key>MICROCLAW_CONFIG</key>".to_string());
         items.push(format!(
             "    <string>{}</string>",
             xml_escape(&config_path.to_string_lossy())
         ));
-        items.push("  </dict>".to_string());
     }
+    items.push("  </dict>".to_string());
 
     items.push("</dict>".to_string());
     items.push("</plist>".to_string());
@@ -528,6 +531,7 @@ mod tests {
         let unit = render_linux_unit(&ctx);
         assert!(unit.contains("ExecStart=/usr/local/bin/microclaw start"));
         assert!(unit.contains("Restart=always"));
+        assert!(unit.contains("MICROCLAW_GATEWAY=1"));
         assert!(unit.contains("MICROCLAW_CONFIG=/tmp/microclaw/microclaw.config.yaml"));
     }
 
@@ -544,6 +548,7 @@ mod tests {
         assert!(plist.contains("<key>Label</key>"));
         assert!(plist.contains(MAC_LABEL));
         assert!(plist.contains("<string>start</string>"));
+        assert!(plist.contains("MICROCLAW_GATEWAY"));
         assert!(plist.contains("MICROCLAW_CONFIG"));
     }
 

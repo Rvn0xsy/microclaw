@@ -484,3 +484,358 @@ fn translate_oai_response(oai: OaiResponse) -> MessagesResponse {
         usage,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // -----------------------------------------------------------------------
+    // translate_messages_to_oai
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_translate_messages_system_only() {
+        let msgs: Vec<Message> = vec![];
+        let out = translate_messages_to_oai("You are a bot.", &msgs);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["role"], "system");
+        assert_eq!(out[0]["content"], "You are a bot.");
+    }
+
+    #[test]
+    fn test_translate_messages_empty_system_omitted() {
+        let msgs: Vec<Message> = vec![];
+        let out = translate_messages_to_oai("", &msgs);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn test_translate_messages_text_roundtrip() {
+        let msgs = vec![
+            Message {
+                role: "user".into(),
+                content: MessageContent::Text("hello".into()),
+            },
+            Message {
+                role: "assistant".into(),
+                content: MessageContent::Text("hi".into()),
+            },
+        ];
+        let out = translate_messages_to_oai("sys", &msgs);
+        assert_eq!(out.len(), 3); // system + user + assistant
+        assert_eq!(out[1]["role"], "user");
+        assert_eq!(out[1]["content"], "hello");
+        assert_eq!(out[2]["role"], "assistant");
+        assert_eq!(out[2]["content"], "hi");
+    }
+
+    #[test]
+    fn test_translate_messages_assistant_tool_use() {
+        let msgs = vec![Message {
+            role: "assistant".into(),
+            content: MessageContent::Blocks(vec![
+                ContentBlock::Text {
+                    text: "Let me check.".into(),
+                },
+                ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "bash".into(),
+                    input: json!({"command": "ls"}),
+                },
+            ]),
+        }];
+        let out = translate_messages_to_oai("", &msgs);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["role"], "assistant");
+        assert_eq!(out[0]["content"], "Let me check.");
+        let tc = out[0]["tool_calls"].as_array().unwrap();
+        assert_eq!(tc.len(), 1);
+        assert_eq!(tc[0]["id"], "t1");
+        assert_eq!(tc[0]["function"]["name"], "bash");
+    }
+
+    #[test]
+    fn test_translate_messages_tool_result() {
+        let msgs = vec![Message {
+            role: "user".into(),
+            content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: "t1".into(),
+                content: "file1.rs\nfile2.rs".into(),
+                is_error: None,
+            }]),
+        }];
+        let out = translate_messages_to_oai("", &msgs);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["role"], "tool");
+        assert_eq!(out[0]["tool_call_id"], "t1");
+        assert_eq!(out[0]["content"], "file1.rs\nfile2.rs");
+    }
+
+    #[test]
+    fn test_translate_messages_tool_result_error() {
+        let msgs = vec![Message {
+            role: "user".into(),
+            content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: "t1".into(),
+                content: "not found".into(),
+                is_error: Some(true),
+            }]),
+        }];
+        let out = translate_messages_to_oai("", &msgs);
+        assert_eq!(out[0]["content"], "[Error] not found");
+    }
+
+    #[test]
+    fn test_translate_messages_image_block() {
+        let msgs = vec![Message {
+            role: "user".into(),
+            content: MessageContent::Blocks(vec![
+                ContentBlock::Image {
+                    source: ImageSource {
+                        source_type: "base64".into(),
+                        media_type: "image/png".into(),
+                        data: "AAAA".into(),
+                    },
+                },
+                ContentBlock::Text {
+                    text: "describe".into(),
+                },
+            ]),
+        }];
+        let out = translate_messages_to_oai("", &msgs);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["role"], "user");
+        let content = out[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "image_url");
+        assert!(content[0]["image_url"]["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/png;base64,"));
+        assert_eq!(content[1]["type"], "text");
+        assert_eq!(content[1]["text"], "describe");
+    }
+
+    // -----------------------------------------------------------------------
+    // translate_tools_to_oai
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_translate_tools_to_oai() {
+        let tools = vec![ToolDefinition {
+            name: "bash".into(),
+            description: "Run bash".into(),
+            input_schema: json!({"type": "object", "properties": {"cmd": {"type": "string"}}}),
+        }];
+        let out = translate_tools_to_oai(&tools);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["type"], "function");
+        assert_eq!(out[0]["function"]["name"], "bash");
+        assert_eq!(out[0]["function"]["description"], "Run bash");
+    }
+
+    // -----------------------------------------------------------------------
+    // translate_oai_response
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_translate_oai_response_text() {
+        let oai = OaiResponse {
+            choices: vec![OaiChoice {
+                message: OaiMessage {
+                    content: Some("Hello!".into()),
+                    tool_calls: None,
+                },
+                finish_reason: Some("stop".into()),
+            }],
+            usage: Some(OaiUsage {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+            }),
+        };
+        let resp = translate_oai_response(oai);
+        assert_eq!(resp.stop_reason.as_deref(), Some("end_turn"));
+        assert_eq!(resp.content.len(), 1);
+        match &resp.content[0] {
+            ResponseContentBlock::Text { text } => assert_eq!(text, "Hello!"),
+            _ => panic!("Expected Text"),
+        }
+        let usage = resp.usage.unwrap();
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.output_tokens, 5);
+    }
+
+    #[test]
+    fn test_translate_oai_response_tool_calls() {
+        let oai = OaiResponse {
+            choices: vec![OaiChoice {
+                message: OaiMessage {
+                    content: None,
+                    tool_calls: Some(vec![OaiToolCall {
+                        id: "call_1".into(),
+                        function: OaiFunction {
+                            name: "bash".into(),
+                            arguments: r#"{"command":"ls"}"#.into(),
+                        },
+                    }]),
+                },
+                finish_reason: Some("tool_calls".into()),
+            }],
+            usage: None,
+        };
+        let resp = translate_oai_response(oai);
+        assert_eq!(resp.stop_reason.as_deref(), Some("tool_use"));
+        match &resp.content[0] {
+            ResponseContentBlock::ToolUse { id, name, input } => {
+                assert_eq!(id, "call_1");
+                assert_eq!(name, "bash");
+                assert_eq!(input["command"], "ls");
+            }
+            _ => panic!("Expected ToolUse"),
+        }
+    }
+
+    #[test]
+    fn test_translate_oai_response_empty_choices() {
+        let oai = OaiResponse {
+            choices: vec![],
+            usage: None,
+        };
+        let resp = translate_oai_response(oai);
+        assert_eq!(resp.stop_reason.as_deref(), Some("end_turn"));
+        match &resp.content[0] {
+            ResponseContentBlock::Text { text } => assert_eq!(text, "(empty response)"),
+            _ => panic!("Expected Text"),
+        }
+    }
+
+    #[test]
+    fn test_translate_oai_response_length_stop() {
+        let oai = OaiResponse {
+            choices: vec![OaiChoice {
+                message: OaiMessage {
+                    content: Some("partial".into()),
+                    tool_calls: None,
+                },
+                finish_reason: Some("length".into()),
+            }],
+            usage: None,
+        };
+        let resp = translate_oai_response(oai);
+        assert_eq!(resp.stop_reason.as_deref(), Some("max_tokens"));
+    }
+
+    #[test]
+    fn test_translate_oai_response_text_and_tool_calls() {
+        let oai = OaiResponse {
+            choices: vec![OaiChoice {
+                message: OaiMessage {
+                    content: Some("thinking...".into()),
+                    tool_calls: Some(vec![OaiToolCall {
+                        id: "c1".into(),
+                        function: OaiFunction {
+                            name: "read_file".into(),
+                            arguments: r#"{"path":"/tmp/x"}"#.into(),
+                        },
+                    }]),
+                },
+                finish_reason: Some("tool_calls".into()),
+            }],
+            usage: None,
+        };
+        let resp = translate_oai_response(oai);
+        assert_eq!(resp.content.len(), 2);
+        match &resp.content[0] {
+            ResponseContentBlock::Text { text } => assert_eq!(text, "thinking..."),
+            _ => panic!("Expected Text"),
+        }
+        match &resp.content[1] {
+            ResponseContentBlock::ToolUse { name, .. } => assert_eq!(name, "read_file"),
+            _ => panic!("Expected ToolUse"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // create_provider
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_create_provider_anthropic() {
+        let config = Config {
+            telegram_bot_token: "tok".into(),
+            bot_username: "bot".into(),
+            llm_provider: "anthropic".into(),
+            api_key: "key".into(),
+            model: "claude-sonnet-4-20250514".into(),
+            llm_base_url: None,
+            max_tokens: 8192,
+            max_tool_iterations: 25,
+            max_history_messages: 50,
+            data_dir: "/tmp".into(),
+            openai_api_key: None,
+            timezone: "UTC".into(),
+            allowed_groups: vec![],
+            control_chat_ids: vec![],
+            max_session_messages: 40,
+            compact_keep_recent: 20,
+            whatsapp_access_token: None,
+            whatsapp_phone_number_id: None,
+            whatsapp_verify_token: None,
+            whatsapp_webhook_port: 8080,
+            discord_bot_token: None,
+            discord_allowed_channels: vec![],
+        };
+        // Should not panic
+        let _provider = create_provider(&config);
+    }
+
+    #[test]
+    fn test_create_provider_openai() {
+        let config = Config {
+            telegram_bot_token: "tok".into(),
+            bot_username: "bot".into(),
+            llm_provider: "openai".into(),
+            api_key: "key".into(),
+            model: "gpt-4o".into(),
+            llm_base_url: None,
+            max_tokens: 8192,
+            max_tool_iterations: 25,
+            max_history_messages: 50,
+            data_dir: "/tmp".into(),
+            openai_api_key: None,
+            timezone: "UTC".into(),
+            allowed_groups: vec![],
+            control_chat_ids: vec![],
+            max_session_messages: 40,
+            compact_keep_recent: 20,
+            whatsapp_access_token: None,
+            whatsapp_phone_number_id: None,
+            whatsapp_verify_token: None,
+            whatsapp_webhook_port: 8080,
+            discord_bot_token: None,
+            discord_allowed_channels: vec![],
+        };
+        let _provider = create_provider(&config);
+    }
+
+    #[test]
+    fn test_translate_messages_user_text_blocks_no_images_no_tool_results() {
+        // User message with only text blocks (no images, no tool results) → plain text
+        let msgs = vec![Message {
+            role: "user".into(),
+            content: MessageContent::Blocks(vec![
+                ContentBlock::Text {
+                    text: "first".into(),
+                },
+                ContentBlock::Text {
+                    text: "second".into(),
+                },
+            ]),
+        }];
+        let out = translate_messages_to_oai("", &msgs);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["role"], "user");
+        assert_eq!(out[0]["content"], "first\nsecond");
+    }
+}

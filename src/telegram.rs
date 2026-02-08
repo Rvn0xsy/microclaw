@@ -30,7 +30,7 @@ fn format_user_message(sender_name: &str, content: &str) -> String {
     )
 }
 
-pub(crate) struct AppState {
+pub struct AppState {
     pub config: Config,
     pub bot: Bot,
     pub db: Arc<Database>,
@@ -391,7 +391,7 @@ fn guess_image_media_type(data: &[u8]) -> String {
     }
 }
 
-pub(crate) async fn process_with_claude(
+pub async fn process_with_claude(
     state: &AppState,
     chat_id: i64,
     _sender_name: &str,
@@ -761,7 +761,7 @@ fn split_response_text(text: &str) -> Vec<String> {
     chunks
 }
 
-pub(crate) async fn send_response(bot: &Bot, chat_id: ChatId, text: &str) {
+pub async fn send_response(bot: &Bot, chat_id: ChatId, text: &str) {
     const MAX_LEN: usize = 4096;
 
     if text.len() <= MAX_LEN {
@@ -1329,5 +1329,236 @@ mod tests {
         let prompt = build_system_prompt("testbot", "", 12345, "");
         assert!(prompt.contains("user_message"));
         assert!(prompt.contains("untrusted"));
+    }
+
+    #[test]
+    fn test_split_response_text_empty() {
+        let chunks = split_response_text("");
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], "");
+    }
+
+    #[test]
+    fn test_split_response_text_exact_4096() {
+        let text = "a".repeat(4096);
+        let chunks = split_response_text(&text);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].len(), 4096);
+    }
+
+    #[test]
+    fn test_split_response_text_4097() {
+        let text = "a".repeat(4097);
+        let chunks = split_response_text(&text);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].len(), 4096);
+        assert_eq!(chunks[1].len(), 1);
+    }
+
+    #[test]
+    fn test_split_response_text_newline_at_boundary() {
+        // Total 4201 > 4096. Newline at position 4000, split should happen there.
+        let mut text = "a".repeat(4000);
+        text.push('\n');
+        text.push_str(&"b".repeat(200));
+        assert_eq!(text.len(), 4201);
+        let chunks = split_response_text(&text);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].len(), 4000);
+        assert_eq!(chunks[1].len(), 200);
+    }
+
+    #[test]
+    fn test_message_to_text_tool_error() {
+        let msg = Message {
+            role: "user".into(),
+            content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: "t1".into(),
+                content: "command failed".into(),
+                is_error: Some(true),
+            }]),
+        };
+        let text = message_to_text(&msg);
+        assert!(text.contains("[tool_error]"));
+        assert!(text.contains("command failed"));
+    }
+
+    #[test]
+    fn test_message_to_text_long_tool_result_truncation() {
+        let long_content = "x".repeat(500);
+        let msg = Message {
+            role: "user".into(),
+            content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: "t1".into(),
+                content: long_content,
+                is_error: None,
+            }]),
+        };
+        let text = message_to_text(&msg);
+        assert!(text.contains("..."));
+        // Original 500 chars should be truncated to 200 + "..."
+        assert!(text.len() < 500);
+    }
+
+    #[test]
+    fn test_sanitize_xml_empty() {
+        assert_eq!(sanitize_xml(""), "");
+    }
+
+    #[test]
+    fn test_sanitize_xml_all_special() {
+        assert_eq!(sanitize_xml("&<>\""), "&amp;&lt;&gt;&quot;");
+    }
+
+    #[test]
+    fn test_sanitize_xml_mixed_content() {
+        assert_eq!(
+            sanitize_xml("a < b & c > d"),
+            "a &lt; b &amp; c &gt; d"
+        );
+    }
+
+    #[test]
+    fn test_format_user_message_with_empty_content() {
+        assert_eq!(
+            format_user_message("alice", ""),
+            "<user_message sender=\"alice\"></user_message>"
+        );
+    }
+
+    #[test]
+    fn test_format_user_message_with_empty_sender() {
+        assert_eq!(
+            format_user_message("", "hi"),
+            "<user_message sender=\"\">hi</user_message>"
+        );
+    }
+
+    #[test]
+    fn test_strip_images_multiple_messages() {
+        let mut messages = vec![
+            Message {
+                role: "user".into(),
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::Image {
+                        source: ImageSource {
+                            source_type: "base64".into(),
+                            media_type: "image/jpeg".into(),
+                            data: "data1".into(),
+                        },
+                    },
+                    ContentBlock::Text {
+                        text: "first".into(),
+                    },
+                ]),
+            },
+            Message {
+                role: "assistant".into(),
+                content: MessageContent::Text("I see an image".into()),
+            },
+            Message {
+                role: "user".into(),
+                content: MessageContent::Blocks(vec![ContentBlock::Image {
+                    source: ImageSource {
+                        source_type: "base64".into(),
+                        media_type: "image/png".into(),
+                        data: "data2".into(),
+                    },
+                }]),
+            },
+        ];
+
+        strip_images_for_session(&mut messages);
+
+        // First message: image replaced with text
+        if let MessageContent::Blocks(blocks) = &messages[0].content {
+            match &blocks[0] {
+                ContentBlock::Text { text } => assert_eq!(text, "[image was sent]"),
+                other => panic!("Expected Text, got {:?}", other),
+            }
+        }
+        // Second message: text unchanged
+        if let MessageContent::Text(t) = &messages[1].content {
+            assert_eq!(t, "I see an image");
+        }
+        // Third message: image replaced
+        if let MessageContent::Blocks(blocks) = &messages[2].content {
+            match &blocks[0] {
+                ContentBlock::Text { text } => assert_eq!(text, "[image was sent]"),
+                other => panic!("Expected Text, got {:?}", other),
+            }
+        }
+    }
+
+    #[test]
+    fn test_history_to_claude_messages_multiple_assistant_only() {
+        let history = vec![
+            make_msg("1", "bot", "msg1", true, "2024-01-01T00:00:01Z"),
+            make_msg("2", "bot", "msg2", true, "2024-01-01T00:00:02Z"),
+        ];
+        let messages = history_to_claude_messages(&history, "bot");
+        // Both should be removed (leading + trailing assistant)
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_history_to_claude_messages_alternating() {
+        let history = vec![
+            make_msg("1", "alice", "q1", false, "2024-01-01T00:00:01Z"),
+            make_msg("2", "bot", "a1", true, "2024-01-01T00:00:02Z"),
+            make_msg("3", "bob", "q2", false, "2024-01-01T00:00:03Z"),
+            make_msg("4", "bot", "a2", true, "2024-01-01T00:00:04Z"),
+            make_msg("5", "alice", "q3", false, "2024-01-01T00:00:05Z"),
+        ];
+        let messages = history_to_claude_messages(&history, "bot");
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[1].role, "assistant");
+        assert_eq!(messages[2].role, "user");
+        assert_eq!(messages[3].role, "assistant");
+        assert_eq!(messages[4].role, "user");
+    }
+
+    #[test]
+    fn test_build_system_prompt_with_memory_and_skills() {
+        let memory = "<global_memory>\nTest\n</global_memory>";
+        let skills = "- translate: Translate text";
+        let prompt = build_system_prompt("bot", memory, 42, skills);
+        assert!(prompt.contains("# Memories"));
+        assert!(prompt.contains("Test"));
+        assert!(prompt.contains("# Agent Skills"));
+        assert!(prompt.contains("translate: Translate text"));
+    }
+
+    #[test]
+    fn test_build_system_prompt_mentions_todo() {
+        let prompt = build_system_prompt("testbot", "", 12345, "");
+        assert!(prompt.contains("todo_read"));
+        assert!(prompt.contains("todo_write"));
+    }
+
+    #[test]
+    fn test_build_system_prompt_mentions_export() {
+        let prompt = build_system_prompt("testbot", "", 12345, "");
+        assert!(prompt.contains("export_chat"));
+    }
+
+    #[test]
+    fn test_build_system_prompt_mentions_schedule() {
+        let prompt = build_system_prompt("testbot", "", 12345, "");
+        assert!(prompt.contains("schedule_task"));
+        assert!(prompt.contains("6-field cron"));
+    }
+
+    #[test]
+    fn test_guess_image_media_type_webp_too_short() {
+        // RIFF header without WEBP at position 8-12 should default to jpeg
+        let data = b"RIFF".to_vec();
+        assert_eq!(guess_image_media_type(&data), "image/jpeg");
+    }
+
+    #[test]
+    fn test_guess_image_media_type_empty() {
+        assert_eq!(guess_image_media_type(&[]), "image/jpeg");
     }
 }

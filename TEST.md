@@ -1,8 +1,20 @@
 # MicroClaw Testing Guide
 
-This document describes how to manually test every feature of MicroClaw. Since MicroClaw is a Telegram bot with external dependencies (Anthropic API, Telegram API, DuckDuckGo), testing is done through live interaction.
+This document describes how to test every feature of MicroClaw. It includes both automated tests (unit/integration) and manual black-box functional tests organized by user stories.
 
-## Prerequisites
+## Automated Tests
+
+```sh
+cargo test              # Run all unit + integration tests
+cargo clippy            # Lint check
+cargo fmt --check       # Format check
+```
+
+## Black-Box Functional Tests
+
+Since MicroClaw is a multi-platform bot with external dependencies (LLM APIs, Telegram/Discord/WhatsApp APIs, DuckDuckGo), many features require live interaction testing.
+
+### Prerequisites
 
 1. A working `microclaw.config.yaml` file with valid credentials
 2. `cargo build` succeeds with zero errors
@@ -12,440 +24,383 @@ This document describes how to manually test every feature of MicroClaw. Since M
 
 ---
 
-## 1. Basic Startup
+## 1. Startup & Configuration
 
-**Test:** The bot starts without errors.
-
-```sh
-cargo run -- start
-```
-
-**Expected:** Logs show:
-```
-Starting MicroClaw bot...
-Database initialized
-Memory manager initialized
-Scheduler started
-```
-
-No panics, no errors.
+| # | User Story | Steps | Expected |
+|---|-----------|-------|----------|
+| 1.1 | First launch without config | Run `microclaw start` with no config.yaml present | Auto-launches setup wizard |
+| 1.2 | Normal startup | Fill config.yaml, run `microclaw start` | Logs: Database initialized / Memory manager initialized / Scheduler started |
+| 1.3 | Missing required field | Remove `api_key` from config, start | Error message + launches setup wizard |
+| 1.4 | Invalid timezone | Set `timezone: "Mars/Olympus"` | Startup error with invalid timezone message |
+| 1.5 | CLI help | `microclaw help` | Full output: commands, features, config docs |
+| 1.6 | CLI version | `microclaw version` | Output: `microclaw {VERSION}` |
+| 1.7 | Unknown command | `microclaw foobar` | "Unknown command: foobar" + help text |
+| 1.8 | Setup wizard | `microclaw setup` | TUI interactive guide, provider/model selection |
+| 1.9 | MICROCLAW_CONFIG env var | `MICROCLAW_CONFIG=/tmp/test.yaml microclaw start` | Loads config from specified path |
 
 ---
 
-## 2. Help Command
+## 2. Private Chat -- Basic Conversation
 
-**Test:** The CLI help displays correctly.
-
-```sh
-cargo run -- help
-```
-
-**Expected:** Output includes the features list (web search, scheduled tasks, etc.) and all environment variable documentation.
-
----
-
-## 3. Private Chat -- Basic Response
-
-**Test:** Send a simple message in a private chat with the bot.
-
-```
-You: Hello, what can you do?
-```
-
-**Expected:** The bot responds with a description of its capabilities. The typing indicator should appear while processing.
+| # | User Story | Steps | Expected |
+|---|-----------|-------|----------|
+| 2.1 | Send plain text | Private chat: send "Hello" | Bot responds; typing indicator visible during processing |
+| 2.2 | Empty message | Send message with no text/image/voice | Bot does not respond, no crash |
+| 2.3 | Very long input | Send 10000-character text | Bot processes and responds normally |
+| 2.4 | Special characters | Send `<script>alert('xss')</script>` | XML-escaped, processed safely, no injection |
+| 2.5 | Emoji/Unicode | Send various emoji and CJK characters | Processed and responded to normally |
+| 2.6 | Long response splitting | Ask for a 5000-character essay | Response split at newline boundaries into multiple messages (max 4096 chars each) |
+| 2.7 | Typing indicator persistence | Send request requiring multiple tool calls | Typing refreshes every ~4s until response completes |
+| 2.8 | Rapid consecutive messages | Send 5 messages quickly | All stored; bot processes each without dropping any |
 
 ---
 
-## 4. Typing Indicator (Continuous)
+## 3. Image Handling
 
-**Test:** Send a message that requires tool use (takes a few seconds to process).
-
-```
-You: List all files in the current directory
-```
-
-**Expected:** The "typing..." indicator stays visible continuously until the response arrives, not just a single flash. It should refresh every ~4 seconds.
-
----
-
-## 5. Tool Execution -- Bash
-
-**Test:** Ask the bot to run a shell command.
-
-```
-You: Run `echo hello world` in bash
-```
-
-**Expected:** The bot executes the command and returns "hello world".
+| # | User Story | Steps | Expected |
+|---|-----------|-------|----------|
+| 3.1 | JPEG photo | Send a JPEG photo | Bot describes image content |
+| 3.2 | PNG screenshot | Send a PNG image | Correctly identified as PNG, processed |
+| 3.3 | WebP image | Send a WebP format image | Correctly identified as WebP, processed |
+| 3.4 | GIF image | Send an animated GIF | Correctly identified as GIF, processed |
+| 3.5 | Image + caption | Send photo with caption "What is this?" | Bot sees both image and caption, responds accordingly |
+| 3.6 | Image without caption | Send photo with no caption | Bot proactively describes image content |
+| 3.7 | Image session persistence | Send image, then ask "What was in that image?" | Bot recalls image from session (stored as `[image was sent]` placeholder) |
+| 3.8 | Large image | Send high-resolution image (5MB+) | Downloads largest resolution, processes without timeout |
 
 ---
 
-## 6. Tool Execution -- File Operations
+## 4. Voice Messages
 
-**Test:** Ask the bot to create, read, and edit a file.
-
-```
-You: Create a file called /tmp/microclaw_test.txt with the content "hello"
-You: Read /tmp/microclaw_test.txt
-You: Change "hello" to "goodbye" in /tmp/microclaw_test.txt
-You: Read /tmp/microclaw_test.txt again to confirm
-```
-
-**Expected:** Each operation succeeds. Final file content is "goodbye".
+| # | User Story | Steps | Expected |
+|---|-----------|-------|----------|
+| 4.1 | Voice transcription (with key) | Send voice message (openai_api_key configured) | Bot transcribes via Whisper, processes as text |
+| 4.2 | Voice without key | Send voice message (no openai_api_key) | "Voice messages not supported (no Whisper API key configured)" |
+| 4.3 | Transcription failure | Send corrupted audio file | Embeds `[transcription failed: {error}]`, no crash |
+| 4.4 | Long voice message | Send 2-minute voice message | Transcribed and processed normally |
 
 ---
 
-## 7. Tool Execution -- Search (glob + grep)
+## 5. Session Management
 
-**Test:** Ask the bot to search for files and content.
-
-```
-You: Find all .rs files in the project
-You: Search for "fn main" in the source code
-```
-
-**Expected:** Returns matching file paths and content with line numbers.
-
----
-
-## 8. Memory (Read/Write)
-
-**Test:** Test persistent memory across messages.
-
-```
-You: Remember that my favorite language is Rust
-```
-
-Wait a moment, then send:
-
-```
-You: What is my favorite language?
-```
-
-**Expected:** The bot saves to CLAUDE.md and recalls "Rust" from memory in the second message.
-
-**Verify:** Check that `microclaw.data/runtime/groups/{chat_id}/CLAUDE.md` exists and contains the memory.
+| # | User Story | Steps | Expected |
+|---|-----------|-------|----------|
+| 5.1 | Conversation continuity | Msg 1: "My name is Alice"; Msg 2: "What's my name?" | Bot remembers "Alice" |
+| 5.2 | Tool context preserved | Msg 1: "Create /tmp/test.txt with hello"; Msg 2: "What did you just create?" | Bot remembers file operation (session includes tool_use/tool_result blocks) |
+| 5.3 | /reset clears session | Chat several turns, send `/reset`, ask "What did we talk about?" | Bot does not remember previous session context |
+| 5.4 | /archive session | Chat several turns, send `/archive` | Session archived to `<data_dir>/groups/<chat_id>/conversations/<timestamp>.md` |
+| 5.5 | Context compaction trigger | Chat beyond max_session_messages threshold | Old messages auto-summarized; recent messages kept verbatim |
+| 5.6 | Memory after compaction | After compaction, ask about an early topic | Bot recalls key facts from summary (details may be lost) |
+| 5.7 | Corrupted session recovery | Manually corrupt sessions table JSON, then send message | Falls back to DB history, no crash |
+| 5.8 | Session survives restart | Chat several turns → restart bot → continue chatting | Session loaded from DB, conversation continues seamlessly |
 
 ---
 
-## 9. Web Search
+## 6. Group Chat
 
-**Test:** Ask the bot to search the web.
-
-```
-You: Search the web for "Rust programming language"
-```
-
-**Expected:** The bot uses the `web_search` tool, returns results with titles, URLs, and snippets from DuckDuckGo. Output should show numbered results.
-
----
-
-## 10. Web Fetch
-
-**Test:** Ask the bot to fetch a web page.
-
-```
-You: Fetch https://example.com and tell me what it says
-```
-
-**Expected:** The bot fetches the page, strips HTML tags, and returns the plain text content. The response should mention "Example Domain" (the content of example.com).
+| # | User Story | Steps | Expected |
+|---|-----------|-------|----------|
+| 6.1 | No @mention = no reply | Send plain message in group | Bot does not reply; message is stored in DB |
+| 6.2 | @mention triggers reply | Send `@botusername hello` | Bot responds |
+| 6.3 | Group catch-up | Multiple users send messages, then @bot "summarize" | Bot's response covers ALL messages since its last reply |
+| 6.4 | allowed_groups whitelist (allowed) | Configure allowed_groups with current group ID | @mention works normally |
+| 6.5 | allowed_groups whitelist (blocked) | Configure allowed_groups WITHOUT current group ID | @mention gets no response; messages still stored |
+| 6.6 | allowed_groups empty | Set allowed_groups to [] or omit | All groups can @mention and get replies |
+| 6.7 | Multi-group isolation | Chat in Group A, then @mention in Group B | Group B has independent session/memory, unaffected by Group A |
 
 ---
 
-## 11. Send Message (Mid-Conversation)
+## 7. Tool -- Bash Execution
 
-**Test:** Ask the bot to send an intermediate message before its final response.
-
-```
-You: Send me a progress update saying "Working on it..." and then tell me the current date
-```
-
-**Expected:** You receive TWO messages:
-1. "Working on it..." (sent via the `send_message` tool)
-2. The final response with the current date
-
----
-
-## 12. Send Message -- Empty Final Response
-
-**Test:** Ask the bot to only use send_message without a final text response.
-
-```
-You: Use the send_message tool to tell me "Hello from send_message!" and don't say anything else
-```
-
-**Expected:** You receive exactly one message: "Hello from send_message!". No "(no response)" or empty message should be sent.
+| # | User Story | Steps | Expected |
+|---|-----------|-------|----------|
+| 7.1 | Simple command | "Run `echo hello world`" | Returns "hello world" |
+| 7.2 | Non-zero exit code | "Run `exit 1`" | Reports exit code 1 |
+| 7.3 | stderr output | "Run `ls /nonexistent 2>&1`" | Returns stderr content |
+| 7.4 | Command timeout | "Run `sleep 300`" | Times out after 120s |
+| 7.5 | Output truncation | Command producing >30KB output | Output truncated with marker |
+| 7.6 | Multi-step command | "Count the .rs files in this directory" | Bot uses bash correctly, returns result |
 
 ---
 
-## 13. Schedule Task -- Create (Cron)
+## 8. Tool -- File Operations
 
-**Test:** Schedule a recurring task.
-
-```
-You: Schedule a task to say "Hello, this is your 5-minute reminder!" every 5 minutes
-```
-
-**Expected:** The bot creates a scheduled task and responds with something like "Task #1 scheduled. Next run: [timestamp]". The cron expression should be `0 */5 * * * *`.
-
----
-
-## 14. Schedule Task -- Create (One-Time)
-
-**Test:** Schedule a one-time task.
-
-```
-You: Schedule a one-time task to say "Time's up!" at 2025-12-31T23:59:00+00:00
-```
-
-**Expected:** The bot creates a task with `schedule_type: "once"` and confirms with the task ID.
+| # | User Story | Steps | Expected |
+|---|-----------|-------|----------|
+| 8.1 | Create file | "Create /tmp/test.txt with content hello" | File created successfully |
+| 8.2 | Read file | "Read /tmp/test.txt" | Returns file content with line numbers |
+| 8.3 | Edit file | "Change hello to world in /tmp/test.txt" | Find-replace succeeds |
+| 8.4 | Read nonexistent file | "Read /nonexistent/file.txt" | Error: file not found, no crash |
+| 8.5 | Edit non-unique string | File has multiple "hello", request replace | Error: string not unique |
+| 8.6 | Read with offset/limit | "Read /tmp/big.txt from line 100, 20 lines" | Returns specified range |
+| 8.7 | Auto-create directories | "Create /tmp/a/b/c/test.txt" | Intermediate directories auto-created, file written |
+| 8.8 | Path guard: .ssh | "Read ~/.ssh/id_rsa" | Blocked by path_guard |
+| 8.9 | Path guard: .env | "Read .env" | Blocked by path_guard |
+| 8.10 | Path guard: .aws | "Read ~/.aws/credentials" | Blocked by path_guard |
+| 8.11 | Path guard: /etc/shadow | "Read /etc/shadow" | Blocked by path_guard |
 
 ---
 
-## 15. List Scheduled Tasks
+## 9. Tool -- File Search
 
-**Test:** List all tasks for this chat.
-
-```
-You: List my scheduled tasks
-```
-
-**Expected:** Shows all active/paused tasks with their IDs, status, prompts, schedule expressions, and next run times.
-
----
-
-## 16. Pause Scheduled Task
-
-**Test:** Pause a running task.
-
-```
-You: Pause task #1
-```
-
-**Expected:** The bot confirms "Task #1 paused." Listing tasks again should show status as "paused".
+| # | User Story | Steps | Expected |
+|---|-----------|-------|----------|
+| 9.1 | Glob search | "Find all .rs files in the project" | Returns matching file list |
+| 9.2 | Glob no match | "Find *.xyz files" | Returns empty result or "no matches" |
+| 9.3 | Grep content search | "Search for 'fn main' in source code" | Returns file names, line numbers, matching content |
+| 9.4 | Grep regex search | "Search for `async fn.*execute`" | Regex matching works correctly |
+| 9.5 | Grep no match | "Search for 'xyznotexist123'" | Returns no matches |
+| 9.6 | Search excludes sensitive paths | Glob/Grep results | path_guard filters sensitive paths from results |
 
 ---
 
-## 17. Resume Scheduled Task
+## 10. Tool -- Web Search & Fetch
 
-**Test:** Resume a paused task.
-
-```
-You: Resume task #1
-```
-
-**Expected:** The bot confirms "Task #1 resumed." Listing tasks again should show status as "active".
-
----
-
-## 18. Cancel Scheduled Task
-
-**Test:** Cancel a task permanently.
-
-```
-You: Cancel task #1
-```
-
-**Expected:** The bot confirms "Task #1 cancelled." The task should no longer appear in the active list.
+| # | User Story | Steps | Expected |
+|---|-----------|-------|----------|
+| 10.1 | Web search | "Search for Rust programming language" | Returns DuckDuckGo results (title + URL + snippet) |
+| 10.2 | Web search no results | Search for extremely obscure keywords | Returns empty or "no results" |
+| 10.3 | Web fetch | "Fetch https://example.com" | Returns plain text with HTML tags stripped |
+| 10.4 | Web fetch large page | Fetch page >20KB | Content truncated to 20KB |
+| 10.5 | Web fetch invalid URL | "Fetch https://thisdomaindoesnotexist12345.com" | Returns network error, no crash |
+| 10.6 | Combined web research | "Look up today's news and summarize" | Bot combines web_search + web_fetch to complete task |
 
 ---
 
-## 19. Scheduler Execution
+## 11. Tool -- Mid-Conversation Messaging
 
-**Test:** Verify the scheduler actually runs due tasks.
-
-1. Schedule a task to run every 1 minute:
-   ```
-   You: Schedule a task to say "Ping! The scheduler works." every minute
-   ```
-2. Wait 60-90 seconds.
-
-**Expected:** You receive a message "Ping! The scheduler works." (or the agent's response to that prompt) automatically, without sending any new message.
+| # | User Story | Steps | Expected |
+|---|-----------|-------|----------|
+| 11.1 | Progress update | "Send 'Processing...' first, then tell me today's date" | Receive TWO messages: progress + final reply |
+| 11.2 | Only send_message | "Use send_message to say 'test' and nothing else" | Receive exactly ONE message "test", no empty reply |
+| 11.3 | Cross-chat send (regular user) | "Send a message to chat_id 99999" | Permission denied |
+| 11.4 | Cross-chat send (control chat) | From control_chat_id, specify another chat_id | Message sent successfully |
 
 ---
 
-## 20. Group Chat -- Message Storage
+## 12. Memory System
 
-**Test:** In a group chat, send messages without mentioning the bot.
-
-```
-Alice: Hey everyone
-Bob: What's up?
-Charlie: Working on the project
-```
-
-**Expected:** No bot response (correct -- bot only responds to @mentions in groups). But messages are stored in the database.
-
----
-
-## 21. Group Chat -- @mention Response
-
-**Test:** Mention the bot in a group chat.
-
-```
-You: @botusername what files are in the current directory?
-```
-
-**Expected:** The bot responds to the mention and uses tools as needed.
+| # | User Story | Steps | Expected |
+|---|-----------|-------|----------|
+| 12.1 | Write chat memory | "Remember I like Rust" | Written to `<data_dir>/groups/{chat_id}/CLAUDE.md` |
+| 12.2 | Read chat memory | "What language do I like?" | Bot recalls "Rust" from memory |
+| 12.3 | Memory persists across /reset | `/reset`, then "What do I like?" | Still recalls (memory is independent of session) |
+| 12.4 | Memory persists across restart | Restart bot, then ask | Still recalls (memory is file-persisted) |
+| 12.5 | Write global memory (control) | From control chat, write global memory | Written to `<data_dir>/groups/CLAUDE.md` |
+| 12.6 | Write global memory (regular) | From regular chat, attempt global write | "Permission denied: chat {id} cannot write global memory" |
+| 12.7 | Read empty memory | New chat, first read | "No memory file found (not yet created)." |
+| 12.8 | Memory overwrite | Write twice with different content | Second write completely replaces first |
+| 12.9 | Cross-chat read memory (regular) | Read another chat_id's memory | Permission denied |
+| 12.10 | Cross-chat read memory (control) | From control chat, read other chat memory | Returns content normally |
 
 ---
 
-## 22. Group Chat -- Catch-Up
+## 13. Scheduled Tasks
 
-**Test:** Verify the bot sees all messages since its last reply.
-
-1. In a group chat, have multiple users send messages (or send several yourself).
-2. Then mention the bot:
-   ```
-   Alice: I changed the database port to 5433
-   Bob: And I updated the config file
-   Charlie: @botusername summarize what happened
-   ```
-
-**Expected:** The bot's response references ALL messages since its last response in the group (Alice's port change, Bob's config update), not just the last N messages. This tests the `get_messages_since_last_bot_response` catch-up query.
-
----
-
-## 23. Long Responses -- Message Splitting
-
-**Test:** Ask for a long response that exceeds 4096 characters.
-
-```
-You: Write a 5000-character essay about the history of computing
-```
-
-**Expected:** The response is split across multiple Telegram messages at newline boundaries. No truncation, no errors.
+| # | User Story | Steps | Expected |
+|---|-----------|-------|----------|
+| 13.1 | Create cron task | "Remind me to drink water every 5 minutes" | Returns Task #{id} scheduled, cron: `0 */5 * * * *` |
+| 13.2 | Create one-time task | "Send 'Happy New Year' at 2099-12-31T23:59:00+00:00" | Returns Task #{id} scheduled (once) |
+| 13.3 | Task actually fires | Create per-minute task, wait 60-90s | Automatically receive task execution result |
+| 13.4 | List tasks | "List my scheduled tasks" | Shows all active/paused tasks with details |
+| 13.5 | Pause task | "Pause task #1" | Confirmed paused; task stops firing |
+| 13.6 | Resume task | "Resume task #1" | Confirmed resumed; task resumes firing |
+| 13.7 | Cancel task | "Cancel task #1" | Confirmed cancelled; permanently stopped |
+| 13.8 | View execution history | "Show task #1 execution history" | Shows recent runs (time, duration, success/fail, summary) |
+| 13.9 | Nonexistent task | "Pause task #9999" | "Task #9999 not found" |
+| 13.10 | Invalid cron expression | Pass "not a cron" | Invalid cron expression error |
+| 13.11 | Invalid timezone | Create task with timezone "invalid" | Invalid timezone error |
+| 13.12 | Cross-chat schedule (regular) | Regular chat schedules for other chat_id | Permission denied |
+| 13.13 | Cross-chat schedule (control) | Control chat schedules for other chat_id | Created successfully |
+| 13.14 | Empty task list | New chat lists tasks | "No scheduled tasks found for this chat." |
+| 13.15 | One-time task completion | Create imminent one-time task | After firing, status becomes "completed" |
 
 ---
 
-## 24. Error Handling
+## 14. Todo System
 
-**Test:** Trigger an error condition.
-
-```
-You: Read the file /nonexistent/path/to/file.txt
-```
-
-**Expected:** The bot reports the error gracefully (file not found) rather than crashing.
-
----
-
-## 25. Session Resume
-
-**Test:** Verify that tool interactions persist across messages.
-
-1. Ask the bot to do something involving tools:
-   ```
-   You: Create a file /tmp/session_test.txt with "hello"
-   ```
-2. Wait for the response, then send a follow-up:
-   ```
-   You: What did you just create?
-   ```
-
-**Expected:** The bot remembers the tool interaction (file creation) from the previous message, even though it was a separate invocation. It should reference the file without needing to re-read it.
+| # | User Story | Steps | Expected |
+|---|-----------|-------|----------|
+| 14.1 | Read empty todo | New chat, read todos | "No tasks in the todo list." |
+| 14.2 | Create todo list | "Create 3 todo items for me" | Bot uses todo_write, returns formatted list |
+| 14.3 | Update todo status | "Mark the first item as completed" | Bot reads existing → modifies status → writes back |
+| 14.4 | Todo full replacement | Write, then write completely different list | Old list fully replaced |
+| 14.5 | Cross-chat read todo (regular) | Read another chat_id's todos | Permission denied |
+| 14.6 | Cross-chat read todo (control) | Control chat reads other chat_id's todos | Returns normally |
+| 14.7 | Todo status icons | Create list with pending/in_progress/completed | Shows `[ ]`, `[~]`, `[x]` respectively |
 
 ---
 
-## 26. Session Reset (/reset)
+## 15. Chat Export
 
-**Test:** Verify that `/reset` clears session state.
-
-1. Have a conversation with tool use.
-2. Send `/reset`.
-3. Ask a follow-up about the previous conversation.
-
-```
-You: /reset
-Bot: Session cleared.
-You: What did we just talk about?
-```
-
-**Expected:** After `/reset`, the bot should not remember tool interactions from the previous session. It falls back to DB message history (text only, no tool blocks).
+| # | User Story | Steps | Expected |
+|---|-----------|-------|----------|
+| 15.1 | Export current chat | "Export this chat's history" | Generates markdown file, returns path and message count |
+| 15.2 | Export to specific path | Specify path parameter | File written to specified path |
+| 15.3 | Export empty chat | Export chat_id with no messages | "No messages found for chat {id}." |
+| 15.4 | Export format verification | Export, then read the file | Each message: `**{sender}** ({timestamp})\n\n{content}\n\n---` |
+| 15.5 | Cross-chat export (regular) | Export another chat_id | Permission denied |
+| 15.6 | Cross-chat export (control) | Control chat exports other chat_id | Exported successfully |
 
 ---
 
-## 27. Context Compaction
+## 16. Sub-Agent
 
-**Test:** Verify sessions don't grow unbounded.
-
-1. Have a long conversation (40+ back-and-forth messages) with the bot.
-2. Continue chatting.
-
-**Expected:** The bot continues to function normally even after many messages. Earlier conversation context is summarized rather than lost. You can verify by asking about something discussed early in the conversation.
-
-**Note:** Set `max_session_messages: 10` and `compact_keep_recent: 5` in `microclaw.config.yaml` for easier testing.
-
----
-
-## 28. Multi-Chat Permission Model -- Deny Path
-
-**Test:** From a non-control chat, attempt cross-chat operation.
-
-```
-You: Send a message to chat_id 123456 saying "hello from cross-chat test"
-```
-
-**Expected:** Tool call is blocked with a permission error (chat cannot operate on another chat).
+| # | User Story | Steps | Expected |
+|---|-----------|-------|----------|
+| 16.1 | Basic sub-agent task | "Use sub_agent to count .rs files in this project" | Sub-agent uses glob/bash, result returned to main conversation |
+| 16.2 | Sub-agent cannot schedule | "Use sub_agent to create a scheduled task" | Sub-agent reports no scheduling tools available |
+| 16.3 | Sub-agent cannot send_message | "Use sub_agent to send me a message" | Sub-agent reports no send_message tool |
+| 16.4 | Sub-agent cannot write memory | "Use sub_agent to save a memory" | Sub-agent has no write_memory tool |
+| 16.5 | Sub-agent cannot recurse | "Use sub_agent to start another sub_agent" | Sub-agent has no sub_agent tool |
+| 16.6 | Sub-agent iteration limit | Give sub-agent a task requiring >10 iterations | Returns "reached maximum iterations" |
+| 16.7 | Sub-agent with context | Pass context parameter to sub-agent | Sub-agent uses the extra context to complete task |
 
 ---
 
-## 29. Multi-Chat Permission Model -- Allow Path
+## 17. Browser Automation
 
-**Test:** Add current chat to `control_chat_ids`, restart bot, then retry cross-chat operation.
-
-```yaml
-# microclaw.config.yaml
-control_chat_ids: [CURRENT_CHAT_ID]
-```
-
-```
-You: Send a message to chat_id 123456 saying "hello from control chat"
-```
-
-**Expected:** Permission layer allows the tool call. Final delivery still depends on target chat reachability and platform constraints.
+| # | User Story | Steps | Expected |
+|---|-----------|-------|----------|
+| 17.1 | Open webpage | "Open https://example.com in browser" | Returns page content/status |
+| 17.2 | Get page text | After opening, "get the page title" | Returns "Example Domain" |
+| 17.3 | Screenshot | "Take a screenshot of the current page" | Screenshot saved successfully |
+| 17.4 | Timeout handling | Open a very slow page | Returns timeout message after 30s |
+| 17.5 | Browser session persistence | Log into a site, then restart conversation | Browser profile retains cookies/localStorage |
+| 17.6 | Output truncation | Get content of a very large page | Output truncated to 30000 characters |
 
 ---
 
-## 28. Sub-Agent
+## 18. Skills System
 
-**Test:** Verify the sub_agent tool works.
-
-```
-You: Use the sub_agent tool to find all .rs files in this project and count them
-```
-
-**Expected:** The bot delegates to a sub-agent, which uses glob/bash to find the files. The result is returned in the main conversation. Check logs for "Sub-agent starting task" and "Sub-agent executing tool" messages.
-
----
-
-## 29. Sub-Agent Restriction
-
-**Test:** Verify the sub-agent cannot use restricted tools.
-
-```
-You: Use the sub_agent tool to schedule a task that runs every minute
-```
-
-**Expected:** The sub-agent should not have access to scheduling tools. It should report that it cannot schedule tasks or that the tool is not available.
+| # | User Story | Steps | Expected |
+|---|-----------|-------|----------|
+| 18.1 | /skills list | Send `/skills` | Lists all available skills (name + description) |
+| 18.2 | /skills when empty | Delete skills directory, send `/skills` | "No skills available." |
+| 18.3 | Activate skill | Ask bot to use a specific skill | Bot uses activate_skill to load full instructions |
+| 18.4 | Skill auto-discovery | Add new skill directory + SKILL.md under `<data_dir>/skills/` | After restart, `/skills` shows new skill |
 
 ---
 
-## 30. Regression -- Multiple Tool Iterations (unchanged from #25)
+## 19. MCP Integration
 
-**Test:** Ask for a task that requires multiple tool calls.
+| # | User Story | Steps | Expected |
+|---|-----------|-------|----------|
+| 19.1 | MCP tools loaded | Configure mcp.json, start bot | Log: "MCP initialized: N tools available" |
+| 19.2 | MCP tool usage | Ask bot to use an MCP-provided tool | MCP server called, result returned |
+| 19.3 | No MCP config | Start without mcp.json | Normal startup, no MCP logs |
 
-```
-You: Find all TODO comments in this project's source code, then create a summary file at /tmp/todos.txt
-```
+---
 
-**Expected:** The bot uses grep to search, reads relevant files, writes the summary -- multiple tool iterations in one request.
+## 20. Multi-Step Tool Use (Agentic Loop)
+
+| # | User Story | Steps | Expected |
+|---|-----------|-------|----------|
+| 20.1 | Multi-step task | "Find all TODO comments and write to /tmp/todos.txt" | Bot uses grep → read_file → write_file across multiple iterations |
+| 20.2 | Error recovery | Request reading nonexistent file; bot should adapt | Bot receives tool error, adjusts strategy |
+| 20.3 | Iteration limit reached | Send request requiring >max_tool_iterations | "I reached the maximum number of tool iterations..." |
+| 20.4 | Tool composition | "Find the longest function and summarize it" | Bot combines grep → read_file → analysis |
+
+---
+
+## 21. Permission Model Matrix
+
+| # | Operation | Regular→Self | Regular→Other | Control→Other |
+|---|----------|-------------|--------------|--------------|
+| 21.1 | send_message | Allow | Deny | Allow |
+| 21.2 | schedule_task | Allow | Deny | Allow |
+| 21.3 | pause/resume/cancel_task | Allow (own) | Deny | Allow |
+| 21.4 | list_tasks | Allow (own) | Deny | Allow |
+| 21.5 | get_task_history | Allow (own) | Deny | Allow |
+| 21.6 | write_memory (chat) | Allow | Deny | Allow |
+| 21.7 | write_memory (global) | Deny | N/A | Allow |
+| 21.8 | read_memory (chat) | Allow | Deny | Allow |
+| 21.9 | export_chat | Allow | Deny | Allow |
+| 21.10 | todo_read/write | Allow | Deny | Allow |
+
+---
+
+## 22. Security -- Path Guard
+
+| # | Test Path | Expected |
+|---|----------|----------|
+| 22.1 | `~/.ssh/id_rsa` | Blocked |
+| 22.2 | `~/.ssh/known_hosts` | Blocked |
+| 22.3 | `~/.aws/credentials` | Blocked |
+| 22.4 | `~/.gnupg/*` | Blocked |
+| 22.5 | `.env` | Blocked |
+| 22.6 | `.env.local` / `.env.production` | Blocked |
+| 22.7 | `~/.kube/config` | Blocked |
+| 22.8 | `~/.config/gcloud/*` | Blocked |
+| 22.9 | `/etc/shadow` | Blocked |
+| 22.10 | `/etc/sudoers` | Blocked |
+| 22.11 | `~/.netrc` | Blocked |
+| 22.12 | `~/.npmrc` | Blocked |
+| 22.13 | Path traversal `../../.ssh/id_rsa` | Still blocked |
+| 22.14 | Normal path `/tmp/test.txt` | Allowed |
+
+---
+
+## 23. Discord Platform
+
+| # | User Story | Steps | Expected |
+|---|-----------|-------|----------|
+| 23.1 | DM direct reply | Send DM to bot on Discord | Bot responds directly |
+| 23.2 | Server requires @mention | Send message without @mention in server channel | No reply; message stored |
+| 23.3 | Server @mention | @Bot in server channel | Bot responds |
+| 23.4 | Response splitting | Trigger response >2000 chars | Split at newline boundaries, max 2000 chars per message |
+| 23.5 | /reset command | Send `/reset` | Discord chat session cleared |
+| 23.6 | /skills command | Send `/skills` | Lists available skills |
+| 23.7 | /archive command | Send `/archive` | Archives current session |
+| 23.8 | allowed_channels whitelist | Configure discord_allowed_channels | Only responds in allowed channels |
+| 23.9 | Ignore other bots | Another bot sends a message | Bot does not respond |
+
+---
+
+## 24. WhatsApp Platform
+
+| # | User Story | Steps | Expected |
+|---|-----------|-------|----------|
+| 24.1 | Webhook verification (valid) | GET `/webhook` with correct verify_token | Returns challenge |
+| 24.2 | Webhook verification (invalid) | GET `/webhook` with wrong verify_token | Rejected |
+| 24.3 | Text message processing | Send text via WhatsApp | Bot responds |
+| 24.4 | Non-text message | Send image/audio | Silently skipped, no crash |
+| 24.5 | /reset command | Send `/reset` | Session cleared |
+| 24.6 | Response splitting | Trigger long response | Split at 4096-char boundaries |
+| 24.7 | Send failure | WhatsApp API unreachable | Error logged; HTTP 200 still returned |
+
+---
+
+## 25. Gateway Service Management
+
+| # | User Story | Steps | Expected |
+|---|-----------|-------|----------|
+| 25.1 | Install service | `microclaw gateway install` | macOS: LaunchAgent; Linux: systemd service |
+| 25.2 | Start service | `microclaw gateway start` | Service starts |
+| 25.3 | Check status | `microclaw gateway status` | Reports running state |
+| 25.4 | View logs | `microclaw gateway logs 50` | Shows last 50 log lines |
+| 25.5 | Stop service | `microclaw gateway stop` | Service stops |
+| 25.6 | Uninstall service | `microclaw gateway uninstall` | Service removed |
+
+---
+
+## 26. Error Handling & Recovery
+
+| # | User Story | Steps | Expected |
+|---|-----------|-------|----------|
+| 26.1 | API rate limiting | Trigger Anthropic 429 response | Exponential backoff retry, up to 3 attempts |
+| 26.2 | API unavailable | API completely unreachable | Returns "Error: {message}", no crash |
+| 26.3 | DB corruption recovery | Delete DB file, then send message | Recreates DB or reports error, no crash |
+| 26.4 | Tool execution exception | Tool internal panic/error | ToolResult::error returned to Claude, agentic loop continues |
+| 26.5 | No messages to process | Empty history | "I didn't receive any message to process." |
+| 26.6 | Role merge: consecutive user | DB history has user+user messages | Auto-merged into one user message |
+| 26.7 | Role fix: trailing assistant | History ends with assistant message | Trailing assistant message auto-removed |
 
 ---
 
 ## Database Verification
 
-After running tests, you can verify the database directly:
+After running tests, verify the database directly:
 
 ```sh
 sqlite3 microclaw.data/runtime/microclaw.db
@@ -461,6 +416,9 @@ SELECT * FROM chats;
 
 -- Check sessions
 SELECT chat_id, length(messages_json), updated_at FROM sessions;
+
+-- Check task run logs
+SELECT * FROM task_run_logs ORDER BY started_at DESC LIMIT 10;
 ```
 
 ---
@@ -471,7 +429,7 @@ After testing:
 
 ```sh
 # Remove test files
-rm -f /tmp/microclaw_test.txt /tmp/todos.txt
+rm -f /tmp/microclaw_test.txt /tmp/todos.txt /tmp/test.txt /tmp/session_test.txt
 
 # Cancel any remaining scheduled tasks via the bot, or:
 sqlite3 microclaw.data/runtime/microclaw.db "UPDATE scheduled_tasks SET status='cancelled' WHERE status='active';"

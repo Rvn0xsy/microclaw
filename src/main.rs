@@ -1,24 +1,6 @@
-mod builtin_skills;
-mod claude;
-mod config;
-mod db;
-mod discord;
-mod error;
-mod gateway;
-mod llm;
-mod logging;
-mod mcp;
-mod memory;
-mod scheduler;
-mod setup;
-mod skills;
-mod telegram;
-mod tools;
-mod transcribe;
-mod whatsapp;
-
-use config::Config;
-use error::MicroClawError;
+use microclaw::config::Config;
+use microclaw::error::MicroClawError;
+use microclaw::{builtin_skills, db, gateway, logging, mcp, memory, setup, skills, telegram};
 use std::path::Path;
 use tracing::info;
 
@@ -242,7 +224,12 @@ async fn main() -> anyhow::Result<()> {
     let skills_data_dir = config.skills_data_dir();
     migrate_legacy_runtime_layout(&data_root_dir, Path::new(&runtime_data_dir));
     builtin_skills::ensure_builtin_skills(&data_root_dir)?;
-    logging::init_logging(&runtime_data_dir)?;
+
+    if std::env::var("MICROCLAW_GATEWAY").is_ok() {
+        logging::init_logging(&runtime_data_dir)?;
+    } else {
+        logging::init_console_logging();
+    }
 
     let db = db::Database::new(&runtime_data_dir)?;
     info!("Database initialized");

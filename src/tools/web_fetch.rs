@@ -81,3 +81,47 @@ async fn fetch_url(url: &str) -> Result<String, String> {
         Ok(text)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_web_fetch_definition() {
+        let tool = WebFetchTool;
+        assert_eq!(tool.name(), "web_fetch");
+        let def = tool.definition();
+        assert_eq!(def.name, "web_fetch");
+        assert!(def.description.contains("20KB"));
+        assert!(def.input_schema["properties"]["url"].is_object());
+        let required = def.input_schema["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v == "url"));
+    }
+
+    #[tokio::test]
+    async fn test_web_fetch_missing_url() {
+        let tool = WebFetchTool;
+        let result = tool.execute(json!({})).await;
+        assert!(result.is_error);
+        assert!(result.content.contains("Missing required parameter: url"));
+    }
+
+    #[tokio::test]
+    async fn test_web_fetch_null_url() {
+        let tool = WebFetchTool;
+        let result = tool.execute(json!({"url": null})).await;
+        assert!(result.is_error);
+        assert!(result.content.contains("Missing required parameter: url"));
+    }
+
+    #[tokio::test]
+    async fn test_web_fetch_invalid_url() {
+        let tool = WebFetchTool;
+        let result = tool
+            .execute(json!({"url": "https://this-domain-does-not-exist-12345.example"}))
+            .await;
+        assert!(result.is_error);
+        assert!(result.content.contains("Failed to fetch URL"));
+    }
+}

@@ -313,4 +313,106 @@ mod tests {
             .skills_data_dir()
             .ends_with("microclaw.data/runtime/skills"));
     }
+
+    #[test]
+    fn test_post_deserialize_invalid_timezone() {
+        let yaml = "telegram_bot_token: tok\nbot_username: bot\napi_key: key\ntimezone: Mars/Olympus\n";
+        let mut config: Config = serde_yaml::from_str(yaml).unwrap();
+        let err = config.post_deserialize().unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Invalid timezone"));
+    }
+
+    #[test]
+    fn test_post_deserialize_missing_api_key() {
+        let yaml = "telegram_bot_token: tok\nbot_username: bot\n";
+        let mut config: Config = serde_yaml::from_str(yaml).unwrap();
+        let err = config.post_deserialize().unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("api_key is required"));
+    }
+
+    #[test]
+    fn test_post_deserialize_missing_bot_tokens() {
+        let yaml = "bot_username: bot\napi_key: key\n";
+        let mut config: Config = serde_yaml::from_str(yaml).unwrap();
+        let err = config.post_deserialize().unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("telegram_bot_token or discord_bot_token"));
+    }
+
+    #[test]
+    fn test_post_deserialize_discord_only() {
+        let yaml = "bot_username: bot\napi_key: key\ndiscord_bot_token: discord_tok\n";
+        let mut config: Config = serde_yaml::from_str(yaml).unwrap();
+        // Should succeed: discord_bot_token is set even though telegram_bot_token is empty
+        config.post_deserialize().unwrap();
+    }
+
+    #[test]
+    fn test_post_deserialize_openai_default_model() {
+        let yaml = "telegram_bot_token: tok\nbot_username: bot\napi_key: key\nllm_provider: openai\n";
+        let mut config: Config = serde_yaml::from_str(yaml).unwrap();
+        config.post_deserialize().unwrap();
+        assert_eq!(config.model, "gpt-4o");
+    }
+
+    #[test]
+    fn test_post_deserialize_empty_base_url_becomes_none() {
+        let yaml = "telegram_bot_token: tok\nbot_username: bot\napi_key: key\nllm_base_url: '  '\n";
+        let mut config: Config = serde_yaml::from_str(yaml).unwrap();
+        config.post_deserialize().unwrap();
+        assert!(config.llm_base_url.is_none());
+    }
+
+    #[test]
+    fn test_post_deserialize_provider_case_insensitive() {
+        let yaml = "telegram_bot_token: tok\nbot_username: bot\napi_key: key\nllm_provider: '  ANTHROPIC  '\n";
+        let mut config: Config = serde_yaml::from_str(yaml).unwrap();
+        config.post_deserialize().unwrap();
+        assert_eq!(config.llm_provider, "anthropic");
+        assert_eq!(config.model, "claude-sonnet-4-20250514");
+    }
+
+    #[test]
+    fn test_config_yaml_with_all_optional_fields() {
+        let yaml = r#"
+telegram_bot_token: tok
+bot_username: bot
+api_key: key
+openai_api_key: sk-test
+timezone: US/Eastern
+allowed_groups: [123, 456]
+control_chat_ids: [999]
+max_session_messages: 60
+compact_keep_recent: 30
+whatsapp_access_token: wa_token
+whatsapp_phone_number_id: phone_id
+whatsapp_verify_token: verify
+whatsapp_webhook_port: 9090
+discord_bot_token: discord_tok
+discord_allowed_channels: [111, 222]
+"#;
+        let mut config: Config = serde_yaml::from_str(yaml).unwrap();
+        config.post_deserialize().unwrap();
+        assert_eq!(config.openai_api_key.as_deref(), Some("sk-test"));
+        assert_eq!(config.timezone, "US/Eastern");
+        assert_eq!(config.allowed_groups, vec![123, 456]);
+        assert_eq!(config.control_chat_ids, vec![999]);
+        assert_eq!(config.max_session_messages, 60);
+        assert_eq!(config.compact_keep_recent, 30);
+        assert_eq!(config.whatsapp_webhook_port, 9090);
+        assert_eq!(config.discord_allowed_channels, vec![111, 222]);
+    }
+
+    #[test]
+    fn test_config_save_yaml() {
+        let config = test_config();
+        let dir = std::env::temp_dir();
+        let path = dir.join("microclaw_test_config.yaml");
+        config.save_yaml(path.to_str().unwrap()).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("telegram_bot_token"));
+        std::fs::remove_file(path).ok();
+    }
 }
