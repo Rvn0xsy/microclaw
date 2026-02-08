@@ -119,7 +119,13 @@ microclaw.data/skills/
 2. When the model determines a skill is relevant, it calls `activate_skill` to load the full instructions
 3. The model follows the skill instructions to complete the task
 
-**Built-in skills:** pdf, docx, xlsx, pptx, skill-creator
+**Built-in skills:** pdf, docx, xlsx, pptx, skill-creator, apple-notes, apple-reminders, apple-calendar, weather
+
+**New macOS skills (examples):**
+- `apple-notes` -- manage Apple Notes via `memo`
+- `apple-reminders` -- manage Apple Reminders via `remindctl`
+- `apple-calendar` -- query/create Calendar events via `icalBuddy` + `osascript`
+- `weather` -- quick weather lookup via `wttr.in`
 
 **Adding a skill:** Create a subdirectory under `microclaw.data/skills/` with a `SKILL.md` file containing YAML frontmatter (`name` and `description`) and markdown instructions.
 

@@ -118,7 +118,13 @@ microclaw.data/skills/
 2. 当 Claude 判断某技能相关时，调用 `activate_skill` 加载完整指令
 3. Claude 按技能指令完成任务
 
-**内置技能：** pdf、docx、xlsx、pptx、skill-creator
+**内置技能：** pdf、docx、xlsx、pptx、skill-creator、apple-notes、apple-reminders、apple-calendar、weather
+
+**新增 macOS 相关技能（示例）：**
+- `apple-notes` -- 通过 `memo` 管理 Apple Notes
+- `apple-reminders` -- 通过 `remindctl` 管理 Apple Reminders
+- `apple-calendar` -- 通过 `icalBuddy` + `osascript` 查询/创建日历事件
+- `weather` -- 通过 `wttr.in` 快速查询天气
 
 **添加技能：** 在 `microclaw.data/skills/` 下创建子目录，放入包含 YAML frontmatter（`name` 和 `description`）和 markdown 指令的 `SKILL.md` 文件。
 

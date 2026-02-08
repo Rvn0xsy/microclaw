@@ -73,4 +73,25 @@ mod tests {
         assert_eq!(content, "custom-content");
         cleanup(&root);
     }
+
+    #[test]
+    fn test_ensure_builtin_skills_includes_new_macos_and_weather_skills() {
+        let root = temp_root();
+        ensure_builtin_skills(&root).unwrap();
+
+        let skills_root = root.join("skills");
+        for skill in [
+            "apple-notes",
+            "apple-reminders",
+            "apple-calendar",
+            "weather",
+        ] {
+            let skill_file = skills_root.join(skill).join("SKILL.md");
+            assert!(skill_file.exists(), "missing built-in skill: {skill}");
+            let content = std::fs::read_to_string(skill_file).unwrap();
+            assert!(!content.trim().is_empty(), "empty skill file: {skill}");
+        }
+
+        cleanup(&root);
+    }
 }
