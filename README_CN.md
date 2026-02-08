@@ -290,6 +290,29 @@ timezone: "UTC"
 microclaw start
 ```
 
+### 5. 作为常驻 gateway 服务运行（可选）
+
+```sh
+microclaw gateway install
+microclaw gateway status
+```
+
+服务生命周期管理：
+
+```sh
+microclaw gateway start
+microclaw gateway stop
+microclaw gateway logs 200
+microclaw gateway uninstall
+```
+
+说明：
+- macOS 使用 `launchd` 用户级服务
+- Linux 使用 `systemd --user`
+- 运行日志写入 `microclaw.data/runtime/logs/`
+- 日志按小时分片：`microclaw-YYYY-MM-DD-HH.log`
+- 超过 30 天的日志会自动删除
+
 ## 配置项
 
 所有配置都在 `microclaw.config.yaml` 中。

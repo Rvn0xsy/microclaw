@@ -4,7 +4,9 @@ mod config;
 mod db;
 mod discord;
 mod error;
+mod gateway;
 mod llm;
+mod logging;
 mod mcp;
 mod memory;
 mod scheduler;
@@ -31,6 +33,7 @@ USAGE:
 
 COMMANDS:
     start       Start the bot (Telegram + optional WhatsApp/Discord)
+    gateway     Manage gateway service (install/uninstall/start/stop/status/logs)
     setup       Run interactive setup wizard
     version     Show version information
     help        Show this help message
@@ -101,6 +104,9 @@ MCP (optional):
 
 EXAMPLES:
     microclaw start          Start the bot
+    microclaw gateway install Install and enable gateway service
+    microclaw gateway status Show gateway service status
+    microclaw gateway logs 100 Show last 100 lines of gateway logs
     microclaw setup          Run interactive setup wizard
     microclaw version        Show version
     microclaw help           Show this message
@@ -186,6 +192,10 @@ async fn main() -> anyhow::Result<()> {
 
     match command {
         Some("start") => {}
+        Some("gateway") => {
+            gateway::handle_gateway_cli(&args[2..])?;
+            return Ok(());
+        }
         Some("setup") => {
             let saved = setup::run_setup_wizard()?;
             if saved {
@@ -210,13 +220,6 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into()),
-        )
-        .init();
-
     let config = match Config::load() {
         Ok(c) => c,
         Err(MicroClawError::Config(e)) => {
@@ -239,6 +242,7 @@ async fn main() -> anyhow::Result<()> {
     let skills_data_dir = config.skills_data_dir();
     migrate_legacy_runtime_layout(&data_root_dir, Path::new(&runtime_data_dir));
     builtin_skills::ensure_builtin_skills(&data_root_dir)?;
+    logging::init_logging(&runtime_data_dir)?;
 
     let db = db::Database::new(&runtime_data_dir)?;
     info!("Database initialized");

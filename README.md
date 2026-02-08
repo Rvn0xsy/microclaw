@@ -292,6 +292,29 @@ timezone: "UTC"
 microclaw start
 ```
 
+### 5. Run as persistent gateway service (optional)
+
+```sh
+microclaw gateway install
+microclaw gateway status
+```
+
+Manage service lifecycle:
+
+```sh
+microclaw gateway start
+microclaw gateway stop
+microclaw gateway logs 200
+microclaw gateway uninstall
+```
+
+Notes:
+- macOS uses `launchd` user agents.
+- Linux uses `systemd --user`.
+- Runtime logs are written to `microclaw.data/runtime/logs/`.
+- Log file format is hourly: `microclaw-YYYY-MM-DD-HH.log`.
+- Logs older than 30 days are deleted automatically.
+
 ## Configuration
 
 All configuration is via `microclaw.config.yaml`:
