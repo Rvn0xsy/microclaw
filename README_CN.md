@@ -199,6 +199,8 @@ cp target/release/microclaw /usr/local/bin/
 - 左侧会话列表会展示 SQLite 中所有渠道聊天（`telegram`、`whatsapp`、`discord`、`web`）
 - 支持历史查看与管理（刷新 / 清理上下文 / 删除）
 - 默认对非 `web` 渠道是只读（发送请在原渠道进行）
+- 如果当前没有会话，Web UI 会自动生成一个 `session-YYYYMMDDHHmmss` 格式的会话键
+- 在该会话发送第一条消息后，会自动持久化到 SQLite
 
 ## 发布
 
