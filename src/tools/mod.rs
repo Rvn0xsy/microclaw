@@ -25,7 +25,7 @@ use serde_json::json;
 use teloxide::prelude::*;
 
 use crate::claude::ToolDefinition;
-use crate::config::Config;
+use crate::config::{Config, WorkingDirIsolation};
 use crate::db::Database;
 
 pub struct ToolResult {
@@ -51,6 +51,7 @@ impl ToolResult {
 
 #[derive(Clone, Debug)]
 pub struct ToolAuthContext {
+    pub caller_channel: String,
     pub caller_chat_id: i64,
     pub control_chat_ids: Vec<i64>,
 }
@@ -69,6 +70,11 @@ const AUTH_CONTEXT_KEY: &str = "__microclaw_auth";
 
 pub fn auth_context_from_input(input: &serde_json::Value) -> Option<ToolAuthContext> {
     let ctx = input.get(AUTH_CONTEXT_KEY)?;
+    let caller_channel = ctx
+        .get("caller_channel")
+        .and_then(|v| v.as_str())
+        .unwrap_or("telegram")
+        .to_string();
     let caller_chat_id = ctx.get("caller_chat_id")?.as_i64()?;
     let control_chat_ids = ctx
         .get("control_chat_ids")
@@ -76,6 +82,7 @@ pub fn auth_context_from_input(input: &serde_json::Value) -> Option<ToolAuthCont
         .map(|arr| arr.iter().filter_map(|x| x.as_i64()).collect())
         .unwrap_or_default();
     Some(ToolAuthContext {
+        caller_channel,
         caller_chat_id,
         control_chat_ids,
     })
@@ -101,6 +108,7 @@ fn inject_auth_context(input: serde_json::Value, auth: &ToolAuthContext) -> serd
     obj.insert(
         AUTH_CONTEXT_KEY.to_string(),
         json!({
+            "caller_channel": auth.caller_channel,
             "caller_chat_id": auth.caller_chat_id,
             "control_chat_ids": auth.control_chat_ids,
         }),
@@ -128,6 +136,51 @@ pub fn resolve_tool_path(working_dir: &Path, path: &str) -> PathBuf {
     }
 }
 
+fn sanitize_channel_segment(channel: &str) -> String {
+    let mut out = String::with_capacity(channel.len());
+    for c in channel.chars() {
+        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "unknown".to_string()
+    } else {
+        out
+    }
+}
+
+fn chat_working_dir(base_working_dir: &Path, channel: &str, chat_id: i64) -> PathBuf {
+    let chat_segment = if chat_id < 0 {
+        format!("neg{}", chat_id.unsigned_abs())
+    } else {
+        chat_id.to_string()
+    };
+    base_working_dir
+        .join("chat")
+        .join(sanitize_channel_segment(channel))
+        .join(chat_segment)
+}
+
+pub fn resolve_tool_working_dir(
+    base_working_dir: &Path,
+    isolation: WorkingDirIsolation,
+    input: &serde_json::Value,
+) -> PathBuf {
+    let resolved = match isolation {
+        WorkingDirIsolation::Shared => base_working_dir.join("shared"),
+        WorkingDirIsolation::Chat => auth_context_from_input(input)
+            .map(|auth| {
+                chat_working_dir(base_working_dir, &auth.caller_channel, auth.caller_chat_id)
+            })
+            .unwrap_or_else(|| base_working_dir.join("shared")),
+    };
+    let _ = std::fs::create_dir_all(&resolved);
+    resolved
+}
+
 impl ToolRegistry {
     pub fn new(config: &Config, bot: Bot, db: Arc<Database>) -> Self {
         let working_dir = PathBuf::from(&config.working_dir);
@@ -140,13 +193,31 @@ impl ToolRegistry {
         }
         let skills_data_dir = config.skills_data_dir();
         let tools: Vec<Box<dyn Tool>> = vec![
-            Box::new(bash::BashTool::new(&config.working_dir)),
+            Box::new(bash::BashTool::new_with_isolation(
+                &config.working_dir,
+                config.working_dir_isolation,
+            )),
             Box::new(browser::BrowserTool::new(&config.data_dir)),
-            Box::new(read_file::ReadFileTool::new(&config.working_dir)),
-            Box::new(write_file::WriteFileTool::new(&config.working_dir)),
-            Box::new(edit_file::EditFileTool::new(&config.working_dir)),
-            Box::new(glob::GlobTool::new(&config.working_dir)),
-            Box::new(grep::GrepTool::new(&config.working_dir)),
+            Box::new(read_file::ReadFileTool::new_with_isolation(
+                &config.working_dir,
+                config.working_dir_isolation,
+            )),
+            Box::new(write_file::WriteFileTool::new_with_isolation(
+                &config.working_dir,
+                config.working_dir_isolation,
+            )),
+            Box::new(edit_file::EditFileTool::new_with_isolation(
+                &config.working_dir,
+                config.working_dir_isolation,
+            )),
+            Box::new(glob::GlobTool::new_with_isolation(
+                &config.working_dir,
+                config.working_dir_isolation,
+            )),
+            Box::new(grep::GrepTool::new_with_isolation(
+                &config.working_dir,
+                config.working_dir_isolation,
+            )),
             Box::new(memory::ReadMemoryTool::new(&config.data_dir)),
             Box::new(memory::WriteMemoryTool::new(&config.data_dir)),
             Box::new(web_fetch::WebFetchTool),
@@ -187,13 +258,31 @@ impl ToolRegistry {
         }
         let skills_data_dir = config.skills_data_dir();
         let tools: Vec<Box<dyn Tool>> = vec![
-            Box::new(bash::BashTool::new(&config.working_dir)),
+            Box::new(bash::BashTool::new_with_isolation(
+                &config.working_dir,
+                config.working_dir_isolation,
+            )),
             Box::new(browser::BrowserTool::new(&config.data_dir)),
-            Box::new(read_file::ReadFileTool::new(&config.working_dir)),
-            Box::new(write_file::WriteFileTool::new(&config.working_dir)),
-            Box::new(edit_file::EditFileTool::new(&config.working_dir)),
-            Box::new(glob::GlobTool::new(&config.working_dir)),
-            Box::new(grep::GrepTool::new(&config.working_dir)),
+            Box::new(read_file::ReadFileTool::new_with_isolation(
+                &config.working_dir,
+                config.working_dir_isolation,
+            )),
+            Box::new(write_file::WriteFileTool::new_with_isolation(
+                &config.working_dir,
+                config.working_dir_isolation,
+            )),
+            Box::new(edit_file::EditFileTool::new_with_isolation(
+                &config.working_dir,
+                config.working_dir_isolation,
+            )),
+            Box::new(glob::GlobTool::new_with_isolation(
+                &config.working_dir,
+                config.working_dir_isolation,
+            )),
+            Box::new(grep::GrepTool::new_with_isolation(
+                &config.working_dir,
+                config.working_dir_isolation,
+            )),
             Box::new(memory::ReadMemoryTool::new(&config.data_dir)),
             Box::new(web_fetch::WebFetchTool),
             Box::new(web_search::WebSearchTool),
@@ -242,6 +331,7 @@ pub fn schema_object(properties: serde_json::Value, required: &[&str]) -> serde_
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::WorkingDirIsolation;
 
     #[test]
     fn test_tool_result_success() {
@@ -285,11 +375,13 @@ mod tests {
     fn test_auth_context_from_input() {
         let input = json!({
             "__microclaw_auth": {
+                "caller_channel": "telegram",
                 "caller_chat_id": 123,
                 "control_chat_ids": [123, 999]
             }
         });
         let auth = auth_context_from_input(&input).unwrap();
+        assert_eq!(auth.caller_channel, "telegram");
         assert_eq!(auth.caller_chat_id, 123);
         assert!(auth.is_control_chat());
         assert!(auth.can_access_chat(456));
@@ -299,11 +391,47 @@ mod tests {
     fn test_authorize_chat_access_denied() {
         let input = json!({
             "__microclaw_auth": {
+                "caller_channel": "telegram",
                 "caller_chat_id": 100,
                 "control_chat_ids": []
             }
         });
         let err = authorize_chat_access(&input, 200).unwrap_err();
         assert!(err.contains("Permission denied"));
+    }
+
+    #[test]
+    fn test_resolve_tool_working_dir_shared() {
+        let dir = resolve_tool_working_dir(
+            std::path::Path::new("/tmp/work"),
+            WorkingDirIsolation::Shared,
+            &json!({
+                "__microclaw_auth": {
+                    "caller_channel": "telegram",
+                    "caller_chat_id": 123,
+                    "control_chat_ids": []
+                }
+            }),
+        );
+        assert_eq!(dir, std::path::PathBuf::from("/tmp/work/shared"));
+    }
+
+    #[test]
+    fn test_resolve_tool_working_dir_chat() {
+        let dir = resolve_tool_working_dir(
+            std::path::Path::new("/tmp/work"),
+            WorkingDirIsolation::Chat,
+            &json!({
+                "__microclaw_auth": {
+                    "caller_channel": "discord",
+                    "caller_chat_id": -100123,
+                    "control_chat_ids": []
+                }
+            }),
+        );
+        assert_eq!(
+            dir,
+            std::path::PathBuf::from("/tmp/work/chat/discord/neg100123")
+        );
     }
 }

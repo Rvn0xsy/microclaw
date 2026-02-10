@@ -1,6 +1,6 @@
 //! Integration tests for configuration loading and validation.
 
-use microclaw::config::Config;
+use microclaw::config::{Config, WorkingDirIsolation};
 
 /// Helper to create a minimal valid config for testing.
 fn minimal_config() -> Config {
@@ -17,6 +17,7 @@ fn minimal_config() -> Config {
         max_document_size_mb: 100,
         data_dir: "./microclaw.data".into(),
         working_dir: "./tmp".into(),
+        working_dir_isolation: WorkingDirIsolation::Shared,
         openai_api_key: None,
         timezone: "UTC".into(),
         allowed_groups: vec![],
@@ -56,6 +57,10 @@ fn test_yaml_parse_minimal() {
     assert_eq!(config.max_document_size_mb, 100);
     assert_eq!(config.max_history_messages, 50);
     assert_eq!(config.timezone, "UTC");
+    assert!(matches!(
+        config.working_dir_isolation,
+        WorkingDirIsolation::Shared
+    ));
     assert_eq!(config.max_session_messages, 40);
     assert_eq!(config.compact_keep_recent, 20);
     assert_eq!(config.whatsapp_webhook_port, 8080);

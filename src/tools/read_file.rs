@@ -4,17 +4,27 @@ use std::path::PathBuf;
 use tracing::info;
 
 use crate::claude::ToolDefinition;
+use crate::config::WorkingDirIsolation;
 
 use super::{schema_object, Tool, ToolResult};
 
 pub struct ReadFileTool {
     working_dir: PathBuf,
+    working_dir_isolation: WorkingDirIsolation,
 }
 
 impl ReadFileTool {
     pub fn new(working_dir: &str) -> Self {
+        Self::new_with_isolation(working_dir, WorkingDirIsolation::Shared)
+    }
+
+    pub fn new_with_isolation(
+        working_dir: &str,
+        working_dir_isolation: WorkingDirIsolation,
+    ) -> Self {
         Self {
             working_dir: PathBuf::from(working_dir),
+            working_dir_isolation,
         }
     }
 }
@@ -54,7 +64,9 @@ impl Tool for ReadFileTool {
             Some(p) => p,
             None => return ToolResult::error("Missing 'path' parameter".into()),
         };
-        let resolved_path = super::resolve_tool_path(&self.working_dir, path);
+        let working_dir =
+            super::resolve_tool_working_dir(&self.working_dir, self.working_dir_isolation, &input);
+        let resolved_path = super::resolve_tool_path(&working_dir, path);
         let resolved_path_str = resolved_path.to_string_lossy().to_string();
 
         if let Err(msg) = crate::tools::path_guard::check_path(&resolved_path_str) {
@@ -154,8 +166,9 @@ mod tests {
     async fn test_read_file_resolves_relative_to_working_dir() {
         let root = std::env::temp_dir().join(format!("microclaw_rf3_{}", uuid::Uuid::new_v4()));
         let work = root.join("workspace");
-        std::fs::create_dir_all(&work).unwrap();
-        std::fs::write(work.join("test.txt"), "inside").unwrap();
+        let shared = work.join("shared");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("test.txt"), "inside").unwrap();
 
         let tool = ReadFileTool::new(work.to_str().unwrap());
         let result = tool.execute(json!({"path": "test.txt"})).await;

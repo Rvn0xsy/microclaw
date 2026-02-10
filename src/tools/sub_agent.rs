@@ -5,6 +5,8 @@ use tracing::info;
 use super::{auth_context_from_input, schema_object, Tool, ToolRegistry, ToolResult};
 use crate::claude::{ContentBlock, Message, MessageContent, ResponseContentBlock, ToolDefinition};
 use crate::config::Config;
+#[cfg(test)]
+use crate::config::WorkingDirIsolation;
 
 const MAX_SUB_AGENT_ITERATIONS: usize = 10;
 
@@ -198,6 +200,7 @@ mod tests {
             max_document_size_mb: 100,
             data_dir: "/tmp".into(),
             working_dir: "/tmp".into(),
+            working_dir_isolation: WorkingDirIsolation::Shared,
             openai_api_key: None,
             timezone: "UTC".into(),
             allowed_groups: vec![],

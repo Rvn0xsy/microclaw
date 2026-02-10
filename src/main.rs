@@ -67,6 +67,7 @@ CONFIG FILE (microclaw.config.yaml):
     Runtime:
       data_dir               Data root (runtime in ./microclaw.data/runtime, skills in ./microclaw.data/skills)
       working_dir            Default tool working directory (default: ./tmp)
+      working_dir_isolation  Tool working-dir mode: shared or chat (default: shared)
       max_tokens             Max tokens per response (default: 8192)
       max_tool_iterations    Max tool loop iterations (default: 100)
       max_history_messages   Chat history context size (default: 50)

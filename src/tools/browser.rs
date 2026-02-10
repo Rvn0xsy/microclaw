@@ -29,6 +29,15 @@ impl BrowserTool {
             .join(chat_id.to_string())
             .join("browser-profile")
     }
+
+    fn session_name_for_chat(chat_id: i64) -> String {
+        let normalized = if chat_id < 0 {
+            format!("neg{}", chat_id.unsigned_abs())
+        } else {
+            chat_id.to_string()
+        };
+        format!("microclaw-chat-{normalized}")
+    }
 }
 
 #[async_trait]
@@ -93,19 +102,27 @@ impl Tool for BrowserTool {
             .and_then(|v| v.as_u64())
             .unwrap_or(30);
 
+        let auth = auth_context_from_input(&input);
+
         // Build --profile flag from auth context chat_id
-        let profile_arg = auth_context_from_input(&input)
+        let profile_arg = auth
+            .as_ref()
             .map(|auth| {
                 let path = self.profile_path(auth.caller_chat_id);
                 format!("--profile {}", shell_quote(&path.to_string_lossy()))
             })
             .unwrap_or_default();
 
+        let session_name = auth
+            .as_ref()
+            .map(|auth| Self::session_name_for_chat(auth.caller_chat_id))
+            .unwrap_or_else(|| "microclaw".to_string());
+
         // Build full shell command so argument splitting is handled correctly
         let shell_cmd = if profile_arg.is_empty() {
-            format!("agent-browser --session microclaw {command}")
+            format!("agent-browser --session {session_name} {command}")
         } else {
-            format!("agent-browser --session microclaw {profile_arg} {command}")
+            format!("agent-browser --session {session_name} {profile_arg} {command}")
         };
 
         info!("Executing browser: {}", shell_cmd);
@@ -186,6 +203,18 @@ mod tests {
         assert_eq!(
             path,
             PathBuf::from("/tmp/test-data/groups/12345/browser-profile")
+        );
+    }
+
+    #[test]
+    fn test_browser_session_name_for_chat() {
+        assert_eq!(
+            BrowserTool::session_name_for_chat(12345),
+            "microclaw-chat-12345"
+        );
+        assert_eq!(
+            BrowserTool::session_name_for_chat(-100987),
+            "microclaw-chat-neg100987"
         );
     }
 

@@ -12,6 +12,7 @@ use serde_json::json;
 #[test]
 fn test_auth_context_control_chat() {
     let auth = ToolAuthContext {
+        caller_channel: "telegram".into(),
         caller_chat_id: 100,
         control_chat_ids: vec![100, 200],
     };
@@ -22,6 +23,7 @@ fn test_auth_context_control_chat() {
 #[test]
 fn test_auth_context_regular_chat() {
     let auth = ToolAuthContext {
+        caller_channel: "telegram".into(),
         caller_chat_id: 300,
         control_chat_ids: vec![100, 200],
     };
@@ -33,6 +35,7 @@ fn test_auth_context_regular_chat() {
 #[test]
 fn test_auth_context_empty_control_list() {
     let auth = ToolAuthContext {
+        caller_channel: "telegram".into(),
         caller_chat_id: 100,
         control_chat_ids: vec![],
     };

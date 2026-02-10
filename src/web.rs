@@ -17,7 +17,7 @@ use tokio::sync::{broadcast, Mutex};
 use tracing::{error, info};
 
 use crate::channel::deliver_and_store_bot_message;
-use crate::config::Config;
+use crate::config::{Config, WorkingDirIsolation};
 use crate::db::{call_blocking, ChatSummary, StoredMessage};
 use crate::telegram::{process_with_agent, process_with_agent_with_events, AgentEvent, AppState};
 
@@ -387,6 +387,7 @@ struct UpdateConfigRequest {
     max_tokens: Option<u32>,
     max_tool_iterations: Option<usize>,
     max_document_size_mb: Option<u64>,
+    working_dir_isolation: Option<WorkingDirIsolation>,
     show_thinking: Option<bool>,
     web_enabled: Option<bool>,
     web_host: Option<String>,
@@ -497,6 +498,9 @@ async fn api_update_config(
     }
     if let Some(v) = body.max_document_size_mb {
         cfg.max_document_size_mb = v;
+    }
+    if let Some(v) = body.working_dir_isolation {
+        cfg.working_dir_isolation = v;
     }
     if let Some(v) = body.show_thinking {
         cfg.show_thinking = v;
@@ -1063,6 +1067,7 @@ async fn send_and_store_response_with_events(
     let response = if let Some(tx) = event_tx {
         process_with_agent_with_events(
             &state.app_state,
+            "web",
             chat_id,
             &sender_name,
             "private",
@@ -1075,6 +1080,7 @@ async fn send_and_store_response_with_events(
     } else {
         process_with_agent(
             &state.app_state,
+            "web",
             chat_id,
             &sender_name,
             "private",
@@ -1225,7 +1231,7 @@ fn build_router(web_state: WebState) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
+    use crate::config::{Config, WorkingDirIsolation};
     use crate::db::call_blocking;
     use crate::llm::LlmProvider;
     use crate::{claude::ResponseContentBlock, error::MicroClawError};
@@ -1363,6 +1369,7 @@ mod tests {
             max_document_size_mb: 100,
             data_dir: "./microclaw.data".into(),
             working_dir: "./tmp".into(),
+            working_dir_isolation: WorkingDirIsolation::Shared,
             openai_api_key: None,
             timezone: "UTC".into(),
             allowed_groups: vec![],

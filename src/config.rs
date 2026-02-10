@@ -35,6 +35,9 @@ fn default_data_dir() -> String {
 fn default_working_dir() -> String {
     "./tmp".into()
 }
+fn default_working_dir_isolation() -> WorkingDirIsolation {
+    WorkingDirIsolation::Shared
+}
 fn default_timezone() -> String {
     "UTC".into()
 }
@@ -79,6 +82,13 @@ fn is_local_web_host(host: &str) -> bool {
     h == "127.0.0.1" || h == "localhost" || h == "::1"
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkingDirIsolation {
+    Shared,
+    Chat,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default = "default_telegram_bot_token")]
@@ -105,6 +115,8 @@ pub struct Config {
     pub data_dir: String,
     #[serde(default = "default_working_dir")]
     pub working_dir: String,
+    #[serde(default = "default_working_dir_isolation")]
+    pub working_dir_isolation: WorkingDirIsolation,
     #[serde(default)]
     pub openai_api_key: Option<String>,
     #[serde(default = "default_timezone")]
@@ -313,6 +325,7 @@ mod tests {
             max_document_size_mb: 100,
             data_dir: "./microclaw.data".into(),
             working_dir: "./tmp".into(),
+            working_dir_isolation: WorkingDirIsolation::Shared,
             openai_api_key: None,
             timezone: "UTC".into(),
             allowed_groups: vec![],
@@ -393,6 +406,10 @@ mod tests {
         assert_eq!(config.max_tool_iterations, 100);
         assert_eq!(config.data_dir, "./microclaw.data");
         assert_eq!(config.working_dir, "./tmp");
+        assert!(matches!(
+            config.working_dir_isolation,
+            WorkingDirIsolation::Shared
+        ));
         assert_eq!(config.max_document_size_mb, 100);
         assert_eq!(config.timezone, "UTC");
     }
@@ -403,6 +420,26 @@ mod tests {
         let mut config: Config = serde_yaml::from_str(yaml).unwrap();
         config.post_deserialize().unwrap();
         assert_eq!(config.working_dir, "./tmp");
+    }
+
+    #[test]
+    fn test_config_working_dir_isolation_defaults_to_shared() {
+        let yaml = "telegram_bot_token: tok\nbot_username: bot\napi_key: key\n";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(matches!(
+            config.working_dir_isolation,
+            WorkingDirIsolation::Shared
+        ));
+    }
+
+    #[test]
+    fn test_config_working_dir_isolation_accepts_chat() {
+        let yaml = "telegram_bot_token: tok\nbot_username: bot\napi_key: key\nworking_dir_isolation: chat\n";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(matches!(
+            config.working_dir_isolation,
+            WorkingDirIsolation::Chat
+        ));
     }
 
     #[test]

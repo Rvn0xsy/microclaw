@@ -201,6 +201,7 @@ async fn process_webhook(state: &WhatsAppState, payload: WebhookPayload) -> anyh
                 // Process with Claude (reuses the same agentic loop as Telegram)
                 match crate::telegram::process_with_agent(
                     &state.app_state,
+                    "whatsapp",
                     chat_id,
                     &sender_name,
                     "private",

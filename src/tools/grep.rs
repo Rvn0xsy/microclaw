@@ -4,17 +4,27 @@ use std::path::{Path, PathBuf};
 use tracing::info;
 
 use crate::claude::ToolDefinition;
+use crate::config::WorkingDirIsolation;
 
 use super::{schema_object, Tool, ToolResult};
 
 pub struct GrepTool {
     working_dir: PathBuf,
+    working_dir_isolation: WorkingDirIsolation,
 }
 
 impl GrepTool {
     pub fn new(working_dir: &str) -> Self {
+        Self::new_with_isolation(working_dir, WorkingDirIsolation::Shared)
+    }
+
+    pub fn new_with_isolation(
+        working_dir: &str,
+        working_dir_isolation: WorkingDirIsolation,
+    ) -> Self {
         Self {
             working_dir: PathBuf::from(working_dir),
+            working_dir_isolation,
         }
     }
 }
@@ -55,7 +65,9 @@ impl Tool for GrepTool {
             None => return ToolResult::error("Missing 'pattern' parameter".into()),
         };
         let path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-        let resolved_path = super::resolve_tool_path(&self.working_dir, path);
+        let working_dir =
+            super::resolve_tool_working_dir(&self.working_dir, self.working_dir_isolation, &input);
+        let resolved_path = super::resolve_tool_path(&working_dir, path);
         let resolved_path_str = resolved_path.to_string_lossy().to_string();
         if let Err(msg) = crate::tools::path_guard::check_path(&resolved_path_str) {
             return ToolResult::error(msg);
@@ -277,8 +289,9 @@ mod tests {
     async fn test_grep_defaults_to_working_dir() {
         let root = std::env::temp_dir().join(format!("microclaw_grep2_{}", uuid::Uuid::new_v4()));
         let work = root.join("workspace");
-        std::fs::create_dir_all(&work).unwrap();
-        std::fs::write(work.join("a.txt"), "needle").unwrap();
+        let shared = work.join("shared");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("a.txt"), "needle").unwrap();
 
         let tool = GrepTool::new(work.to_str().unwrap());
         let result = tool.execute(json!({"pattern":"needle"})).await;

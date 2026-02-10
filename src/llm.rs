@@ -12,6 +12,8 @@ use crate::claude::{
     ResponseContentBlock, ToolDefinition, Usage,
 };
 use crate::config::Config;
+#[cfg(test)]
+use crate::config::WorkingDirIsolation;
 use crate::error::MicroClawError;
 
 /// Remove orphaned `ToolResult` blocks whose `tool_use_id` does not match any
@@ -1504,6 +1506,7 @@ mod tests {
             max_document_size_mb: 100,
             data_dir: "/tmp".into(),
             working_dir: "/tmp".into(),
+            working_dir_isolation: WorkingDirIsolation::Shared,
             openai_api_key: None,
             timezone: "UTC".into(),
             allowed_groups: vec![],
@@ -1546,6 +1549,7 @@ mod tests {
             max_document_size_mb: 100,
             data_dir: "/tmp".into(),
             working_dir: "/tmp".into(),
+            working_dir_isolation: WorkingDirIsolation::Shared,
             openai_api_key: None,
             timezone: "UTC".into(),
             allowed_groups: vec![],

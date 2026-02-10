@@ -496,6 +496,7 @@ async fn handle_message(
     // Process with Claude
     match process_with_agent(
         &state,
+        "telegram",
         chat_id,
         &sender_name,
         runtime_chat_type,
@@ -566,6 +567,7 @@ fn guess_image_media_type(data: &[u8]) -> String {
 
 pub async fn process_with_agent(
     state: &AppState,
+    caller_channel: &str,
     chat_id: i64,
     _sender_name: &str,
     chat_type: &str,
@@ -574,6 +576,7 @@ pub async fn process_with_agent(
 ) -> anyhow::Result<String> {
     process_with_agent_with_events(
         state,
+        caller_channel,
         chat_id,
         _sender_name,
         chat_type,
@@ -586,6 +589,7 @@ pub async fn process_with_agent(
 
 pub async fn process_with_agent_with_events(
     state: &AppState,
+    caller_channel: &str,
     chat_id: i64,
     _sender_name: &str,
     chat_type: &str,
@@ -693,6 +697,7 @@ pub async fn process_with_agent_with_events(
 
     let tool_defs = state.tools.definitions();
     let tool_auth = ToolAuthContext {
+        caller_channel: caller_channel.to_string(),
         caller_chat_id: chat_id,
         control_chat_ids: state.config.control_chat_ids.clone(),
     };

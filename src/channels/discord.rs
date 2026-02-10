@@ -137,6 +137,7 @@ impl EventHandler for Handler {
         // Process with Claude (reuses the same agentic loop as Telegram)
         match crate::telegram::process_with_agent(
             &self.app_state,
+            "discord",
             channel_id,
             &sender_name,
             if msg.guild_id.is_some() {

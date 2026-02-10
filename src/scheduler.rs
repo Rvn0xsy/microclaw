@@ -8,6 +8,15 @@ use crate::channel::deliver_and_store_bot_message;
 use crate::db::call_blocking;
 use crate::telegram::AppState;
 
+fn channel_from_chat_type(chat_type: &str) -> &'static str {
+    match chat_type {
+        "discord" => "discord",
+        "whatsapp" => "whatsapp",
+        "web" => "web",
+        _ => "telegram",
+    }
+}
+
 pub fn spawn_scheduler(state: Arc<AppState>) {
     tokio::spawn(async move {
         info!("Scheduler started");
@@ -36,10 +45,16 @@ async fn run_due_tasks(state: &Arc<AppState>) {
 
         let started_at = Utc::now();
         let started_at_str = started_at.to_rfc3339();
+        let channel =
+            match call_blocking(state.db.clone(), move |db| db.get_chat_type(task.chat_id)).await {
+                Ok(Some(chat_type)) => channel_from_chat_type(&chat_type),
+                _ => "telegram",
+            };
 
         // Run agent loop with the task prompt
         let (success, result_summary) = match crate::telegram::process_with_agent(
             state,
+            channel,
             task.chat_id,
             "scheduler",
             "private",

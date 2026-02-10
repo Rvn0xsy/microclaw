@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 use serde::Deserialize;
 
-use crate::config::Config;
+use crate::config::{Config, WorkingDirIsolation};
 use crate::error::MicroClawError;
 
 #[derive(Clone, Copy)]
@@ -369,6 +369,7 @@ fn default_config() -> Config {
         max_document_size_mb: 100,
         data_dir: "./microclaw.data".into(),
         working_dir: "./tmp".into(),
+        working_dir_isolation: WorkingDirIsolation::Shared,
         openai_api_key: None,
         timezone: "UTC".into(),
         allowed_groups: vec![],

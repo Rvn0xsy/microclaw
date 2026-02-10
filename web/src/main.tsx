@@ -117,6 +117,7 @@ const MODEL_OPTIONS: Record<string, string[]> = {
 
 const DEFAULT_CONFIG_VALUES = {
   llm_provider: 'anthropic',
+  working_dir_isolation: 'shared',
   max_tokens: 8192,
   max_tool_iterations: 100,
   max_document_size_mb: 100,
@@ -819,6 +820,9 @@ function App() {
       model: data.config?.model || defaultModelForProvider(String(data.config?.llm_provider || 'anthropic')),
       llm_base_url: String(data.config?.llm_base_url || ''),
       api_key: '',
+      working_dir_isolation: String(
+        data.config?.working_dir_isolation || DEFAULT_CONFIG_VALUES.working_dir_isolation,
+      ),
       max_tokens: Number(data.config?.max_tokens ?? 8192),
       max_tool_iterations: Number(data.config?.max_tool_iterations ?? 100),
       max_document_size_mb: Number(data.config?.max_document_size_mb ?? DEFAULT_CONFIG_VALUES.max_document_size_mb),
@@ -851,6 +855,9 @@ function App() {
         case 'max_tokens':
           next.max_tokens = DEFAULT_CONFIG_VALUES.max_tokens
           break
+        case 'working_dir_isolation':
+          next.working_dir_isolation = DEFAULT_CONFIG_VALUES.working_dir_isolation
+          break
         case 'max_tool_iterations':
           next.max_tool_iterations = DEFAULT_CONFIG_VALUES.max_tool_iterations
           break
@@ -881,6 +888,9 @@ function App() {
       const payload: Record<string, unknown> = {
         llm_provider: String(configDraft.llm_provider || ''),
         model: String(configDraft.model || ''),
+        working_dir_isolation: String(
+          configDraft.working_dir_isolation || DEFAULT_CONFIG_VALUES.working_dir_isolation,
+        ),
         max_tokens: Number(configDraft.max_tokens || 8192),
         max_tool_iterations: Number(configDraft.max_tool_iterations || 100),
         max_document_size_mb: Number(
@@ -1120,6 +1130,27 @@ function App() {
                     Runtime
                   </Text>
                   <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
+                    <div>
+                      <Flex justify="between" align="center" mb="1">
+                        <Text size="1" color="gray">working_dir_isolation</Text>
+                        <Button size="1" variant="ghost" onClick={() => resetConfigField('working_dir_isolation')}>
+                          Reset
+                        </Button>
+                      </Flex>
+                      <Select.Root
+                        value={String(configDraft.working_dir_isolation || DEFAULT_CONFIG_VALUES.working_dir_isolation)}
+                        onValueChange={(value) => setConfigField('working_dir_isolation', value)}
+                      >
+                        <Select.Trigger placeholder="Select isolation mode" />
+                        <Select.Content>
+                          <Select.Item value="shared">shared</Select.Item>
+                          <Select.Item value="chat">chat</Select.Item>
+                        </Select.Content>
+                      </Select.Root>
+                      <Text size="1" color="gray" className="mt-1 block">
+                        shared: working_dir/shared, chat: working_dir/chat/&lt;channel&gt;/&lt;chat_id&gt;
+                      </Text>
+                    </div>
                     <div>
                       <Flex justify="between" align="center" mb="1">
                         <Text size="1" color="gray">Max tokens</Text>

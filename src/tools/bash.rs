@@ -4,17 +4,27 @@ use std::path::PathBuf;
 use tracing::info;
 
 use crate::claude::ToolDefinition;
+use crate::config::WorkingDirIsolation;
 
 use super::{schema_object, Tool, ToolResult};
 
 pub struct BashTool {
     working_dir: PathBuf,
+    working_dir_isolation: WorkingDirIsolation,
 }
 
 impl BashTool {
     pub fn new(working_dir: &str) -> Self {
+        Self::new_with_isolation(working_dir, WorkingDirIsolation::Shared)
+    }
+
+    pub fn new_with_isolation(
+        working_dir: &str,
+        working_dir_isolation: WorkingDirIsolation,
+    ) -> Self {
         Self {
             working_dir: PathBuf::from(working_dir),
+            working_dir_isolation,
         }
     }
 }
@@ -55,13 +65,21 @@ impl Tool for BashTool {
             .get("timeout_secs")
             .and_then(|v| v.as_u64())
             .unwrap_or(120);
+        let working_dir =
+            super::resolve_tool_working_dir(&self.working_dir, self.working_dir_isolation, &input);
+        if let Err(e) = tokio::fs::create_dir_all(&working_dir).await {
+            return ToolResult::error(format!(
+                "Failed to create working directory {}: {e}",
+                working_dir.display()
+            ));
+        }
 
         info!("Executing bash: {}", command);
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(timeout_secs),
             tokio::process::Command::new("bash")
-                .current_dir(&self.working_dir)
+                .current_dir(&working_dir)
                 .arg("-c")
                 .arg(command)
                 .output(),
@@ -175,6 +193,31 @@ mod tests {
         let result = tool.execute(json!({"command": "pwd"})).await;
         assert!(!result.is_error);
         assert!(result.content.contains(work.to_str().unwrap()));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn test_bash_chat_isolation_uses_chat_working_dir() {
+        let root = std::env::temp_dir().join(format!("microclaw_bash_{}", uuid::Uuid::new_v4()));
+        let work = root.join("workspace");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let tool = BashTool::new_with_isolation(work.to_str().unwrap(), WorkingDirIsolation::Chat);
+        let result = tool
+            .execute(json!({
+                "command": "pwd",
+                "__microclaw_auth": {
+                    "caller_channel": "telegram",
+                    "caller_chat_id": -100123,
+                    "control_chat_ids": []
+                }
+            }))
+            .await;
+        assert!(!result.is_error);
+        assert!(result
+            .content
+            .contains("/workspace/chat/telegram/neg100123"));
 
         let _ = std::fs::remove_dir_all(&root);
     }
