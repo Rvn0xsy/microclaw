@@ -76,7 +76,7 @@ For a deeper dive into the architecture and design decisions, read: **[Building 
 | `write_memory` | Write persistent CLAUDE.md memory |
 | `web_search` | Search the web via DuckDuckGo (returns titles, URLs, snippets) |
 | `web_fetch` | Fetch a URL and return plain text (HTML stripped, max 20KB) |
-| `send_message` | Send mid-conversation messages; supports Telegram attachments via `attachment_path` + optional `caption` |
+| `send_message` | Send mid-conversation messages; supports attachments for Telegram/WhatsApp/Discord via `attachment_path` + optional `caption` |
 | `schedule_task` | Schedule a recurring (cron) or one-time task |
 | `list_scheduled_tasks` | List all active/paused tasks for a chat |
 | `pause_scheduled_task` | Pause a scheduled task |
@@ -295,6 +295,7 @@ model: "claude-sonnet-4-20250514"
 # llm_base_url: "https://..."
 data_dir: "./microclaw.data"
 working_dir: "./tmp"
+max_document_size_mb: 100
 timezone: "UTC"
 ```
 
@@ -343,6 +344,7 @@ All configuration is via `microclaw.config.yaml`:
 | `working_dir` | No | `./tmp` | Default working directory for tool operations; relative paths in `bash/read_file/write_file/edit_file/glob/grep` resolve from here |
 | `max_tokens` | No | `8192` | Max tokens per model response |
 | `max_tool_iterations` | No | `100` | Max tool-use loop iterations per message |
+| `max_document_size_mb` | No | `100` | Maximum allowed size for inbound Telegram documents; larger files are rejected with a hint message |
 | `max_history_messages` | No | `50` | Number of recent messages sent as context |
 | `control_chat_ids` | No | `[]` | Chat IDs that can perform cross-chat actions (send_message/schedule/export/memory global/todo) |
 | `max_session_messages` | No | `40` | Message count threshold that triggers context compaction |
@@ -440,7 +442,7 @@ src/
         memory.rs        # Memory read/write tools
         web_search.rs    # DuckDuckGo web search
         web_fetch.rs     # URL fetching with HTML stripping
-        send_message.rs  # Mid-conversation Telegram messaging
+        send_message.rs  # Mid-conversation messaging (text + channel attachments)
         schedule.rs      # 5 scheduling tools (create/list/pause/resume/cancel)
         sub_agent.rs     # Sub-agent with restricted tool registry
         activate_skill.rs # Skill activation tool
@@ -472,4 +474,4 @@ MIT
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=everettjf/MicroClaw&type=Date)](https://star-history.com/#everettjf/MicroClaw&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=microclaw/microclaw&type=Date)](https://star-history.com/#microclaw/microclaw&Date)

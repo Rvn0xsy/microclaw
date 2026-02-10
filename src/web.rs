@@ -386,6 +386,7 @@ struct UpdateConfigRequest {
     llm_base_url: Option<Option<String>>,
     max_tokens: Option<u32>,
     max_tool_iterations: Option<usize>,
+    max_document_size_mb: Option<u64>,
     show_thinking: Option<bool>,
     web_enabled: Option<bool>,
     web_host: Option<String>,
@@ -494,6 +495,9 @@ async fn api_update_config(
     if let Some(v) = body.max_tool_iterations {
         cfg.max_tool_iterations = v;
     }
+    if let Some(v) = body.max_document_size_mb {
+        cfg.max_document_size_mb = v;
+    }
     if let Some(v) = body.show_thinking {
         cfg.show_thinking = v;
     }
@@ -564,10 +568,27 @@ fn map_chat_to_session(chat: ChatSummary) -> SessionItem {
     };
 
     let fallback = format!("{}:{}", source, chat.chat_id);
-    let label = chat.chat_title.clone().unwrap_or(fallback);
+    let mut label = chat.chat_title.clone().unwrap_or_else(|| fallback.clone());
+
+    if label.starts_with("private:")
+        || label.starts_with("group:")
+        || label.starts_with("supergroup:")
+        || label.starts_with("channel:")
+    {
+        label = fallback.clone();
+    }
+
+    let session_key = if source == "web" {
+        chat.chat_title
+            .as_deref()
+            .map(|t| normalize_session_key(Some(t)))
+            .unwrap_or_else(|| format!("chat:{}", chat.chat_id))
+    } else {
+        format!("chat:{}", chat.chat_id)
+    };
 
     SessionItem {
-        session_key: format!("chat:{}", chat.chat_id),
+        session_key,
         label,
         chat_id: chat.chat_id,
         chat_type: source.to_string(),
@@ -1318,6 +1339,7 @@ mod tests {
             max_tokens: 8192,
             max_tool_iterations: 100,
             max_history_messages: 50,
+            max_document_size_mb: 100,
             data_dir: "./microclaw.data".into(),
             working_dir: "./tmp".into(),
             openai_api_key: None,

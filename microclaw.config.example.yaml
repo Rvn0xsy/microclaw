@@ -21,6 +21,8 @@ max_tokens: 8192
 max_tool_iterations: 100
 # Chat history context size
 max_history_messages: 50
+# Maximum inbound Telegram document size in MB
+max_document_size_mb: 100
 # Data root directory:
 # - runtime files go to <data_dir>/runtime
 # - built-in/custom skills are loaded from <data_dir>/skills

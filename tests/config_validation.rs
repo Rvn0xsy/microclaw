@@ -14,6 +14,7 @@ fn minimal_config() -> Config {
         max_tokens: 8192,
         max_tool_iterations: 25,
         max_history_messages: 50,
+        max_document_size_mb: 100,
         data_dir: "./microclaw.data".into(),
         working_dir: "./tmp".into(),
         openai_api_key: None,
@@ -52,6 +53,7 @@ fn test_yaml_parse_minimal() {
     assert_eq!(config.llm_provider, "anthropic");
     assert_eq!(config.max_tokens, 8192);
     assert_eq!(config.max_tool_iterations, 100);
+    assert_eq!(config.max_document_size_mb, 100);
     assert_eq!(config.max_history_messages, 50);
     assert_eq!(config.timezone, "UTC");
     assert_eq!(config.max_session_messages, 40);

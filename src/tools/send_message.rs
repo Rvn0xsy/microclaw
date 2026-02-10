@@ -9,12 +9,15 @@ use teloxide::types::InputFile;
 use super::{authorize_chat_access, schema_object, Tool, ToolResult};
 use crate::channel::{deliver_and_store_bot_message, enforce_channel_policy};
 use crate::claude::ToolDefinition;
+use crate::config::Config;
 use crate::db::{call_blocking, Database, StoredMessage};
 
 pub struct SendMessageTool {
     bot: Bot,
     db: Arc<Database>,
     bot_username: String,
+    config: Option<Config>,
+    http_client: reqwest::Client,
 }
 
 impl SendMessageTool {
@@ -23,7 +26,215 @@ impl SendMessageTool {
             bot,
             db,
             bot_username,
+            config: None,
+            http_client: reqwest::Client::new(),
         }
+    }
+
+    pub fn new_with_config(
+        bot: Bot,
+        db: Arc<Database>,
+        bot_username: String,
+        config: Config,
+    ) -> Self {
+        SendMessageTool {
+            bot,
+            db,
+            bot_username,
+            config: Some(config),
+            http_client: reqwest::Client::new(),
+        }
+    }
+
+    async fn store_bot_message(&self, chat_id: i64, content: String) -> Result<(), String> {
+        let msg = StoredMessage {
+            id: uuid::Uuid::new_v4().to_string(),
+            chat_id,
+            sender_name: self.bot_username.clone(),
+            content,
+            is_from_bot: true,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        };
+        call_blocking(self.db.clone(), move |db| db.store_message(&msg))
+            .await
+            .map_err(|e| format!("Failed to store sent message: {e}"))
+    }
+
+    async fn send_telegram_attachment(
+        &self,
+        chat_id: i64,
+        file_path: PathBuf,
+        caption: Option<String>,
+    ) -> Result<String, String> {
+        let mut req = self
+            .bot
+            .send_document(ChatId(chat_id), InputFile::file(file_path.clone()));
+        if let Some(c) = &caption {
+            req = req.caption(c.clone());
+        }
+        req.await
+            .map_err(|e| format!("Failed to send Telegram attachment: {e}"))?;
+
+        Ok(match caption {
+            Some(c) => format!("[attachment:{}] {}", file_path.display(), c),
+            None => format!("[attachment:{}]", file_path.display()),
+        })
+    }
+
+    async fn send_discord_attachment(
+        &self,
+        chat_id: i64,
+        file_path: PathBuf,
+        caption: Option<String>,
+    ) -> Result<String, String> {
+        let cfg = self
+            .config
+            .as_ref()
+            .ok_or_else(|| "send_message config unavailable".to_string())?;
+        let token = cfg
+            .discord_bot_token
+            .as_deref()
+            .filter(|v| !v.trim().is_empty())
+            .ok_or_else(|| "discord_bot_token not configured".to_string())?;
+
+        let filename = file_path
+            .file_name()
+            .and_then(|v| v.to_str())
+            .unwrap_or("attachment.bin")
+            .to_string();
+        let bytes = tokio::fs::read(&file_path)
+            .await
+            .map_err(|e| format!("Failed to read attachment file: {e}"))?;
+
+        let payload = json!({ "content": caption.clone().unwrap_or_default() });
+        let form = reqwest::multipart::Form::new()
+            .text("payload_json", payload.to_string())
+            .part(
+                "files[0]",
+                reqwest::multipart::Part::bytes(bytes).file_name(filename),
+            );
+
+        let url = format!("https://discord.com/api/v10/channels/{chat_id}/messages");
+        let resp = self
+            .http_client
+            .post(url)
+            .header(reqwest::header::AUTHORIZATION, format!("Bot {token}"))
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| format!("Failed to send Discord attachment: {e}"))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!(
+                "Failed to send Discord attachment: HTTP {status} {}",
+                body.chars().take(300).collect::<String>()
+            ));
+        }
+
+        Ok(match caption {
+            Some(c) => format!("[attachment:{}] {}", file_path.display(), c),
+            None => format!("[attachment:{}]", file_path.display()),
+        })
+    }
+
+    async fn send_whatsapp_attachment(
+        &self,
+        chat_id: i64,
+        file_path: PathBuf,
+        caption: Option<String>,
+    ) -> Result<String, String> {
+        let cfg = self
+            .config
+            .as_ref()
+            .ok_or_else(|| "send_message config unavailable".to_string())?;
+        let access_token = cfg
+            .whatsapp_access_token
+            .as_deref()
+            .filter(|v| !v.trim().is_empty())
+            .ok_or_else(|| "whatsapp_access_token not configured".to_string())?;
+        let phone_number_id = cfg
+            .whatsapp_phone_number_id
+            .as_deref()
+            .filter(|v| !v.trim().is_empty())
+            .ok_or_else(|| "whatsapp_phone_number_id not configured".to_string())?;
+
+        let filename = file_path
+            .file_name()
+            .and_then(|v| v.to_str())
+            .unwrap_or("attachment.bin")
+            .to_string();
+        let bytes = tokio::fs::read(&file_path)
+            .await
+            .map_err(|e| format!("Failed to read attachment file: {e}"))?;
+
+        let upload_url = format!("https://graph.facebook.com/v23.0/{phone_number_id}/media");
+        let form = reqwest::multipart::Form::new()
+            .text("messaging_product", "whatsapp")
+            .part(
+                "file",
+                reqwest::multipart::Part::bytes(bytes)
+                    .file_name(filename.clone())
+                    .mime_str("application/octet-stream")
+                    .map_err(|e| format!("Invalid attachment mime: {e}"))?,
+            );
+        let upload_resp = self
+            .http_client
+            .post(upload_url)
+            .bearer_auth(access_token)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| format!("Failed to upload WhatsApp media: {e}"))?;
+        if !upload_resp.status().is_success() {
+            let status = upload_resp.status();
+            let body = upload_resp.text().await.unwrap_or_default();
+            return Err(format!(
+                "Failed to upload WhatsApp media: HTTP {status} {}",
+                body.chars().take(300).collect::<String>()
+            ));
+        }
+        let upload_json: serde_json::Value = upload_resp
+            .json()
+            .await
+            .map_err(|e| format!("Invalid WhatsApp media upload response: {e}"))?;
+        let media_id = upload_json
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "WhatsApp media upload did not return id".to_string())?;
+
+        let mut document = json!({ "id": media_id, "filename": filename });
+        if let Some(c) = &caption {
+            document["caption"] = json!(c);
+        }
+        let payload = json!({
+            "messaging_product": "whatsapp",
+            "to": chat_id.to_string(),
+            "type": "document",
+            "document": document,
+        });
+        let send_url = format!("https://graph.facebook.com/v23.0/{phone_number_id}/messages");
+        let send_resp = self
+            .http_client
+            .post(send_url)
+            .bearer_auth(access_token)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| format!("Failed to send WhatsApp attachment: {e}"))?;
+        if !send_resp.status().is_success() {
+            let status = send_resp.status();
+            let body = send_resp.text().await.unwrap_or_default();
+            return Err(format!(
+                "Failed to send WhatsApp attachment: HTTP {status} {}",
+                body.chars().take(300).collect::<String>()
+            ));
+        }
+
+        Ok(match caption {
+            Some(c) => format!("[attachment:{}] {}", file_path.display(), c),
+            None => format!("[attachment:{}]", file_path.display()),
+        })
     }
 }
 
@@ -36,7 +247,7 @@ impl Tool for SendMessageTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "send_message".into(),
-            description: "Send a message mid-conversation. For Telegram chats it sends via Telegram; for local web chats it appends to the web conversation.".into(),
+            description: "Send a message mid-conversation. Supports text for all channels, and attachments for Telegram/Discord/WhatsApp via attachment_path.".into(),
             input_schema: schema_object(
                 json!({
                     "chat_id": {
@@ -49,7 +260,7 @@ impl Tool for SendMessageTool {
                     },
                     "attachment_path": {
                         "type": "string",
-                        "description": "Optional local file path to send as Telegram document"
+                        "description": "Optional local file path to send as an attachment"
                     },
                     "caption": {
                         "type": "string",
@@ -102,24 +313,6 @@ impl Tool for SendMessageTool {
                     Err(e) => return ToolResult::error(format!("Failed to read chat type: {e}")),
                 };
 
-            let is_telegram = matches!(
-                chat_type.as_deref(),
-                Some("telegram_private")
-                    | Some("telegram_group")
-                    | Some("telegram_supergroup")
-                    | Some("telegram_channel")
-                    | Some("private")
-                    | Some("group")
-                    | Some("supergroup")
-                    | Some("channel")
-            );
-
-            if !is_telegram {
-                return ToolResult::error(
-                    "attachment sending is currently supported for Telegram chats only".into(),
-                );
-            }
-
             let file_path = PathBuf::from(&path);
             if !file_path.is_file() {
                 return ToolResult::error(format!(
@@ -135,37 +328,42 @@ impl Tool for SendMessageTool {
                 }
             });
 
-            let mut req = self
-                .bot
-                .send_document(ChatId(chat_id), InputFile::file(file_path.clone()));
-            if let Some(c) = &used_caption {
-                req = req.caption(c.clone());
-            }
-
-            if let Err(e) = req.await {
-                return ToolResult::error(format!("Failed to send attachment: {e}"));
-            }
-
-            let content = match used_caption {
-                Some(c) => format!("[attachment:{}] {}", file_path.display(), c),
-                None => format!("[attachment:{}]", file_path.display()),
+            let send_result = match chat_type.as_deref() {
+                Some("telegram_private")
+                | Some("telegram_group")
+                | Some("telegram_supergroup")
+                | Some("telegram_channel")
+                | Some("private")
+                | Some("group")
+                | Some("supergroup")
+                | Some("channel") => {
+                    self.send_telegram_attachment(chat_id, file_path.clone(), used_caption.clone())
+                        .await
+                }
+                Some("discord") => {
+                    self.send_discord_attachment(chat_id, file_path.clone(), used_caption.clone())
+                        .await
+                }
+                Some("whatsapp") => {
+                    self.send_whatsapp_attachment(chat_id, file_path.clone(), used_caption.clone())
+                        .await
+                }
+                Some("web") => Err("attachment sending is not supported for web chat".to_string()),
+                Some(other) => Err(format!(
+                    "attachment sending is not supported for chat type: {other}"
+                )),
+                None => Err("target chat not found".to_string()),
             };
-            let bot_name = self.bot_username.clone();
-            let msg = StoredMessage {
-                id: uuid::Uuid::new_v4().to_string(),
-                chat_id,
-                sender_name: bot_name,
-                content,
-                is_from_bot: true,
-                timestamp: chrono::Utc::now().to_rfc3339(),
-            };
-            if let Err(e) = call_blocking(self.db.clone(), move |db| db.store_message(&msg)).await {
-                return ToolResult::error(format!(
-                    "Attachment sent but failed to store message: {e}"
-                ));
-            }
 
-            ToolResult::success("Attachment sent successfully.".into())
+            match send_result {
+                Ok(content) => {
+                    if let Err(e) = self.store_bot_message(chat_id, content).await {
+                        return ToolResult::error(e);
+                    }
+                    ToolResult::success("Attachment sent successfully.".into())
+                }
+                Err(e) => ToolResult::error(e),
+            }
         } else {
             match deliver_and_store_bot_message(
                 &self.bot,
@@ -300,9 +498,48 @@ mod tests {
             }))
             .await;
         assert!(result.is_error);
-        assert!(result
-            .content
-            .contains("currently supported for Telegram chats only"));
+        assert!(result.content.contains("not supported for web chat"));
+        cleanup(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_send_attachment_discord_without_config_fails_fast() {
+        let (db, dir) = test_db();
+        db.upsert_chat(123, Some("discord-123"), "discord").unwrap();
+
+        let attachment = dir.join("sample.txt");
+        std::fs::write(&attachment, "hello").unwrap();
+
+        let tool = SendMessageTool::new(Bot::new("123456:TEST_TOKEN"), db, "bot".into());
+        let result = tool
+            .execute(json!({
+                "chat_id": 123,
+                "attachment_path": attachment.to_string_lossy(),
+            }))
+            .await;
+        assert!(result.is_error);
+        assert!(result.content.contains("config unavailable"));
+        cleanup(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_send_attachment_whatsapp_without_config_fails_fast() {
+        let (db, dir) = test_db();
+        db.upsert_chat(861234567890i64, Some("wa"), "whatsapp")
+            .unwrap();
+
+        let attachment = dir.join("sample.txt");
+        std::fs::write(&attachment, "hello").unwrap();
+
+        let tool = SendMessageTool::new(Bot::new("123456:TEST_TOKEN"), db, "bot".into());
+        let result = tool
+            .execute(json!({
+                "chat_id": 861234567890i64,
+                "attachment_path": attachment.to_string_lossy(),
+            }))
+            .await;
+        assert!(result.is_error);
+        assert!(result.content.contains("config unavailable"));
         cleanup(&dir);
     }
 }

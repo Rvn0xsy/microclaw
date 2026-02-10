@@ -366,6 +366,7 @@ fn default_config() -> Config {
         max_tokens: 8192,
         max_tool_iterations: 100,
         max_history_messages: 50,
+        max_document_size_mb: 100,
         data_dir: "./microclaw.data".into(),
         working_dir: "./tmp".into(),
         openai_api_key: None,

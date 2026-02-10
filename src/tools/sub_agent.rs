@@ -195,6 +195,7 @@ mod tests {
             max_tokens: 4096,
             max_tool_iterations: 100,
             max_history_messages: 50,
+            max_document_size_mb: 100,
             data_dir: "/tmp".into(),
             working_dir: "/tmp".into(),
             openai_api_key: None,

@@ -26,6 +26,9 @@ fn default_max_tool_iterations() -> usize {
 fn default_max_history_messages() -> usize {
     50
 }
+fn default_max_document_size_mb() -> u64 {
+    100
+}
 fn default_data_dir() -> String {
     "./microclaw.data".into()
 }
@@ -96,6 +99,8 @@ pub struct Config {
     pub max_tool_iterations: usize,
     #[serde(default = "default_max_history_messages")]
     pub max_history_messages: usize,
+    #[serde(default = "default_max_document_size_mb")]
+    pub max_document_size_mb: u64,
     #[serde(default = "default_data_dir")]
     pub data_dir: String,
     #[serde(default = "default_working_dir")]
@@ -263,6 +268,9 @@ impl Config {
         if self.web_session_idle_ttl_seconds == 0 {
             self.web_session_idle_ttl_seconds = default_web_session_idle_ttl_seconds();
         }
+        if self.max_document_size_mb == 0 {
+            self.max_document_size_mb = default_max_document_size_mb();
+        }
 
         // Validate required fields
         if self.telegram_bot_token.is_empty() && self.discord_bot_token.is_none() {
@@ -302,6 +310,7 @@ mod tests {
             max_tokens: 8192,
             max_tool_iterations: 100,
             max_history_messages: 50,
+            max_document_size_mb: 100,
             data_dir: "./microclaw.data".into(),
             working_dir: "./tmp".into(),
             openai_api_key: None,
@@ -337,6 +346,7 @@ mod tests {
         assert_eq!(cloned.max_tokens, 8192);
         assert_eq!(cloned.max_tool_iterations, 100);
         assert_eq!(cloned.max_history_messages, 50);
+        assert_eq!(cloned.max_document_size_mb, 100);
         assert!(cloned.openai_api_key.is_none());
         assert_eq!(cloned.timezone, "UTC");
         assert!(cloned.allowed_groups.is_empty());
@@ -383,6 +393,7 @@ mod tests {
         assert_eq!(config.max_tool_iterations, 100);
         assert_eq!(config.data_dir, "./microclaw.data");
         assert_eq!(config.working_dir, "./tmp");
+        assert_eq!(config.max_document_size_mb, 100);
         assert_eq!(config.timezone, "UTC");
     }
 

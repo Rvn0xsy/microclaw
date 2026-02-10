@@ -111,6 +111,7 @@ const DEFAULT_CONFIG_VALUES = {
   llm_provider: 'anthropic',
   max_tokens: 8192,
   max_tool_iterations: 100,
+  max_document_size_mb: 100,
   show_thinking: false,
   web_enabled: true,
   web_host: '127.0.0.1',
@@ -166,6 +167,21 @@ function readUiTheme(): UiTheme {
 
 function saveUiTheme(value: UiTheme): void {
   localStorage.setItem('microclaw_ui_theme', value)
+}
+
+function readSessionFromUrl(): string | null {
+  if (typeof window === 'undefined') return null
+  const raw = new URLSearchParams(window.location.search).get('session')
+  if (!raw) return null
+  const key = raw.trim()
+  return key.length > 0 ? key : null
+}
+
+function writeSessionToUrl(sessionKey: string): void {
+  if (typeof window === 'undefined') return
+  const url = new URL(window.location.href)
+  url.searchParams.set('session', sessionKey)
+  window.history.replaceState(null, '', url.toString())
 }
 
 if (typeof document !== 'undefined') {
@@ -474,7 +490,7 @@ function App() {
   const [uiTheme, setUiTheme] = useState<UiTheme>(readUiTheme())
   const [sessions, setSessions] = useState<SessionItem[]>([])
   const [extraSessions, setExtraSessions] = useState<SessionItem[]>([])
-  const [sessionKey, setSessionKey] = useState<string>('main')
+  const [sessionKey, setSessionKey] = useState<string>(readSessionFromUrl() || 'main')
   const [historySeed, setHistorySeed] = useState<ThreadMessageLike[]>([])
   const [historyCountBySession, setHistoryCountBySession] = useState<Record<string, number>>({})
   const [runtimeNonce, setRuntimeNonce] = useState<number>(0)
@@ -483,8 +499,6 @@ function App() {
   const [replayNotice, setReplayNotice] = useState<string>('')
   const [sending, setSending] = useState<boolean>(false)
   const [configOpen, setConfigOpen] = useState<boolean>(false)
-  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState<boolean>(false)
-  const [deleteTargetSession, setDeleteTargetSession] = useState<string | null>(null)
   const [config, setConfig] = useState<ConfigPayload | null>(null)
   const [configDraft, setConfigDraft] = useState<Record<string, unknown>>({})
   const [saveStatus, setSaveStatus] = useState<string>('')
@@ -526,12 +540,6 @@ function App() {
 
   const selectedSessionLabel = selectedSession?.label || sessionKey
   const selectedSessionReadOnly = Boolean(selectedSession && selectedSession.chat_type !== 'web')
-
-  const sessionLabelMap = useMemo(() => {
-    const m = new Map<string, string>()
-    for (const item of sessionItems) m.set(item.session_key, item.label)
-    return m
-  }, [sessionItems])
 
   async function loadSessions(): Promise<void> {
     const data = await api<{ sessions?: SessionItem[] }>('/api/sessions')
@@ -768,14 +776,7 @@ function App() {
     }
   }
 
-  function requestDeleteSession(targetSession: string): void {
-    setDeleteTargetSession(targetSession)
-    setDeleteConfirmOpen(true)
-  }
-
-  async function confirmDeleteSession(): Promise<void> {
-    const targetSession = deleteTargetSession
-    if (!targetSession) return
+  async function onDeleteSessionByKey(targetSession: string): Promise<void> {
     try {
       await api('/api/delete_session', {
         method: 'POST',
@@ -796,8 +797,6 @@ function App() {
       }
       await loadSessions()
       setStatusText('Session deleted')
-      setDeleteConfirmOpen(false)
-      setDeleteTargetSession(null)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     }
@@ -813,6 +812,7 @@ function App() {
       api_key: '',
       max_tokens: Number(data.config?.max_tokens ?? 8192),
       max_tool_iterations: Number(data.config?.max_tool_iterations ?? 100),
+      max_document_size_mb: Number(data.config?.max_document_size_mb ?? DEFAULT_CONFIG_VALUES.max_document_size_mb),
       show_thinking: Boolean(data.config?.show_thinking),
       web_enabled: Boolean(data.config?.web_enabled),
       web_host: String(data.config?.web_host || '127.0.0.1'),
@@ -842,6 +842,9 @@ function App() {
         case 'max_tool_iterations':
           next.max_tool_iterations = DEFAULT_CONFIG_VALUES.max_tool_iterations
           break
+        case 'max_document_size_mb':
+          next.max_document_size_mb = DEFAULT_CONFIG_VALUES.max_document_size_mb
+          break
         case 'show_thinking':
           next.show_thinking = DEFAULT_CONFIG_VALUES.show_thinking
           break
@@ -868,6 +871,9 @@ function App() {
         model: String(configDraft.model || ''),
         max_tokens: Number(configDraft.max_tokens || 8192),
         max_tool_iterations: Number(configDraft.max_tool_iterations || 100),
+        max_document_size_mb: Number(
+          configDraft.max_document_size_mb || DEFAULT_CONFIG_VALUES.max_document_size_mb,
+        ),
         show_thinking: Boolean(configDraft.show_thinking),
         web_enabled: Boolean(configDraft.web_enabled),
         web_host: String(configDraft.web_host || '127.0.0.1'),
@@ -897,7 +903,19 @@ function App() {
     ;(async () => {
       try {
         setError('')
-        await Promise.all([loadSessions(), loadHistory(sessionKey)])
+        const data = await api<{ sessions?: SessionItem[] }>('/api/sessions')
+        const loaded = Array.isArray(data.sessions) ? data.sessions : []
+        setSessions(loaded)
+
+        const fromUrl = readSessionFromUrl()
+        const keys = new Set(loaded.map((item) => item.session_key))
+        const initialSession = fromUrl && keys.has(fromUrl)
+          ? fromUrl
+          : loaded[0]?.session_key || 'main'
+
+        setSessionKey(initialSession)
+        writeSessionToUrl(initialSession)
+        await loadHistory(initialSession)
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e))
       }
@@ -908,6 +926,10 @@ function App() {
   useEffect(() => {
     loadHistory(sessionKey).catch((e) => setError(e instanceof Error ? e.message : String(e)))
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionKey])
+
+  useEffect(() => {
+    writeSessionToUrl(sessionKey)
   }, [sessionKey])
 
   const runtimeKey = `${sessionKey}-${runtimeNonce}`
@@ -931,10 +953,10 @@ function App() {
             uiThemeOptions={UI_THEME_OPTIONS}
             sessionItems={sessionItems}
             selectedSessionKey={sessionKey}
-            onSessionSelect={setSessionKey}
+            onSessionSelect={(key) => setSessionKey(key)}
             onRefreshSession={(key) => void onRefreshSessionByKey(key)}
             onResetSession={(key) => void onResetSessionByKey(key)}
-            onDeleteSession={(key) => requestDeleteSession(key)}
+            onDeleteSession={(key) => void onDeleteSessionByKey(key)}
             onOpenConfig={openConfig}
             onNewSession={createSession}
           />
@@ -984,31 +1006,6 @@ function App() {
             </div>
           </main>
         </div>
-
-        <Dialog.Root
-          open={deleteConfirmOpen}
-          onOpenChange={(open) => {
-            setDeleteConfirmOpen(open)
-            if (!open) setDeleteTargetSession(null)
-          }}
-        >
-          <Dialog.Content maxWidth="460px">
-            <Dialog.Title>Delete Session</Dialog.Title>
-            <Dialog.Description size="2" mb="3">
-              {deleteTargetSession
-                ? `Delete "${sessionLabelMap.get(deleteTargetSession) || deleteTargetSession}"? This removes all messages for this chat.`
-                : 'Delete this chat and all messages?'}
-            </Dialog.Description>
-            <Flex justify="end" gap="2">
-              <Dialog.Close>
-                <Button variant="soft">Cancel</Button>
-              </Dialog.Close>
-              <Button color="red" onClick={() => void confirmDeleteSession()}>
-                Delete
-              </Button>
-            </Flex>
-          </Dialog.Content>
-        </Dialog.Root>
 
         <Dialog.Root open={configOpen} onOpenChange={setConfigOpen}>
           <Dialog.Content maxWidth="760px">
@@ -1097,6 +1094,17 @@ function App() {
                         value={String(configDraft.max_tool_iterations || DEFAULT_CONFIG_VALUES.max_tool_iterations)}
                         onChange={(e) => setConfigField('max_tool_iterations', e.target.value)}
                         placeholder="max_tool_iterations"
+                      />
+                    </div>
+                    <div>
+                      <Flex justify="between" align="center" mb="1">
+                        <Text size="1" color="gray">Max document size (MB)</Text>
+                        <Button size="1" variant="ghost" onClick={() => resetConfigField('max_document_size_mb')}>Reset</Button>
+                      </Flex>
+                      <TextField.Root
+                        value={String(configDraft.max_document_size_mb || DEFAULT_CONFIG_VALUES.max_document_size_mb)}
+                        onChange={(e) => setConfigField('max_document_size_mb', e.target.value)}
+                        placeholder="max_document_size_mb"
                       />
                     </div>
                   </div>

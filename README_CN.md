@@ -75,7 +75,7 @@ Telegram 消息
 | `write_memory` | 写入持久化 CLAUDE.md 记忆 |
 | `web_search` | 通过 DuckDuckGo 搜索（返回标题、URL、摘要） |
 | `web_fetch` | 抓取 URL 并返回纯文本（去 HTML，最大 20KB） |
-| `send_message` | 会话中发送消息；支持 Telegram 附件发送（`attachment_path` + 可选 `caption`） |
+| `send_message` | 会话中发送消息；支持 Telegram/WhatsApp/Discord 附件发送（`attachment_path` + 可选 `caption`） |
 | `schedule_task` | 创建循环（cron）或一次性定时任务 |
 | `list_scheduled_tasks` | 列出聊天的所有活跃/暂停任务 |
 | `pause_scheduled_task` | 暂停定时任务 |
@@ -293,6 +293,7 @@ model: "claude-sonnet-4-20250514"
 # llm_base_url: "https://..."
 data_dir: "./microclaw.data"
 working_dir: "./tmp"
+max_document_size_mb: 100
 timezone: "UTC"
 ```
 
@@ -341,6 +342,7 @@ microclaw gateway uninstall
 | `working_dir` | 否 | `./tmp` | 工具默认工作目录；`bash/read_file/write_file/edit_file/glob/grep` 的相对路径都以此为基准 |
 | `max_tokens` | 否 | `8192` | 每次 Claude 回复的最大 token |
 | `max_tool_iterations` | 否 | `100` | 每条消息的最大工具循环次数 |
+| `max_document_size_mb` | 否 | `100` | Telegram 入站文档允许的最大大小（MB）；超过会拒绝并提示 |
 | `max_history_messages` | 否 | `50` | 作为上下文发送的历史消息数 |
 | `control_chat_ids` | 否 | `[]` | 可跨聊天执行操作的 chat_id 列表（send_message/定时/导出/全局记忆/todo） |
 | `max_session_messages` | 否 | `40` | 触发上下文压缩的消息数阈值 |
@@ -410,4 +412,4 @@ MIT
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=everettjf/MicroClaw&type=Date)](https://star-history.com/#everettjf/MicroClaw&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=microclaw/microclaw&type=Date)](https://star-history.com/#microclaw/microclaw&Date)

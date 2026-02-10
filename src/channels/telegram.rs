@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use teloxide::prelude::*;
@@ -154,9 +155,12 @@ async fn handle_message(
     msg: teloxide::types::Message,
     state: Arc<AppState>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let chat_id = msg.chat.id.0;
+
     // Extract content: text, photo, or voice
     let mut text = msg.text().unwrap_or("").to_string();
     let mut image_data: Option<(String, String)> = None; // (base64, media_type)
+    let mut document_saved_path: Option<String> = None;
 
     // Handle /reset command — clear session
     if text.trim() == "/reset" {
@@ -221,6 +225,94 @@ async fn handle_message(
         }
     }
 
+    // Handle document messages (text/code/file attachments)
+    if let Some(document) = msg.document() {
+        let max_bytes = state
+            .config
+            .max_document_size_mb
+            .saturating_mul(1024)
+            .saturating_mul(1024);
+        let doc_bytes = u64::from(document.file.size);
+        if doc_bytes > max_bytes {
+            let _ = bot
+                .send_message(
+                    msg.chat.id,
+                    format!(
+                        "Document is too large ({} bytes). Max allowed is {} MB.",
+                        doc_bytes, state.config.max_document_size_mb
+                    ),
+                )
+                .await;
+            return Ok(());
+        }
+
+        match download_telegram_file(&bot, &document.file.id.0).await {
+            Ok(bytes) => {
+                let original_name = document
+                    .file_name
+                    .as_deref()
+                    .unwrap_or("telegram-document.bin");
+                let safe_name = original_name
+                    .chars()
+                    .map(|c| match c {
+                        'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '-' | '_' => c,
+                        _ => '_',
+                    })
+                    .collect::<String>();
+
+                let dir = Path::new(&state.config.working_dir)
+                    .join("uploads")
+                    .join("telegram")
+                    .join(chat_id.to_string());
+                if let Err(e) = std::fs::create_dir_all(&dir) {
+                    error!("Failed to create upload dir {}: {e}", dir.display());
+                } else {
+                    let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+                    let path = dir.join(format!("{}-{}", ts, safe_name));
+                    match tokio::fs::write(&path, &bytes).await {
+                        Ok(()) => {
+                            document_saved_path = Some(path.display().to_string());
+                        }
+                        Err(e) => {
+                            error!("Failed to save telegram document {}: {e}", path.display());
+                        }
+                    }
+                }
+
+                let file_note = format!(
+                    "[document] filename={} bytes={} mime={}{}",
+                    original_name,
+                    bytes.len(),
+                    document
+                        .mime_type
+                        .as_ref()
+                        .map(|m| m.to_string())
+                        .unwrap_or_else(|| "application/octet-stream".to_string()),
+                    document_saved_path
+                        .as_ref()
+                        .map(|p| format!(" saved_path={}", p))
+                        .unwrap_or_default(),
+                );
+
+                if text.trim().is_empty() {
+                    text = file_note;
+                } else {
+                    text = format!("{}\n\n{}", text.trim(), file_note);
+                }
+            }
+            Err(e) => {
+                error!("Failed to download document: {e}");
+                if text.trim().is_empty() {
+                    text = format!("[document] download failed: {e}");
+                }
+            }
+        }
+
+        if text.trim().is_empty() {
+            text = msg.caption().unwrap_or("").to_string();
+        }
+    }
+
     // Handle voice messages
     if let Some(voice) = msg.voice() {
         if let Some(ref openai_key) = state.config.openai_api_key {
@@ -263,12 +355,10 @@ async fn handle_message(
         }
     }
 
-    // If no text and no image, nothing to process
-    if text.is_empty() && image_data.is_none() {
+    // If no text/image/document content, nothing to process
+    if text.trim().is_empty() && image_data.is_none() && document_saved_path.is_none() {
         return Ok(());
     }
-
-    let chat_id = msg.chat.id.0;
     let sender_name = msg
         .from
         .as_ref()
@@ -280,21 +370,15 @@ async fn handle_message(
         teloxide::types::ChatKind::Public(teloxide::types::ChatPublic {
             kind: teloxide::types::PublicChatKind::Group,
             ..
-        }) => {
-            ("group", "telegram_group")
-        }
+        }) => ("group", "telegram_group"),
         teloxide::types::ChatKind::Public(teloxide::types::ChatPublic {
             kind: teloxide::types::PublicChatKind::Supergroup(_),
             ..
-        }) => {
-            ("group", "telegram_supergroup")
-        }
+        }) => ("group", "telegram_supergroup"),
         teloxide::types::ChatKind::Public(teloxide::types::ChatPublic {
             kind: teloxide::types::PublicChatKind::Channel(_),
             ..
-        }) => {
-            ("group", "telegram_channel")
-        }
+        }) => ("group", "telegram_channel"),
     };
 
     let chat_title = msg.chat.title().map(|t| t.to_string());
@@ -314,12 +398,18 @@ async fn handle_message(
         let stored_content = if image_data.is_some() {
             format!(
                 "[image]{}",
-                if text.is_empty() {
+                if text.trim().is_empty() {
                     String::new()
                 } else {
                     format!(" {text}")
                 }
             )
+        } else if let Some(path) = &document_saved_path {
+            if text.trim().is_empty() {
+                format!("[document] saved_path={path}")
+            } else {
+                format!("[document] saved_path={path} {text}")
+            }
         } else {
             text
         };
@@ -346,12 +436,18 @@ async fn handle_message(
     let stored_content = if image_data.is_some() {
         format!(
             "[image]{}",
-            if text.is_empty() {
+            if text.trim().is_empty() {
                 String::new()
             } else {
                 format!(" {text}")
             }
         )
+    } else if let Some(path) = &document_saved_path {
+        if text.trim().is_empty() {
+            format!("[document] saved_path={path}")
+        } else {
+            format!("[document] saved_path={path} {text}")
+        }
     } else {
         text.clone()
     };
