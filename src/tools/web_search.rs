@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use serde_json::json;
 
+use super::web_html::extract_ddg_results;
 use super::{schema_object, Tool, ToolResult};
 use crate::claude::ToolDefinition;
 
@@ -65,39 +66,21 @@ async fn search_ddg(query: &str) -> Result<String, String> {
         .await
         .map_err(|e| e.to_string())?;
 
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+
     let body = resp.text().await.map_err(|e| e.to_string())?;
-
-    // Parse results using regex
-    // DuckDuckGo HTML results have <a class="result__a" href="...">title</a>
-    // and <a class="result__snippet">snippet</a>
-    let link_re =
-        regex::Regex::new(r#"<a[^>]+class="result__a"[^>]+href="([^"]*)"[^>]*>(.*?)</a>"#).unwrap();
-    let snippet_re = regex::Regex::new(r#"<a[^>]+class="result__snippet"[^>]*>(.*?)</a>"#).unwrap();
-    let tag_re = regex::Regex::new(r"<[^>]+>").unwrap();
-
-    let links: Vec<(String, String)> = link_re
-        .captures_iter(&body)
-        .map(|cap| {
-            let href = cap[1].to_string();
-            let title = tag_re.replace_all(&cap[2], "").trim().to_string();
-            (href, title)
-        })
-        .collect();
-
-    let snippets: Vec<String> = snippet_re
-        .captures_iter(&body)
-        .map(|cap| tag_re.replace_all(&cap[1], "").trim().to_string())
-        .collect();
+    let items = extract_ddg_results(&body, 8);
 
     let mut output = String::new();
-    for (i, (href, title)) in links.iter().enumerate().take(8) {
-        let snippet = snippets.get(i).map(|s| s.as_str()).unwrap_or("");
+    for (i, item) in items.iter().enumerate() {
         output.push_str(&format!(
             "{}. {}\n   {}\n   {}\n\n",
             i + 1,
-            title,
-            href,
-            snippet
+            item.title,
+            item.url,
+            item.snippet
         ));
     }
 

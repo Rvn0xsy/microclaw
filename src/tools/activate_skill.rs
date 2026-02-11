@@ -28,7 +28,7 @@ impl Tool for ActivateSkillTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "activate_skill".into(),
-            description: "Activate an agent skill to load its full instructions. Use this when you see a relevant skill in the available skills list and need its detailed instructions to complete a task.".into(),
+            description: "Activate an agent skill to load its full instructions. Use this when you see a relevant skill in the available skills list and need its detailed instructions to complete a task. Skills are filtered by platform/dependencies before they are listed.".into(),
             input_schema: schema_object(
                 json!({
                     "skill_name": {
@@ -49,31 +49,22 @@ impl Tool for ActivateSkillTool {
 
         info!("Activating skill: {}", skill_name);
 
-        match self.skill_manager.load_skill(skill_name) {
-            Some((meta, body)) => {
+        match self.skill_manager.load_skill_checked(skill_name) {
+            Ok((meta, body)) => {
                 let mut result = format!("# Skill: {}\n\n", meta.name);
                 result.push_str(&format!("Description: {}\n", meta.description));
-                result.push_str(&format!("Skill directory: {}\n\n", meta.dir_path.display()));
-                result.push_str("## Instructions\n\n");
+                result.push_str(&format!("Skill directory: {}\n", meta.dir_path.display()));
+                if !meta.platforms.is_empty() {
+                    result.push_str(&format!("Platforms: {}\n", meta.platforms.join(", ")));
+                }
+                if !meta.deps.is_empty() {
+                    result.push_str(&format!("Dependencies: {}\n", meta.deps.join(", ")));
+                }
+                result.push_str("\n## Instructions\n\n");
                 result.push_str(&body);
                 ToolResult::success(result)
             }
-            None => {
-                let available = self.skill_manager.discover_skills();
-                if available.is_empty() {
-                    ToolResult::error(format!(
-                        "Skill '{}' not found. No skills are currently available.",
-                        skill_name
-                    ))
-                } else {
-                    let names: Vec<&str> = available.iter().map(|s| s.name.as_str()).collect();
-                    ToolResult::error(format!(
-                        "Skill '{}' not found. Available skills: {}",
-                        skill_name,
-                        names.join(", ")
-                    ))
-                }
-            }
+            Err(e) => ToolResult::error(e),
         }
     }
 }

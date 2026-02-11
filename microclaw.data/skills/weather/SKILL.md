@@ -2,6 +2,9 @@
 name: weather
 description: Get current weather and short forecasts quickly using `wttr.in` (no API key required). Use when users ask for weather by city/region.
 license: Proprietary. LICENSE.txt has complete terms
+compatibility:
+  deps:
+    - curl
 ---
 
 # Weather

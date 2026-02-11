@@ -119,7 +119,7 @@ microclaw.data/skills/
 2. When the model determines a skill is relevant, it calls `activate_skill` to load the full instructions
 3. The model follows the skill instructions to complete the task
 
-**Built-in skills:** pdf, docx, xlsx, pptx, skill-creator, apple-notes, apple-reminders, apple-calendar, weather
+**Built-in skills:** pdf, docx, xlsx, pptx, skill-creator, apple-notes, apple-reminders, apple-calendar, weather, find-skills
 
 **New macOS skills (examples):**
 - `apple-notes` -- manage Apple Notes via `memo`
@@ -127,10 +127,66 @@ microclaw.data/skills/
 - `apple-calendar` -- query/create Calendar events via `icalBuddy` + `osascript`
 - `weather` -- quick weather lookup via `wttr.in`
 
-**Adding a skill:** Create a subdirectory under `microclaw.data/skills/` with a `SKILL.md` file containing YAML frontmatter (`name` and `description`) and markdown instructions.
+**Adding a skill:** Create a subdirectory under `microclaw.data/skills/` with a `SKILL.md` file containing YAML frontmatter and markdown instructions.
+
+Supported frontmatter fields:
+- `name`, `description`
+- `platforms` (optional): e.g. `[darwin, linux, windows]`
+- `deps` (optional): required commands in `PATH`
+- `compatibility.os` / `compatibility.deps` (also supported)
+
+Unavailable skills are filtered automatically by platform/dependencies, so unsupported skills do not appear in `/skills`.
 
 **Commands:**
 - `/skills` -- list all available skills
+
+## MCP
+
+MicroClaw supports MCP servers configured in `microclaw.data/mcp.json` with protocol negotiation and configurable transport.
+
+- Default protocol version: `2025-11-05` (overridable globally or per server)
+- Supported transports: `stdio`, `streamable_http`
+
+Recommended production start (minimal local MCP only):
+
+```sh
+cp mcp.minimal.example.json microclaw.data/mcp.json
+```
+
+Full example (includes optional remote streamable HTTP server):
+
+```sh
+cp mcp.example.json microclaw.data/mcp.json
+```
+
+Example:
+
+```json
+{
+  "defaultProtocolVersion": "2025-11-05",
+  "mcpServers": {
+    "filesystem": {
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]
+    },
+    "remote": {
+      "transport": "streamable_http",
+      "endpoint": "http://127.0.0.1:8080/mcp"
+    }
+  }
+}
+```
+
+Migration evaluation to official Rust SDK is tracked in `docs/mcp-sdk-evaluation.md`.
+
+Validation:
+
+```sh
+RUST_LOG=info cargo run -- start
+```
+
+Look for log lines like `MCP server '...' connected (...)`.
 
 ## Plan & Execute
 
@@ -171,6 +227,12 @@ Manage tasks with natural language:
 
 ```sh
 curl -fsSL https://microclaw.ai/install.sh | bash
+```
+
+### Windows PowerShell installer
+
+```powershell
+iwr https://microclaw.ai/install.ps1 -UseBasicParsing | iex
 ```
 
 This installer only does one thing:

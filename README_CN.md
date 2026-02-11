@@ -172,6 +172,12 @@ Todo 列表存储在 `microclaw.data/runtime/groups/{chat_id}/TODO.json`，跨�
 curl -fsSL https://microclaw.ai/install.sh | bash
 ```
 
+### Windows PowerShell 安装
+
+```powershell
+iwr https://microclaw.ai/install.ps1 -UseBasicParsing | iex
+```
+
 安装脚本仅执行一种方式：
 - 从最新 GitHub Release 下载匹配平台的预编译二进制
 - 不在 `install.sh` 内回退到 Homebrew/Cargo（请使用下面的独立方式）

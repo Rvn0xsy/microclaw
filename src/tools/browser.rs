@@ -5,16 +5,67 @@ use serde_json::json;
 use tracing::info;
 
 use crate::claude::ToolDefinition;
+use crate::tools::command_runner::agent_browser_program;
 
 use super::{auth_context_from_input, schema_object, Tool, ToolResult};
 
-/// Single-quote a string for safe shell embedding.
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
 pub struct BrowserTool {
     data_dir: PathBuf,
+}
+
+fn split_browser_command(command: &str) -> Result<Vec<String>, String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+
+    for ch in command.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+
+        if let Some(q) = quote {
+            if ch == q {
+                quote = None;
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+
+        if ch == '"' || ch == '\'' {
+            quote = Some(ch);
+            continue;
+        }
+
+        if ch.is_whitespace() {
+            if !current.is_empty() {
+                args.push(current.clone());
+                current.clear();
+            }
+            continue;
+        }
+
+        current.push(ch);
+    }
+
+    if escaped {
+        current.push('\\');
+    }
+    if quote.is_some() {
+        return Err("unclosed quote".into());
+    }
+    if !current.is_empty() {
+        args.push(current);
+    }
+    Ok(args)
 }
 
 impl BrowserTool {
@@ -104,35 +155,35 @@ impl Tool for BrowserTool {
 
         let auth = auth_context_from_input(&input);
 
-        // Build --profile flag from auth context chat_id
-        let profile_arg = auth
-            .as_ref()
-            .map(|auth| {
-                let path = self.profile_path(auth.caller_chat_id);
-                format!("--profile {}", shell_quote(&path.to_string_lossy()))
-            })
-            .unwrap_or_default();
-
         let session_name = auth
             .as_ref()
             .map(|auth| Self::session_name_for_chat(auth.caller_chat_id))
             .unwrap_or_else(|| "microclaw".to_string());
 
-        // Build full shell command so argument splitting is handled correctly
-        let shell_cmd = if profile_arg.is_empty() {
-            format!("agent-browser --session {session_name} {command}")
-        } else {
-            format!("agent-browser --session {session_name} {profile_arg} {command}")
-        };
+        let mut args = vec!["--session".to_string(), session_name];
+        if let Some(auth) = auth.as_ref() {
+            let path = self.profile_path(auth.caller_chat_id);
+            args.push("--profile".to_string());
+            args.push(path.to_string_lossy().to_string());
+        }
 
-        info!("Executing browser: {}", shell_cmd);
+        let command_args = match split_browser_command(command) {
+            Ok(parts) if !parts.is_empty() => parts,
+            Ok(_) => return ToolResult::error("Empty browser command".into()),
+            Err(e) => {
+                return ToolResult::error(format!(
+                    "Invalid browser command syntax (quote parsing failed): {e}"
+                ));
+            }
+        };
+        args.extend(command_args);
+
+        let program = agent_browser_program();
+        info!("Executing browser command via '{}'", program);
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(timeout_secs),
-            tokio::process::Command::new("bash")
-                .arg("-c")
-                .arg(&shell_cmd)
-                .output(),
+            tokio::process::Command::new(&program).args(&args).output(),
         )
         .await;
 
@@ -164,15 +215,19 @@ impl Tool for BrowserTool {
                 }
 
                 if exit_code == 0 {
-                    ToolResult::success(result_text)
+                    ToolResult::success(result_text).with_status_code(exit_code)
                 } else {
                     ToolResult::error(format!("Exit code {exit_code}\n{result_text}"))
+                        .with_status_code(exit_code)
+                        .with_error_type("process_exit")
                 }
             }
-            Ok(Err(e)) => ToolResult::error(format!("Failed to execute agent-browser: {e}")),
+            Ok(Err(e)) => ToolResult::error(format!("Failed to execute agent-browser: {e}"))
+                .with_error_type("spawn_error"),
             Err(_) => ToolResult::error(format!(
                 "Browser command timed out after {timeout_secs} seconds"
-            )),
+            ))
+            .with_error_type("timeout"),
         }
     }
 }
@@ -181,6 +236,18 @@ impl Tool for BrowserTool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn test_split_browser_command() {
+        let args = split_browser_command("fill @e2 \"hello world\"").unwrap();
+        assert_eq!(args, vec!["fill", "@e2", "hello world"]);
+    }
+
+    #[test]
+    fn test_split_browser_command_unclosed_quote() {
+        let err = split_browser_command("open \"https://example.com").unwrap_err();
+        assert!(err.contains("unclosed quote"));
+    }
 
     #[test]
     fn test_browser_tool_name_and_definition() {

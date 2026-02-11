@@ -808,22 +808,16 @@ pub async fn process_with_agent_with_events(
                         } else {
                             result.content.clone()
                         };
-                        let duration_ms = started.elapsed().as_millis();
-                        let status_code = if result.is_error { Some(1) } else { Some(0) };
-                        let bytes = result.content.len();
-                        let error_type = if result.is_error {
-                            Some("tool_error".to_string())
-                        } else {
-                            None
-                        };
                         let _ = tx.send(AgentEvent::ToolResult {
                             name: name.clone(),
                             is_error: result.is_error,
                             preview,
-                            duration_ms,
-                            status_code,
-                            bytes,
-                            error_type,
+                            duration_ms: result
+                                .duration_ms
+                                .unwrap_or_else(|| started.elapsed().as_millis()),
+                            status_code: result.status_code,
+                            bytes: result.bytes,
+                            error_type: result.error_type.clone(),
                         });
                     }
                     tool_results.push(ContentBlock::ToolResult {

@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use serde_json::json;
 
+use super::web_html::{extract_primary_html, html_to_text};
 use super::{schema_object, Tool, ToolResult};
 use crate::claude::ToolDefinition;
 
@@ -15,8 +16,9 @@ impl Tool for WebFetchTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "web_fetch".into(),
-            description: "Fetch a URL and return its text content (HTML tags stripped). Max 20KB."
-                .into(),
+            description:
+                "Fetch a URL and return its text content (HTML parsed, scripts/styles removed). Max 20KB."
+                    .into(),
             input_schema: schema_object(
                 json!({
                     "url": {
@@ -61,18 +63,9 @@ async fn fetch_url(url: &str) -> Result<String, String> {
     }
 
     let body = resp.text().await.map_err(|e| e.to_string())?;
+    let primary = extract_primary_html(&body);
+    let text = html_to_text(primary);
 
-    // Strip HTML tags with regex
-    let tag_re = regex::Regex::new(r"<[^>]+>").unwrap();
-    let text = tag_re.replace_all(&body, "");
-
-    // Collapse whitespace
-    let ws_re = regex::Regex::new(r"\s+").unwrap();
-    let text = ws_re.replace_all(&text, " ");
-
-    let text = text.trim().to_string();
-
-    // Truncate to ~20KB
     const MAX_BYTES: usize = 20_000;
     if text.len() > MAX_BYTES {
         let truncated = &text[..text.floor_char_boundary(MAX_BYTES)];

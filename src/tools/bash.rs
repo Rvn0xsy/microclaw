@@ -5,6 +5,7 @@ use tracing::info;
 
 use crate::claude::ToolDefinition;
 use crate::config::WorkingDirIsolation;
+use crate::tools::command_runner::{build_command, shell_command};
 
 use super::{schema_object, Tool, ToolResult};
 
@@ -76,13 +77,10 @@ impl Tool for BashTool {
 
         info!("Executing bash: {}", command);
 
+        let spec = shell_command(command);
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(timeout_secs),
-            tokio::process::Command::new("bash")
-                .current_dir(&working_dir)
-                .arg("-c")
-                .arg(command)
-                .output(),
+            build_command(&spec, Some(&working_dir)).output(),
         )
         .await;
 
@@ -114,13 +112,17 @@ impl Tool for BashTool {
                 }
 
                 if exit_code == 0 {
-                    ToolResult::success(result_text)
+                    ToolResult::success(result_text).with_status_code(exit_code)
                 } else {
                     ToolResult::error(format!("Exit code {exit_code}\n{result_text}"))
+                        .with_status_code(exit_code)
+                        .with_error_type("process_exit")
                 }
             }
-            Ok(Err(e)) => ToolResult::error(format!("Failed to execute command: {e}")),
-            Err(_) => ToolResult::error(format!("Command timed out after {timeout_secs} seconds")),
+            Ok(Err(e)) => ToolResult::error(format!("Failed to execute command: {e}"))
+                .with_error_type("spawn_error"),
+            Err(_) => ToolResult::error(format!("Command timed out after {timeout_secs} seconds"))
+                .with_error_type("timeout"),
         }
     }
 }

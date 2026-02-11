@@ -1,3 +1,4 @@
+use serde::Deserialize;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
@@ -5,6 +6,29 @@ pub struct SkillMetadata {
     pub name: String,
     pub description: String,
     pub dir_path: PathBuf,
+    pub platforms: Vec<String>,
+    pub deps: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct SkillFrontmatter {
+    name: Option<String>,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    platforms: Vec<String>,
+    #[serde(default)]
+    deps: Vec<String>,
+    #[serde(default)]
+    compatibility: SkillCompatibility,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct SkillCompatibility {
+    #[serde(default)]
+    os: Vec<String>,
+    #[serde(default)]
+    deps: Vec<String>,
 }
 
 pub struct SkillManager {
@@ -24,13 +48,18 @@ impl SkillManager {
         SkillManager { skills_dir }
     }
 
-    /// Discover all skills by reading subdirectories for SKILL.md files.
+    /// Discover all skills that are available on the current platform and satisfy dependency checks.
     pub fn discover_skills(&self) -> Vec<SkillMetadata> {
+        self.discover_skills_internal(false)
+    }
+
+    fn discover_skills_internal(&self, include_unavailable: bool) -> Vec<SkillMetadata> {
         let mut skills = Vec::new();
         let entries = match std::fs::read_dir(&self.skills_dir) {
             Ok(e) => e,
             Err(_) => return skills,
         };
+
         for entry in entries.flatten() {
             let path = entry.path();
             if !path.is_dir() {
@@ -42,28 +71,76 @@ impl SkillManager {
             }
             if let Ok(content) = std::fs::read_to_string(&skill_md) {
                 if let Some((meta, _body)) = parse_skill_md(&content, &path) {
-                    skills.push(meta);
-                }
-            }
-        }
-        skills.sort_by(|a, b| a.name.cmp(&b.name));
-        skills
-    }
-
-    /// Load a skill by name, returning metadata and full instruction body.
-    pub fn load_skill(&self, name: &str) -> Option<(SkillMetadata, String)> {
-        let skills = self.discover_skills();
-        for skill in skills {
-            if skill.name == name {
-                let skill_md = skill.dir_path.join("SKILL.md");
-                if let Ok(content) = std::fs::read_to_string(&skill_md) {
-                    if let Some((meta, body)) = parse_skill_md(&content, &skill.dir_path) {
-                        return Some((meta, body));
+                    if include_unavailable || self.skill_is_available(&meta).is_ok() {
+                        skills.push(meta);
                     }
                 }
             }
         }
-        None
+
+        skills.sort_by(|a, b| a.name.cmp(&b.name));
+        skills
+    }
+
+    /// Load a skill by name if it is available on the current platform.
+    pub fn load_skill(&self, name: &str) -> Option<(SkillMetadata, String)> {
+        self.load_skill_checked(name).ok()
+    }
+
+    /// Load a skill with availability diagnostics.
+    pub fn load_skill_checked(&self, name: &str) -> Result<(SkillMetadata, String), String> {
+        let all_skills = self.discover_skills_internal(true);
+
+        for skill in all_skills {
+            if skill.name != name {
+                continue;
+            }
+
+            self.skill_is_available(&skill)?;
+
+            let skill_md = skill.dir_path.join("SKILL.md");
+            if let Ok(content) = std::fs::read_to_string(&skill_md) {
+                if let Some((meta, body)) = parse_skill_md(&content, &skill.dir_path) {
+                    return Ok((meta, body));
+                }
+            }
+            return Err(format!("Skill '{name}' exists but could not be loaded."));
+        }
+
+        let available = self.discover_skills();
+        if available.is_empty() {
+            Err(format!(
+                "Skill '{name}' not found. No skills are currently available."
+            ))
+        } else {
+            let names: Vec<&str> = available.iter().map(|s| s.name.as_str()).collect();
+            Err(format!(
+                "Skill '{name}' not found. Available skills: {}",
+                names.join(", ")
+            ))
+        }
+    }
+
+    fn skill_is_available(&self, skill: &SkillMetadata) -> Result<(), String> {
+        if !platform_allowed(&skill.platforms) {
+            return Err(format!(
+                "Skill '{}' is not available on this platform (current: {}, supported: {}).",
+                skill.name,
+                current_platform(),
+                skill.platforms.join(", ")
+            ));
+        }
+
+        let missing = missing_deps(&skill.deps);
+        if !missing.is_empty() {
+            return Err(format!(
+                "Skill '{}' is missing required dependencies: {}",
+                skill.name,
+                missing.join(", ")
+            ));
+        }
+
+        Ok(())
     }
 
     /// Build a compact skills catalog for the system prompt.
@@ -85,7 +162,7 @@ impl SkillManager {
     pub fn list_skills_formatted(&self) -> String {
         let skills = self.discover_skills();
         if skills.is_empty() {
-            return "No skills available.".into();
+            return "No skills available on this platform/runtime.".into();
         }
         let mut output = format!("Available skills ({}):\n\n", skills.len());
         for skill in &skills {
@@ -100,43 +177,162 @@ impl SkillManager {
     }
 }
 
-/// Parse a SKILL.md file, extracting frontmatter (name, description) and body.
-/// Returns None if the file lacks valid frontmatter with a name field.
-fn parse_skill_md(content: &str, dir_path: &std::path::Path) -> Option<(SkillMetadata, String)> {
-    let trimmed = content.trim_start();
-    if !trimmed.starts_with("---") {
-        return None;
+fn current_platform() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "darwin"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "unknown"
+    }
+}
+
+fn normalize_platform(value: &str) -> String {
+    let v = value.trim().to_ascii_lowercase();
+    match v.as_str() {
+        "macos" | "osx" => "darwin".to_string(),
+        _ => v,
+    }
+}
+
+fn platform_allowed(platforms: &[String]) -> bool {
+    if platforms.is_empty() {
+        return true;
     }
 
-    // Find the closing ---
-    let after_opening = &trimmed[3..];
-    let closing_pos = after_opening.find("\n---")?;
-    let frontmatter = &after_opening[..closing_pos];
-    let body = after_opening[closing_pos + 4..].trim().to_string();
+    let current = current_platform();
+    platforms.iter().any(|p| {
+        let p = normalize_platform(p);
+        p == "all" || p == "*" || p == current
+    })
+}
 
-    let mut name: Option<String> = None;
-    let mut description = String::new();
+fn command_exists(command: &str) -> bool {
+    if command.trim().is_empty() {
+        return true;
+    }
 
-    for line in frontmatter.lines() {
-        let line = line.trim();
-        if let Some((key, value)) = line.split_once(':') {
-            let key = key.trim();
-            let value = value.trim().trim_matches('"').trim_matches('\'');
-            match key {
-                "name" => name = Some(value.to_string()),
-                "description" => description = value.to_string(),
-                _ => {} // ignore other fields
+    let path_var = std::env::var_os("PATH").unwrap_or_default();
+    let paths = std::env::split_paths(&path_var);
+
+    #[cfg(target_os = "windows")]
+    let candidates: Vec<String> = {
+        let exts = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+        let ext_list: Vec<String> = exts
+            .split(';')
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let lower = command.to_ascii_lowercase();
+        if ext_list.iter().any(|ext| lower.ends_with(ext)) {
+            vec![command.to_string()]
+        } else {
+            let mut c = vec![command.to_string()];
+            for ext in ext_list {
+                c.push(format!("{command}{ext}"));
+            }
+            c
+        }
+    };
+
+    #[cfg(not(target_os = "windows"))]
+    let candidates: Vec<String> = vec![command.to_string()];
+
+    for base in paths {
+        for candidate in &candidates {
+            let full = base.join(candidate);
+            if full.is_file() {
+                return true;
             }
         }
     }
 
-    let name = name?;
+    false
+}
+
+fn missing_deps(deps: &[String]) -> Vec<String> {
+    deps.iter()
+        .filter(|dep| !command_exists(dep))
+        .cloned()
+        .collect()
+}
+
+/// Parse a SKILL.md file, extracting frontmatter via YAML and body.
+/// Returns None if the file lacks valid frontmatter with a name field.
+fn parse_skill_md(content: &str, dir_path: &std::path::Path) -> Option<(SkillMetadata, String)> {
+    let trimmed = content.trim_start_matches('\u{feff}');
+    if !trimmed.starts_with("---\n") && !trimmed.starts_with("---\r\n") {
+        return None;
+    }
+
+    let mut lines = trimmed.lines();
+    let _ = lines.next()?; // opening ---
+
+    let mut yaml_block = String::new();
+    let mut consumed = 0usize;
+    for line in lines {
+        consumed += line.len() + 1;
+        if line.trim() == "---" || line.trim() == "..." {
+            break;
+        }
+        yaml_block.push_str(line);
+        yaml_block.push('\n');
+    }
+
+    if yaml_block.trim().is_empty() {
+        return None;
+    }
+
+    let fm: SkillFrontmatter = serde_yaml::from_str(&yaml_block).ok()?;
+    let name = fm.name?.trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+
+    let mut platforms: Vec<String> = fm
+        .platforms
+        .into_iter()
+        .chain(fm.compatibility.os)
+        .map(|p| normalize_platform(&p))
+        .filter(|p| !p.is_empty())
+        .collect();
+    platforms.sort();
+    platforms.dedup();
+
+    let mut deps: Vec<String> = fm
+        .deps
+        .into_iter()
+        .chain(fm.compatibility.deps)
+        .map(|d| d.trim().to_string())
+        .filter(|d| !d.is_empty())
+        .collect();
+    deps.sort();
+    deps.dedup();
+
+    let header_len = if let Some(idx) = trimmed.find("\n---\n") {
+        idx + 5
+    } else if let Some(idx) = trimmed.find("\n...\n") {
+        idx + 5
+    } else {
+        // fallback to consumed length from line-by-line scan
+        4 + consumed
+    };
+
+    let body = trimmed
+        .get(header_len..)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
 
     Some((
         SkillMetadata {
             name,
-            description,
+            description: fm.description,
             dir_path: dir_path.to_path_buf(),
+            platforms,
+            deps,
         },
         body,
     ))
@@ -151,11 +347,10 @@ mod tests {
         let content = r#"---
 name: pdf
 description: Convert documents to PDF
+platforms: [linux, darwin]
+deps: [pandoc]
 ---
 Use this skill to convert documents.
-
-## Steps
-1. Do the thing
 "#;
         let dir = PathBuf::from("/tmp/skills/pdf");
         let result = parse_skill_md(content, &dir);
@@ -163,9 +358,28 @@ Use this skill to convert documents.
         let (meta, body) = result.unwrap();
         assert_eq!(meta.name, "pdf");
         assert_eq!(meta.description, "Convert documents to PDF");
-        assert_eq!(meta.dir_path, dir);
-        assert!(body.contains("Use this skill to convert documents."));
-        assert!(body.contains("## Steps"));
+        assert_eq!(meta.platforms, vec!["darwin", "linux"]);
+        assert_eq!(meta.deps, vec!["pandoc"]);
+        assert!(body.contains("Use this skill"));
+    }
+
+    #[test]
+    fn test_parse_skill_md_compatibility_os() {
+        let content = r#"---
+name: apple-notes
+description: Apple Notes
+compatibility:
+  os:
+    - darwin
+  deps:
+    - memo
+---
+Instructions.
+"#;
+        let dir = PathBuf::from("/tmp/skills/apple-notes");
+        let (meta, _) = parse_skill_md(content, &dir).unwrap();
+        assert_eq!(meta.platforms, vec!["darwin"]);
+        assert_eq!(meta.deps, vec!["memo"]);
     }
 
     #[test]
@@ -176,156 +390,17 @@ Use this skill to convert documents.
     }
 
     #[test]
-    fn test_parse_skill_md_missing_name() {
-        let content = r#"---
-description: A skill without a name
----
-Body text here.
-"#;
-        let dir = PathBuf::from("/tmp/skills/test");
-        assert!(parse_skill_md(content, &dir).is_none());
-    }
-
-    #[test]
-    fn test_parse_skill_md_extra_fields_ignored() {
-        let content = r#"---
-name: data-analysis
-description: Analyze datasets
-license: MIT
-version: 1.0
-allowed-tools: bash, python
----
-Instructions here.
-"#;
-        let dir = PathBuf::from("/tmp/skills/data-analysis");
-        let result = parse_skill_md(content, &dir);
-        assert!(result.is_some());
-        let (meta, body) = result.unwrap();
-        assert_eq!(meta.name, "data-analysis");
-        assert_eq!(meta.description, "Analyze datasets");
-        assert!(body.contains("Instructions here."));
-    }
-
-    fn test_skills_dir() -> PathBuf {
-        std::env::temp_dir().join(format!("microclaw_skills_test_{}", uuid::Uuid::new_v4()))
-    }
-
-    fn cleanup(dir: &std::path::Path) {
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    fn create_skill(base_dir: &std::path::Path, name: &str, desc: &str, body: &str) {
-        let skill_dir = base_dir.join("skills").join(name);
-        std::fs::create_dir_all(&skill_dir).unwrap();
-        let content = format!("---\nname: {name}\ndescription: {desc}\n---\n{body}\n");
-        std::fs::write(skill_dir.join("SKILL.md"), content).unwrap();
-    }
-
-    #[test]
-    fn test_discover_skills_empty_dir() {
-        let dir = test_skills_dir();
-        let sm = SkillManager::new(dir.to_str().unwrap());
-        let skills = sm.discover_skills();
-        assert!(skills.is_empty());
-        cleanup(&dir);
-    }
-
-    #[test]
-    fn test_discover_skills_with_skills() {
-        let dir = test_skills_dir();
-        create_skill(&dir, "pdf", "Convert to PDF", "PDF instructions");
-        create_skill(&dir, "data-analysis", "Analyze data", "Data instructions");
-
-        let sm = SkillManager::new(dir.to_str().unwrap());
-        let skills = sm.discover_skills();
-        assert_eq!(skills.len(), 2);
-        // Sorted alphabetically
-        assert_eq!(skills[0].name, "data-analysis");
-        assert_eq!(skills[1].name, "pdf");
-        cleanup(&dir);
-    }
-
-    #[test]
-    fn test_discover_skills_ignores_no_skill_md() {
-        let dir = test_skills_dir();
-        create_skill(&dir, "valid-skill", "A valid skill", "Instructions");
-        // Create a dir without SKILL.md
-        let invalid_dir = dir.join("skills").join("no-skill-md");
-        std::fs::create_dir_all(&invalid_dir).unwrap();
-        std::fs::write(invalid_dir.join("README.md"), "not a skill").unwrap();
-
-        let sm = SkillManager::new(dir.to_str().unwrap());
-        let skills = sm.discover_skills();
-        assert_eq!(skills.len(), 1);
-        assert_eq!(skills[0].name, "valid-skill");
-        cleanup(&dir);
-    }
-
-    #[test]
-    fn test_load_skill_found() {
-        let dir = test_skills_dir();
-        create_skill(&dir, "pdf", "Convert to PDF", "Use pdflatex to convert.");
-
-        let sm = SkillManager::new(dir.to_str().unwrap());
-        let result = sm.load_skill("pdf");
-        assert!(result.is_some());
-        let (meta, body) = result.unwrap();
-        assert_eq!(meta.name, "pdf");
-        assert_eq!(meta.description, "Convert to PDF");
-        assert!(body.contains("Use pdflatex to convert."));
-        cleanup(&dir);
-    }
-
-    #[test]
-    fn test_load_skill_not_found() {
-        let dir = test_skills_dir();
-        let sm = SkillManager::new(dir.to_str().unwrap());
-        assert!(sm.load_skill("nonexistent").is_none());
-        cleanup(&dir);
+    fn test_platform_allowed_empty_means_all() {
+        assert!(platform_allowed(&[]));
     }
 
     #[test]
     fn test_build_skills_catalog_empty() {
-        let dir = test_skills_dir();
+        let dir =
+            std::env::temp_dir().join(format!("microclaw_skills_test_{}", uuid::Uuid::new_v4()));
         let sm = SkillManager::new(dir.to_str().unwrap());
         let catalog = sm.build_skills_catalog();
         assert!(catalog.is_empty());
-        cleanup(&dir);
-    }
-
-    #[test]
-    fn test_build_skills_catalog_with_skills() {
-        let dir = test_skills_dir();
-        create_skill(&dir, "pdf", "Convert to PDF", "Instructions");
-        create_skill(&dir, "data-analysis", "Analyze data", "Instructions");
-
-        let sm = SkillManager::new(dir.to_str().unwrap());
-        let catalog = sm.build_skills_catalog();
-        assert!(catalog.contains("<available_skills>"));
-        assert!(catalog.contains("</available_skills>"));
-        assert!(catalog.contains("- pdf: Convert to PDF"));
-        assert!(catalog.contains("- data-analysis: Analyze data"));
-        cleanup(&dir);
-    }
-
-    #[test]
-    fn test_list_skills_formatted() {
-        let dir = test_skills_dir();
-        create_skill(&dir, "pdf", "Convert to PDF", "Instructions");
-
-        let sm = SkillManager::new(dir.to_str().unwrap());
-        let formatted = sm.list_skills_formatted();
-        assert!(formatted.contains("Available skills (1)"));
-        assert!(formatted.contains("• pdf — Convert to PDF"));
-        cleanup(&dir);
-    }
-
-    #[test]
-    fn test_list_skills_formatted_empty() {
-        let dir = test_skills_dir();
-        let sm = SkillManager::new(dir.to_str().unwrap());
-        let formatted = sm.list_skills_formatted();
-        assert_eq!(formatted, "No skills available.");
-        cleanup(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

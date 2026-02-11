@@ -58,7 +58,9 @@ impl Tool for McpTool {
     async fn execute(&self, input: serde_json::Value) -> ToolResult {
         match self.server.call_tool(&self.tool_info.name, input).await {
             Ok(output) => ToolResult::success(output),
-            Err(e) => ToolResult::error(format!("MCP tool error: {e}")),
+            Err(e) => {
+                ToolResult::error(format!("MCP tool error: {e}")).with_error_type("mcp_error")
+            }
         }
     }
 }

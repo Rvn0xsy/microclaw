@@ -5,6 +5,8 @@ license: Proprietary. LICENSE.txt has complete terms
 compatibility:
   os:
     - darwin
+  deps:
+    - icalBuddy
 ---
 
 # Apple Calendar

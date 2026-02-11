@@ -1,6 +1,7 @@
 pub mod activate_skill;
 pub mod bash;
 pub mod browser;
+pub mod command_runner;
 pub mod edit_file;
 pub mod export_chat;
 pub mod glob;
@@ -14,11 +15,12 @@ pub mod send_message;
 pub mod sub_agent;
 pub mod todo;
 pub mod web_fetch;
+pub mod web_html;
 pub mod web_search;
 pub mod write_file;
 
 use std::sync::Arc;
-use std::{path::Path, path::PathBuf};
+use std::{path::Path, path::PathBuf, time::Instant};
 
 use async_trait::async_trait;
 use serde_json::json;
@@ -31,21 +33,45 @@ use crate::db::Database;
 pub struct ToolResult {
     pub content: String,
     pub is_error: bool,
+    pub status_code: Option<i32>,
+    pub bytes: usize,
+    pub duration_ms: Option<u128>,
+    pub error_type: Option<String>,
 }
 
 impl ToolResult {
     pub fn success(content: String) -> Self {
+        let bytes = content.len();
         ToolResult {
             content,
             is_error: false,
+            status_code: Some(0),
+            bytes,
+            duration_ms: None,
+            error_type: None,
         }
     }
 
     pub fn error(content: String) -> Self {
+        let bytes = content.len();
         ToolResult {
             content,
             is_error: true,
+            status_code: Some(1),
+            bytes,
+            duration_ms: None,
+            error_type: Some("tool_error".to_string()),
         }
+    }
+
+    pub fn with_status_code(mut self, status_code: i32) -> Self {
+        self.status_code = Some(status_code);
+        self
+    }
+
+    pub fn with_error_type(mut self, error_type: impl Into<String>) -> Self {
+        self.error_type = Some(error_type.into());
+        self
     }
 }
 
@@ -302,10 +328,20 @@ impl ToolRegistry {
     pub async fn execute(&self, name: &str, input: serde_json::Value) -> ToolResult {
         for tool in &self.tools {
             if tool.name() == name {
-                return tool.execute(input).await;
+                let started = Instant::now();
+                let mut result = tool.execute(input).await;
+                result.duration_ms = Some(started.elapsed().as_millis());
+                result.bytes = result.content.len();
+                if result.is_error && result.error_type.is_none() {
+                    result.error_type = Some("tool_error".to_string());
+                }
+                if result.status_code.is_none() {
+                    result.status_code = Some(if result.is_error { 1 } else { 0 });
+                }
+                return result;
             }
         }
-        ToolResult::error(format!("Unknown tool: {name}"))
+        ToolResult::error(format!("Unknown tool: {name}")).with_error_type("unknown_tool")
     }
 
     pub async fn execute_with_auth(
