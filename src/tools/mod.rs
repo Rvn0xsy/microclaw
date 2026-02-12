@@ -278,7 +278,7 @@ pub fn resolve_tool_working_dir(
 }
 
 impl ToolRegistry {
-    pub fn new(config: &Config, bot: Bot, db: Arc<Database>) -> Self {
+    pub fn new(config: &Config, telegram_bot: Option<Bot>, db: Arc<Database>) -> Self {
         let working_dir = PathBuf::from(&config.working_dir);
         if let Err(e) = std::fs::create_dir_all(&working_dir) {
             tracing::warn!(
@@ -319,7 +319,7 @@ impl ToolRegistry {
             Box::new(web_fetch::WebFetchTool),
             Box::new(web_search::WebSearchTool),
             Box::new(send_message::SendMessageTool::new_with_config(
-                bot,
+                telegram_bot,
                 db.clone(),
                 config.bot_username.clone(),
                 config.clone(),

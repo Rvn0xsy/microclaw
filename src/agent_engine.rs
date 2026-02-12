@@ -140,6 +140,7 @@ pub(crate) async fn process_with_agent_impl(
     let skills_catalog = state.skills.build_skills_catalog();
     let system_prompt = build_system_prompt(
         &state.config.bot_username,
+        context.caller_channel,
         &memory_context,
         chat_id,
         &skills_catalog,
@@ -459,12 +460,15 @@ pub(crate) async fn load_messages_from_db(
 
 pub(crate) fn build_system_prompt(
     bot_username: &str,
+    caller_channel: &str,
     memory_context: &str,
     chat_id: i64,
     skills_catalog: &str,
 ) -> String {
     let mut prompt = format!(
-        r#"You are {bot_username}, a helpful AI assistant on Telegram. You can execute tools to help users with tasks.
+        r#"You are {bot_username}, a helpful AI assistant across chat channels. You can execute tools to help users with tasks.
+
+Current channel: {caller_channel}.
 
 You have access to the following capabilities:
 - Execute bash commands

@@ -1,8 +1,8 @@
 use microclaw::config::Config;
 use microclaw::error::MicroClawError;
 use microclaw::{
-    builtin_skills, config_wizard, db, doctor, gateway, logging, mcp, memory, setup, skills,
-    telegram,
+    builtin_skills, config_wizard, db, doctor, gateway, logging, mcp, memory, runtime, setup,
+    skills,
 };
 use std::path::Path;
 use tracing::info;
@@ -48,7 +48,7 @@ SETUP:
     2. Edit microclaw.config.yaml with required values:
 
        api_key               LLM API key (optional when llm_provider=ollama)
-       At least one channel token must be set (Telegram or Discord)
+       Enable at least one channel: Telegram, Discord, WhatsApp, or Web UI
 
     3. Run: microclaw start
 
@@ -279,7 +279,7 @@ async fn main() -> anyhow::Result<()> {
     let mut runtime_config = config.clone();
     runtime_config.data_dir = runtime_data_dir;
 
-    telegram::run_bot(
+    runtime::run(
         runtime_config,
         db,
         memory_manager,

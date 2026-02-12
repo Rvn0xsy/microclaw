@@ -9,12 +9,8 @@ use crate::agent_engine::{archive_conversation, process_with_agent, AgentRequest
 use crate::claude::Message;
 #[cfg(test)]
 use crate::claude::{ContentBlock, ImageSource, MessageContent};
-use crate::config::Config;
-use crate::db::{call_blocking, Database, StoredMessage};
-use crate::memory::MemoryManager;
+use crate::db::{call_blocking, StoredMessage};
 use crate::runtime::AppState;
-use crate::skills::SkillManager;
-use crate::tools::ToolRegistry;
 
 /// Escape XML special characters in user-supplied content to prevent prompt injection.
 /// User messages are wrapped in XML tags; escaping ensures the content cannot break out.
@@ -35,76 +31,7 @@ fn format_user_message(sender_name: &str, content: &str) -> String {
     )
 }
 
-pub async fn run_bot(
-    config: Config,
-    db: Database,
-    memory: MemoryManager,
-    skills: SkillManager,
-    mcp_manager: crate::mcp::McpManager,
-) -> anyhow::Result<()> {
-    let bot = Bot::new(&config.telegram_bot_token);
-    let db = Arc::new(db);
-
-    let llm = crate::llm::create_provider(&config);
-    let mut tools = ToolRegistry::new(&config, bot.clone(), db.clone());
-
-    // Register MCP tools
-    for (server, tool_info) in mcp_manager.all_tools() {
-        tools.add_tool(Box::new(crate::tools::mcp::McpTool::new(server, tool_info)));
-    }
-
-    let state = Arc::new(AppState {
-        config,
-        bot: bot.clone(),
-        db,
-        memory,
-        skills,
-        llm,
-        tools,
-    });
-
-    // Start scheduler
-    crate::scheduler::spawn_scheduler(state.clone());
-
-    // Start WhatsApp webhook server if configured
-    if let (Some(token), Some(phone_id), Some(verify)) = (
-        &state.config.whatsapp_access_token,
-        &state.config.whatsapp_phone_number_id,
-        &state.config.whatsapp_verify_token,
-    ) {
-        let wa_state = state.clone();
-        let token = token.clone();
-        let phone_id = phone_id.clone();
-        let verify = verify.clone();
-        let port = state.config.whatsapp_webhook_port;
-        info!("Starting WhatsApp webhook server on port {port}");
-        tokio::spawn(async move {
-            crate::whatsapp::start_whatsapp_server(wa_state, token, phone_id, verify, port).await;
-        });
-    }
-
-    // Start Discord bot if configured
-    if let Some(ref token) = state.config.discord_bot_token {
-        let discord_state = state.clone();
-        let token = token.clone();
-        info!("Starting Discord bot");
-        tokio::spawn(async move {
-            crate::discord::start_discord_bot(discord_state, &token).await;
-        });
-    }
-
-    // Start local web server if enabled
-    if state.config.web_enabled {
-        let web_state = state.clone();
-        info!(
-            "Starting Web UI server on {}:{}",
-            state.config.web_host, state.config.web_port
-        );
-        tokio::spawn(async move {
-            crate::web::start_web_server(web_state).await;
-        });
-    }
-
+pub async fn start_telegram_bot(state: Arc<AppState>, bot: Bot) -> anyhow::Result<()> {
     let handler = Update::filter_message().endpoint(handle_message);
 
     Dispatcher::builder(bot, handler)
@@ -117,7 +44,6 @@ pub async fn run_bot(
 
     Ok(())
 }
-
 async fn handle_message(
     bot: Bot,
     msg: teloxide::types::Message,
@@ -689,7 +615,7 @@ mod tests {
 
     #[test]
     fn test_build_system_prompt_basic() {
-        let prompt = build_system_prompt("testbot", "", 12345, "");
+        let prompt = build_system_prompt("testbot", "telegram", "", 12345, "");
         assert!(prompt.contains("testbot"));
         assert!(prompt.contains("12345"));
         assert!(prompt.contains("bash commands"));
@@ -700,7 +626,7 @@ mod tests {
     #[test]
     fn test_build_system_prompt_with_memory() {
         let memory = "<global_memory>\nUser likes Rust\n</global_memory>";
-        let prompt = build_system_prompt("testbot", memory, 42, "");
+        let prompt = build_system_prompt("testbot", "telegram", memory, 42, "");
         assert!(prompt.contains("# Memories"));
         assert!(prompt.contains("User likes Rust"));
     }
@@ -708,7 +634,7 @@ mod tests {
     #[test]
     fn test_build_system_prompt_with_skills() {
         let catalog = "<available_skills>\n- pdf: Convert to PDF\n</available_skills>";
-        let prompt = build_system_prompt("testbot", "", 42, catalog);
+        let prompt = build_system_prompt("testbot", "telegram", "", 42, catalog);
         assert!(prompt.contains("# Agent Skills"));
         assert!(prompt.contains("activate_skill"));
         assert!(prompt.contains("pdf: Convert to PDF"));
@@ -716,7 +642,7 @@ mod tests {
 
     #[test]
     fn test_build_system_prompt_without_skills() {
-        let prompt = build_system_prompt("testbot", "", 42, "");
+        let prompt = build_system_prompt("testbot", "telegram", "", 42, "");
         assert!(!prompt.contains("# Agent Skills"));
     }
 
@@ -942,7 +868,7 @@ mod tests {
 
     #[test]
     fn test_build_system_prompt_mentions_sub_agent() {
-        let prompt = build_system_prompt("testbot", "", 12345, "");
+        let prompt = build_system_prompt("testbot", "telegram", "", 12345, "");
         assert!(prompt.contains("sub_agent"));
     }
 
@@ -977,7 +903,7 @@ mod tests {
 
     #[test]
     fn test_build_system_prompt_mentions_xml_security() {
-        let prompt = build_system_prompt("testbot", "", 12345, "");
+        let prompt = build_system_prompt("testbot", "telegram", "", 12345, "");
         assert!(prompt.contains("user_message"));
         assert!(prompt.contains("untrusted"));
     }
@@ -1171,7 +1097,7 @@ mod tests {
     fn test_build_system_prompt_with_memory_and_skills() {
         let memory = "<global_memory>\nTest\n</global_memory>";
         let skills = "- translate: Translate text";
-        let prompt = build_system_prompt("bot", memory, 42, skills);
+        let prompt = build_system_prompt("bot", "telegram", memory, 42, skills);
         assert!(prompt.contains("# Memories"));
         assert!(prompt.contains("Test"));
         assert!(prompt.contains("# Agent Skills"));
@@ -1180,20 +1106,20 @@ mod tests {
 
     #[test]
     fn test_build_system_prompt_mentions_todo() {
-        let prompt = build_system_prompt("testbot", "", 12345, "");
+        let prompt = build_system_prompt("testbot", "telegram", "", 12345, "");
         assert!(prompt.contains("todo_read"));
         assert!(prompt.contains("todo_write"));
     }
 
     #[test]
     fn test_build_system_prompt_mentions_export() {
-        let prompt = build_system_prompt("testbot", "", 12345, "");
+        let prompt = build_system_prompt("testbot", "telegram", "", 12345, "");
         assert!(prompt.contains("export_chat"));
     }
 
     #[test]
     fn test_build_system_prompt_mentions_schedule() {
-        let prompt = build_system_prompt("testbot", "", 12345, "");
+        let prompt = build_system_prompt("testbot", "telegram", "", 12345, "");
         assert!(prompt.contains("schedule_task"));
         assert!(prompt.contains("6-field cron"));
     }

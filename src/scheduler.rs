@@ -6,18 +6,11 @@ use tracing::{error, info};
 
 use crate::agent_engine::process_with_agent;
 use crate::agent_engine::AgentRequestContext;
-use crate::channel::deliver_and_store_bot_message;
+use crate::channel::{
+    deliver_and_store_bot_message, get_chat_routing, ChatChannel, ChatRouting, ConversationKind,
+};
 use crate::db::call_blocking;
 use crate::runtime::AppState;
-
-fn channel_from_chat_type(chat_type: &str) -> &'static str {
-    match chat_type {
-        "discord" => "discord",
-        "whatsapp" => "whatsapp",
-        "web" => "web",
-        _ => "telegram",
-    }
-}
 
 pub fn spawn_scheduler(state: Arc<AppState>) {
     tokio::spawn(async move {
@@ -47,19 +40,22 @@ async fn run_due_tasks(state: &Arc<AppState>) {
 
         let started_at = Utc::now();
         let started_at_str = started_at.to_rfc3339();
-        let channel =
-            match call_blocking(state.db.clone(), move |db| db.get_chat_type(task.chat_id)).await {
-                Ok(Some(chat_type)) => channel_from_chat_type(&chat_type),
-                _ => "telegram",
-            };
+        let routing = get_chat_routing(state.db.clone(), task.chat_id)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(ChatRouting {
+                channel: ChatChannel::Telegram,
+                conversation: ConversationKind::Private,
+            });
 
         // Run agent loop with the task prompt
         let (success, result_summary) = match process_with_agent(
             state,
             AgentRequestContext {
-                caller_channel: channel,
+                caller_channel: routing.channel.as_caller_channel(),
                 chat_id: task.chat_id,
-                chat_type: "private",
+                chat_type: routing.conversation.as_agent_chat_type(),
             },
             Some(&task.prompt),
             None,
@@ -69,7 +65,8 @@ async fn run_due_tasks(state: &Arc<AppState>) {
             Ok(response) => {
                 if !response.is_empty() {
                     let _ = deliver_and_store_bot_message(
-                        &state.bot,
+                        state.telegram_bot.as_ref(),
+                        Some(&state.config),
                         state.db.clone(),
                         &state.config.bot_username,
                         task.chat_id,
@@ -88,7 +85,8 @@ async fn run_due_tasks(state: &Arc<AppState>) {
                 error!("Scheduler: task #{} failed: {e}", task.id);
                 let err_text = format!("Scheduled task #{} failed: {e}", task.id);
                 let _ = deliver_and_store_bot_message(
-                    &state.bot,
+                    state.telegram_bot.as_ref(),
+                    Some(&state.config),
                     state.db.clone(),
                     &state.config.bot_username,
                     task.chat_id,

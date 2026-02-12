@@ -19,7 +19,9 @@ use tracing::{error, info};
 use crate::agent_engine::{
     process_with_agent, process_with_agent_with_events, AgentEvent, AgentRequestContext,
 };
-use crate::channel::deliver_and_store_bot_message;
+use crate::channel::{
+    deliver_and_store_bot_message, get_chat_routing, session_source_for_chat, ChatChannel,
+};
 use crate::config::{Config, WorkingDirIsolation};
 use crate::db::{call_blocking, ChatSummary, StoredMessage};
 use crate::runtime::AppState;
@@ -552,27 +554,7 @@ async fn api_update_config(
 }
 
 fn map_chat_to_session(chat: ChatSummary) -> SessionItem {
-    let source = match chat.chat_type.as_str() {
-        "web" => "web",
-        "discord" => "discord",
-        "whatsapp" => "whatsapp",
-        "telegram_private" | "telegram_group" | "telegram_supergroup" | "telegram_channel" => {
-            "telegram"
-        }
-        // Backward compatibility for old rows written before source-specific chat_type.
-        "private" | "group" | "supergroup" | "channel" => {
-            if chat
-                .chat_title
-                .as_deref()
-                .is_some_and(|t| t.starts_with("discord-"))
-            {
-                "discord"
-            } else {
-                "telegram"
-            }
-        }
-        _ => chat.chat_type.as_str(),
-    };
+    let source = session_source_for_chat(&chat.chat_type, chat.chat_title.as_deref());
 
     let fallback = format!("{}:{}", source, chat.chat_id);
     let mut label = chat.chat_title.clone().unwrap_or_else(|| fallback.clone());
@@ -598,7 +580,7 @@ fn map_chat_to_session(chat: ChatSummary) -> SessionItem {
         session_key,
         label,
         chat_id: chat.chat_id,
-        chat_type: source.to_string(),
+        chat_type: source,
         last_message_time: chat.last_message_time,
         last_message_preview: chat.last_message_preview,
     }
@@ -1053,13 +1035,12 @@ async fn send_and_store_response_with_events(
         .to_string();
 
     if let Some(explicit_chat_id) = parsed_chat_id {
-        let chat_type = call_blocking(state.app_state.db.clone(), move |db| {
-            db.get_chat_type(explicit_chat_id)
-        })
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-        if !matches!(chat_type.as_deref(), Some("web")) {
+        let is_web = get_chat_routing(state.app_state.db.clone(), explicit_chat_id)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+            .map(|r| r.channel == ChatChannel::Web)
+            .unwrap_or(false);
+        if !is_web {
             return Err((
                 StatusCode::BAD_REQUEST,
                 "this channel is read-only in Web UI; use source channel to send".into(),
@@ -1094,7 +1075,7 @@ async fn send_and_store_response_with_events(
             AgentRequestContext {
                 caller_channel: "web",
                 chat_id,
-                chat_type: "private",
+                chat_type: "web",
             },
             None,
             None,
@@ -1108,7 +1089,7 @@ async fn send_and_store_response_with_events(
             AgentRequestContext {
                 caller_channel: "web",
                 chat_id,
-                chat_type: "private",
+                chat_type: "web",
             },
             None,
             None,
@@ -1118,7 +1099,8 @@ async fn send_and_store_response_with_events(
     };
 
     deliver_and_store_bot_message(
-        &state.app_state.bot,
+        state.app_state.telegram_bot.as_ref(),
+        Some(&state.app_state.config),
         state.app_state.db.clone(),
         &state.app_state.config.bot_username,
         chat_id,
@@ -1145,13 +1127,13 @@ async fn api_reset(
     let session_key = normalize_session_key(body.session_key.as_deref());
     let chat_id = resolve_chat_id_for_session_key(&state, &session_key).await?;
 
-    let chat_type = call_blocking(state.app_state.db.clone(), move |db| {
-        db.get_chat_type(chat_id)
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let is_web = get_chat_routing(state.app_state.db.clone(), chat_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .map(|r| r.channel == ChatChannel::Web)
+        .unwrap_or(false);
 
-    let deleted = if matches!(chat_type.as_deref(), Some("web")) {
+    let deleted = if is_web {
         let deleted = call_blocking(state.app_state.db.clone(), move |db| {
             db.delete_chat_data(chat_id)
         })
@@ -1453,12 +1435,12 @@ mod tests {
         let bot = Bot::new("123456:TEST_TOKEN");
         let state = AppState {
             config: cfg.clone(),
-            bot: bot.clone(),
+            telegram_bot: Some(bot.clone()),
             db: db.clone(),
             memory: MemoryManager::new(&runtime_dir),
             skills: SkillManager::from_skills_dir(&cfg.skills_data_dir()),
             llm,
-            tools: ToolRegistry::new(&cfg, bot, db),
+            tools: ToolRegistry::new(&cfg, Some(bot), db),
         };
         Arc::new(state)
     }

@@ -7,13 +7,15 @@ use teloxide::prelude::*;
 use teloxide::types::InputFile;
 
 use super::{authorize_chat_access, schema_object, Tool, ToolResult};
-use crate::channel::{deliver_and_store_bot_message, enforce_channel_policy};
+use crate::channel::{
+    deliver_and_store_bot_message, enforce_channel_policy, get_required_chat_routing, ChatChannel,
+};
 use crate::claude::ToolDefinition;
 use crate::config::Config;
 use crate::db::{call_blocking, Database, StoredMessage};
 
 pub struct SendMessageTool {
-    bot: Bot,
+    bot: Option<Bot>,
     db: Arc<Database>,
     bot_username: String,
     config: Option<Config>,
@@ -21,7 +23,7 @@ pub struct SendMessageTool {
 }
 
 impl SendMessageTool {
-    pub fn new(bot: Bot, db: Arc<Database>, bot_username: String) -> Self {
+    pub fn new(bot: Option<Bot>, db: Arc<Database>, bot_username: String) -> Self {
         SendMessageTool {
             bot,
             db,
@@ -32,7 +34,7 @@ impl SendMessageTool {
     }
 
     pub fn new_with_config(
-        bot: Bot,
+        bot: Option<Bot>,
         db: Arc<Database>,
         bot_username: String,
         config: Config,
@@ -68,6 +70,8 @@ impl SendMessageTool {
     ) -> Result<String, String> {
         let mut req = self
             .bot
+            .as_ref()
+            .ok_or_else(|| "telegram_bot_token not configured".to_string())?
             .send_document(ChatId(chat_id), InputFile::file(file_path.clone()));
         if let Some(c) = &caption {
             req = req.caption(c.clone());
@@ -307,11 +311,10 @@ impl Tool for SendMessageTool {
         }
 
         if let Some(path) = attachment_path {
-            let chat_type =
-                match call_blocking(self.db.clone(), move |db| db.get_chat_type(chat_id)).await {
-                    Ok(v) => v,
-                    Err(e) => return ToolResult::error(format!("Failed to read chat type: {e}")),
-                };
+            let routing = match get_required_chat_routing(self.db.clone(), chat_id).await {
+                Ok(v) => v,
+                Err(e) => return ToolResult::error(e),
+            };
 
             let file_path = PathBuf::from(&path);
             if !file_path.is_file() {
@@ -328,31 +331,22 @@ impl Tool for SendMessageTool {
                 }
             });
 
-            let send_result = match chat_type.as_deref() {
-                Some("telegram_private")
-                | Some("telegram_group")
-                | Some("telegram_supergroup")
-                | Some("telegram_channel")
-                | Some("private")
-                | Some("group")
-                | Some("supergroup")
-                | Some("channel") => {
+            let send_result = match routing.channel {
+                ChatChannel::Telegram => {
                     self.send_telegram_attachment(chat_id, file_path.clone(), used_caption.clone())
                         .await
                 }
-                Some("discord") => {
+                ChatChannel::Discord => {
                     self.send_discord_attachment(chat_id, file_path.clone(), used_caption.clone())
                         .await
                 }
-                Some("whatsapp") => {
+                ChatChannel::WhatsApp => {
                     self.send_whatsapp_attachment(chat_id, file_path.clone(), used_caption.clone())
                         .await
                 }
-                Some("web") => Err("attachment sending is not supported for web chat".to_string()),
-                Some(other) => Err(format!(
-                    "attachment sending is not supported for chat type: {other}"
-                )),
-                None => Err("target chat not found".to_string()),
+                ChatChannel::Web => {
+                    Err("attachment sending is not supported for web chat".to_string())
+                }
             };
 
             match send_result {
@@ -366,7 +360,8 @@ impl Tool for SendMessageTool {
             }
         } else {
             match deliver_and_store_bot_message(
-                &self.bot,
+                self.bot.as_ref(),
+                self.config.as_ref(),
                 self.db.clone(),
                 &self.bot_username,
                 chat_id,
@@ -399,7 +394,7 @@ mod tests {
     #[tokio::test]
     async fn test_send_message_permission_denied_before_network() {
         let (db, dir) = test_db();
-        let tool = SendMessageTool::new(Bot::new("123456:TEST_TOKEN"), db, "bot".into());
+        let tool = SendMessageTool::new(Some(Bot::new("123456:TEST_TOKEN")), db, "bot".into());
         let result = tool
             .execute(json!({
                 "chat_id": 200,
@@ -420,7 +415,11 @@ mod tests {
         let (db, dir) = test_db();
         db.upsert_chat(999, Some("web-main"), "web").unwrap();
 
-        let tool = SendMessageTool::new(Bot::new("123456:TEST_TOKEN"), db.clone(), "bot".into());
+        let tool = SendMessageTool::new(
+            Some(Bot::new("123456:TEST_TOKEN")),
+            db.clone(),
+            "bot".into(),
+        );
         let result = tool
             .execute(json!({
                 "chat_id": 999,
@@ -446,7 +445,7 @@ mod tests {
         db.upsert_chat(100, Some("web-main"), "web").unwrap();
         db.upsert_chat(200, Some("tg"), "private").unwrap();
 
-        let tool = SendMessageTool::new(Bot::new("123456:TEST_TOKEN"), db, "bot".into());
+        let tool = SendMessageTool::new(Some(Bot::new("123456:TEST_TOKEN")), db, "bot".into());
         let result = tool
             .execute(json!({
                 "chat_id": 200,
@@ -467,7 +466,7 @@ mod tests {
     #[tokio::test]
     async fn test_send_message_requires_text_or_attachment() {
         let (db, dir) = test_db();
-        let tool = SendMessageTool::new(Bot::new("123456:TEST_TOKEN"), db, "bot".into());
+        let tool = SendMessageTool::new(Some(Bot::new("123456:TEST_TOKEN")), db, "bot".into());
         let result = tool
             .execute(json!({
                 "chat_id": 999,
@@ -489,7 +488,7 @@ mod tests {
         let attachment = dir.join("sample.txt");
         std::fs::write(&attachment, "hello").unwrap();
 
-        let tool = SendMessageTool::new(Bot::new("123456:TEST_TOKEN"), db, "bot".into());
+        let tool = SendMessageTool::new(Some(Bot::new("123456:TEST_TOKEN")), db, "bot".into());
         let result = tool
             .execute(json!({
                 "chat_id": 999,
@@ -510,7 +509,7 @@ mod tests {
         let attachment = dir.join("sample.txt");
         std::fs::write(&attachment, "hello").unwrap();
 
-        let tool = SendMessageTool::new(Bot::new("123456:TEST_TOKEN"), db, "bot".into());
+        let tool = SendMessageTool::new(Some(Bot::new("123456:TEST_TOKEN")), db, "bot".into());
         let result = tool
             .execute(json!({
                 "chat_id": 123,
@@ -531,7 +530,7 @@ mod tests {
         let attachment = dir.join("sample.txt");
         std::fs::write(&attachment, "hello").unwrap();
 
-        let tool = SendMessageTool::new(Bot::new("123456:TEST_TOKEN"), db, "bot".into());
+        let tool = SendMessageTool::new(Some(Bot::new("123456:TEST_TOKEN")), db, "bot".into());
         let result = tool
             .execute(json!({
                 "chat_id": 861234567890i64,

@@ -206,7 +206,7 @@ async fn process_webhook(state: &WhatsAppState, payload: WebhookPayload) -> anyh
                     AgentRequestContext {
                         caller_channel: "whatsapp",
                         chat_id,
-                        chat_type: "private",
+                        chat_type: "whatsapp",
                     },
                     None,
                     None,

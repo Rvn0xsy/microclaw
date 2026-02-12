@@ -285,9 +285,31 @@ impl Config {
         }
 
         // Validate required fields
-        if self.telegram_bot_token.is_empty() && self.discord_bot_token.is_none() {
+        let has_telegram = !self.telegram_bot_token.trim().is_empty();
+        let has_discord = self
+            .discord_bot_token
+            .as_deref()
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false);
+        let has_whatsapp = self
+            .whatsapp_access_token
+            .as_deref()
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+            && self
+                .whatsapp_phone_number_id
+                .as_deref()
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false)
+            && self
+                .whatsapp_verify_token
+                .as_deref()
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false);
+
+        if !(has_telegram || has_discord || has_whatsapp || self.web_enabled) {
             return Err(MicroClawError::Config(
-                "At least one of telegram_bot_token or discord_bot_token must be set".into(),
+                "At least one channel must be enabled: telegram_bot_token, discord_bot_token, web_enabled=true, or full WhatsApp credentials".into(),
             ));
         }
         if self.api_key.is_empty() && self.llm_provider != "ollama" {
@@ -505,11 +527,11 @@ mod tests {
 
     #[test]
     fn test_post_deserialize_missing_bot_tokens() {
-        let yaml = "bot_username: bot\napi_key: key\n";
+        let yaml = "bot_username: bot\napi_key: key\nweb_enabled: false\n";
         let mut config: Config = serde_yaml::from_str(yaml).unwrap();
         let err = config.post_deserialize().unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("telegram_bot_token or discord_bot_token"));
+        assert!(msg.contains("channel must be enabled"));
     }
 
     #[test]
