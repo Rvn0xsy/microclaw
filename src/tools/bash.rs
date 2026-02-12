@@ -132,14 +132,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn pwd_command() -> &'static str {
-        if cfg!(target_os = "windows") {
-            "(Get-Location).Path"
-        } else {
-            "pwd"
-        }
-    }
-
     fn sleep_command(seconds: u64) -> String {
         if cfg!(target_os = "windows") {
             format!("Start-Sleep -Seconds {seconds}")
@@ -156,12 +148,11 @@ mod tests {
         }
     }
 
-    fn normalize_path_for_assert(s: &str) -> String {
-        let normalized = s.replace('\\', "/");
+    fn write_marker_command(file_name: &str) -> String {
         if cfg!(target_os = "windows") {
-            normalized.to_ascii_lowercase()
+            format!("New-Item -ItemType File -Path '{file_name}' -Force | Out-Null")
         } else {
-            normalized
+            format!("touch '{file_name}'")
         }
     }
 
@@ -225,10 +216,14 @@ mod tests {
         std::fs::create_dir_all(&work).unwrap();
 
         let tool = BashTool::new(work.to_str().unwrap());
-        let result = tool.execute(json!({"command": pwd_command()})).await;
+        let marker = "cwd_marker.txt";
+        let result = tool
+            .execute(json!({"command": write_marker_command(marker)}))
+            .await;
         assert!(!result.is_error);
-        assert!(normalize_path_for_assert(&result.content)
-            .contains(&normalize_path_for_assert(work.to_str().unwrap())));
+
+        let expected_marker = work.join("shared").join(marker);
+        assert!(expected_marker.exists());
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -240,9 +235,10 @@ mod tests {
         std::fs::create_dir_all(&work).unwrap();
 
         let tool = BashTool::new_with_isolation(work.to_str().unwrap(), WorkingDirIsolation::Chat);
+        let marker = "chat_marker.txt";
         let result = tool
             .execute(json!({
-                "command": pwd_command(),
+                "command": write_marker_command(marker),
                 "__microclaw_auth": {
                     "caller_channel": "telegram",
                     "caller_chat_id": -100123,
@@ -251,12 +247,13 @@ mod tests {
             }))
             .await;
         assert!(!result.is_error);
-        let expected_chat_dir = work.join("chat").join("telegram").join("neg100123");
-        assert!(
-            normalize_path_for_assert(&result.content).contains(&normalize_path_for_assert(
-                expected_chat_dir.to_str().unwrap()
-            ))
-        );
+
+        let expected_marker = work
+            .join("chat")
+            .join("telegram")
+            .join("neg100123")
+            .join(marker);
+        assert!(expected_marker.exists());
 
         let _ = std::fs::remove_dir_all(&root);
     }
