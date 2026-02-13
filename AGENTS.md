@@ -64,6 +64,11 @@ src/
                         No send_message, write_memory, schedule, or recursive sub_agent.
 ```
 
+Top-level web directories:
+
+- `web/` -- MicroClaw built-in Web service/Web UI code used by this repository at runtime.
+- `website/` -- Separate website repository checked out alongside this project, used for landing page and documentation site content (not the in-app Web service).
+
 ## Key patterns
 
 ### Agentic tool-use loop (`telegram.rs:process_with_claude`)

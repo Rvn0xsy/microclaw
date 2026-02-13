@@ -6,6 +6,12 @@ MicroClaw is a Rust multi-platform chat bot with a channel-agnostic core and pla
 
 Rust 2021, Tokio, teloxide 0.17, serenity 0.12, Anthropic Messages API (direct HTTP via reqwest), SQLite (rusqlite bundled), cron crate for scheduling.
 
+## Directory overview
+
+- `src/` -- Rust source for the bot binary
+- `web/` -- Built-in Web UI (React + Vite). Compiled to `web/dist/` and embedded into the Rust binary via `include_dir!`. This is the chat interface and settings panel served by microclaw itself at runtime.
+- `website/` -- **Separate git repository** (landing page + documentation site). Not part of the microclaw binary. Contains the public-facing marketing site and docs. Changes here have no effect on the bot.
+
 ## Project layout
 
 - `src/main.rs` -- entry point, CLI
