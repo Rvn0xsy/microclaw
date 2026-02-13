@@ -19,7 +19,7 @@ pub mod setup;
 pub mod skills;
 pub mod tools;
 pub mod transcribe;
+pub mod usage;
 pub mod web;
 pub use channels::discord;
 pub use channels::telegram;
-pub use channels::whatsapp;

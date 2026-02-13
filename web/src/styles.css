@@ -703,4 +703,59 @@ html:not(.dark) .mc-msg-time {
 *::-webkit-scrollbar-thumb:hover {
   background: #94a3b8;
   background-clip: content-box;
+}.mc-settings-nav-item {
+  width: 100%;
+  min-height: 42px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 18px;
+  line-height: 1.2;
+}
+
+.mc-settings-nav-item:hover {
+  background: color-mix(in srgb, var(--mc-accent) 14%, transparent);
+}
+
+
+.mc-settings-tabs-list {
+  width: 100%;
+  align-items: stretch !important;
+}
+
+.mc-settings-tabs-list > * {
+  width: 100% !important;
+}
+
+.mc-settings-tabs-list [role="tab"] {
+  width: 100% !important;
+  display: flex !important;
+  justify-content: flex-start !important;
+  box-sizing: border-box;
+}
+
+.mc-settings-tab-trigger {
+  width: 100% !important;
+  display: flex !important;
+  justify-content: flex-start !important;
+  box-sizing: border-box;
+}
+
+
+.mc-settings-tabs-list .rt-BaseTabListTriggerInner,
+.mc-settings-tabs-list .rt-TabsTriggerInner,
+.mc-settings-tabs-list .rt-BaseTabListTriggerInnerHidden,
+.mc-settings-tabs-list .rt-TabsTriggerInnerHidden {
+  width: 100% !important;
+  display: flex !important;
+  justify-content: flex-start !important;
+  text-align: left !important;
+}
+
+.mc-select-trigger-full.rt-SelectTrigger {
+  display: flex !important;
+  width: 100% !important;
+}
+
+.mc-select-trigger-full .rt-SelectTriggerInner {
+  flex: 1 1 auto;
 }

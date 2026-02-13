@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use teloxide::prelude::*;
 
-use crate::channels::delivery::{send_discord_text, send_telegram_text, send_whatsapp_text};
+use crate::channels::delivery::{send_discord_text, send_telegram_text};
 use crate::config::Config;
 use crate::db::{call_blocking, Database, StoredMessage};
 use crate::tools::auth_context_from_input;
@@ -11,7 +11,6 @@ use crate::tools::auth_context_from_input;
 pub enum ChatChannel {
     Telegram,
     Discord,
-    WhatsApp,
     Web,
 }
 
@@ -20,7 +19,6 @@ impl ChatChannel {
         match self {
             ChatChannel::Telegram => "telegram",
             ChatChannel::Discord => "discord",
-            ChatChannel::WhatsApp => "whatsapp",
             ChatChannel::Web => "web",
         }
     }
@@ -64,10 +62,6 @@ pub fn parse_chat_routing(db_chat_type: &str) -> Option<ChatRouting> {
         },
         "discord" => ChatRouting {
             channel: ChatChannel::Discord,
-            conversation: ConversationKind::Private,
-        },
-        "whatsapp" => ChatRouting {
-            channel: ChatChannel::WhatsApp,
             conversation: ConversationKind::Private,
         },
         "web" => ChatRouting {
@@ -115,7 +109,6 @@ pub fn session_source_for_chat(chat_type: &str, chat_title: Option<&str>) -> Str
         return match routing.channel {
             ChatChannel::Web => "web".to_string(),
             ChatChannel::Discord => "discord".to_string(),
-            ChatChannel::WhatsApp => "whatsapp".to_string(),
             ChatChannel::Telegram => "telegram".to_string(),
         };
     }
@@ -169,10 +162,6 @@ pub async fn deliver_and_store_bot_message(
         ChatChannel::Discord => {
             let cfg = config.ok_or_else(|| "send_message config unavailable".to_string())?;
             send_discord_text(cfg, chat_id, text).await?;
-        }
-        ChatChannel::WhatsApp => {
-            let cfg = config.ok_or_else(|| "send_message config unavailable".to_string())?;
-            send_whatsapp_text(cfg, chat_id, text).await?;
         }
     }
 

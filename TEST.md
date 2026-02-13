@@ -88,7 +88,7 @@ Since MicroClaw is a multi-platform bot with external dependencies (LLM APIs, Te
 | 5.1 | Conversation continuity | Msg 1: "My name is Alice"; Msg 2: "What's my name?" | Bot remembers "Alice" |
 | 5.2 | Tool context preserved | Msg 1: "Create /tmp/test.txt with hello"; Msg 2: "What did you just create?" | Bot remembers file operation (session includes tool_use/tool_result blocks) |
 | 5.3 | /reset clears session | Chat several turns, send `/reset`, ask "What did we talk about?" | Bot does not remember previous session context |
-| 5.4 | /archive session | Chat several turns, send `/archive` | Session archived to `<data_dir>/groups/<chat_id>/conversations/<timestamp>.md` |
+| 5.4 | /archive session | Chat several turns, send `/archive` | Session archived to `<data_dir>/groups/<channel>/<chat_id>/conversations/<timestamp>.md` |
 | 5.5 | Context compaction trigger | Chat beyond max_session_messages threshold | Old messages auto-summarized; recent messages kept verbatim |
 | 5.6 | Memory after compaction | After compaction, ask about an early topic | Bot recalls key facts from summary (details may be lost) |
 | 5.7 | Corrupted session recovery | Manually corrupt sessions table JSON, then send message | Falls back to DB history, no crash |

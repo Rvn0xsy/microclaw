@@ -75,7 +75,7 @@ Telegram 消息
 | `write_memory` | 写入持久化 CLAUDE.md 记忆 |
 | `web_search` | 通过 DuckDuckGo 搜索（返回标题、URL、摘要） |
 | `web_fetch` | 抓取 URL 并返回纯文本（去 HTML，最大 20KB） |
-| `send_message` | 会话中发送消息；支持 Telegram/WhatsApp/Discord 附件发送（`attachment_path` + 可选 `caption`） |
+| `send_message` | 会话中发送消息；支持 Telegram/Discord 附件发送（`attachment_path` + 可选 `caption`） |
 | `schedule_task` | 创建循环（cron）或一次性定时任务 |
 | `list_scheduled_tasks` | 列出聊天的所有活跃/暂停任务 |
 | `pause_scheduled_task` | 暂停定时任务 |
@@ -131,6 +131,7 @@ microclaw.data/skills/
 
 **命令：**
 - `/skills` -- 列出所有可用技能
+- `/usage` -- 查看 token 用量统计（当前聊天 + 全局汇总）
 
 ## 计划与执行
 
@@ -233,7 +234,7 @@ cp target/release/microclaw /usr/local/bin/
 
 当 `web_enabled: true` 时，MicroClaw 会启动本地 Web UI（默认 `http://127.0.0.1:10961`）。
 
-- 左侧会话列表会展示 SQLite 中所有渠道聊天（`telegram`、`whatsapp`、`discord`、`web`）
+- 左侧会话列表会展示 SQLite 中所有渠道聊天（`telegram`、`discord`、`web`）
 - 支持历史查看与管理（刷新 / 清理上下文 / 删除）
 - 默认对非 `web` 渠道是只读（发送请在原渠道进行）
 - 如果当前没有会话，Web UI 会自动生成一个 `session-YYYYMMDDHHmmss` 格式的会话键
@@ -379,6 +380,7 @@ microclaw gateway uninstall
 | `bot_username` | 是 | -- | Bot 用户名（不带 @） |
 | `llm_provider` | 否 | `anthropic` | 提供方预设 ID（或自定义 ID）。`anthropic` 走原生 Anthropic API，其他走 OpenAI 兼容 API |
 | `model` | 否 | 随 provider 默认 | 模型名 |
+| `model_prices` | 否 | `[]` | 可选模型价格表（每百万 token 的美元单价），用于 `/usage` 成本估算 |
 | `llm_base_url` | 否 | provider 预设默认值 | 自定义 API 基础地址 |
 | `data_dir` | 否 | `./microclaw.data` | 数据根目录（运行时数据在 `data_dir/runtime`，技能在 `data_dir/skills`） |
 | `working_dir` | 否 | `./tmp` | 工具默认工作目录；`bash/read_file/write_file/edit_file/glob/grep` 的相对路径都以此为基准 |

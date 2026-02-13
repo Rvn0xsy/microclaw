@@ -11,6 +11,7 @@ use crate::claude::Message;
 use crate::claude::{ContentBlock, ImageSource, MessageContent};
 use crate::db::{call_blocking, StoredMessage};
 use crate::runtime::AppState;
+use crate::usage::build_usage_report;
 
 /// Escape XML special characters in user-supplied content to prevent prompt injection.
 /// User messages are wrapped in XML tags; escaping ensures the content cannot break out.
@@ -83,7 +84,7 @@ async fn handle_message(
                     .send_message(msg.chat.id, "No session to archive.")
                     .await;
             } else {
-                archive_conversation(&state.config.data_dir, chat_id, &messages);
+                archive_conversation(&state.config.data_dir, "telegram", chat_id, &messages);
                 let _ = bot
                     .send_message(
                         msg.chat.id,
@@ -95,6 +96,24 @@ async fn handle_message(
             let _ = bot
                 .send_message(msg.chat.id, "No session to archive.")
                 .await;
+        }
+        return Ok(());
+    }
+
+    // Handle /usage command — token usage summary
+    if text.trim() == "/usage" {
+        match build_usage_report(state.db.clone(), &state.config, chat_id).await {
+            Ok(response) => {
+                let _ = bot.send_message(msg.chat.id, response).await;
+            }
+            Err(e) => {
+                let _ = bot
+                    .send_message(
+                        msg.chat.id,
+                        format!("Failed to query usage statistics: {e}"),
+                    )
+                    .await;
+            }
         }
         return Ok(());
     }

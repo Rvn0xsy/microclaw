@@ -333,8 +333,11 @@ impl ToolRegistry {
             Box::new(schedule::ResumeTaskTool::new(db.clone())),
             Box::new(schedule::CancelTaskTool::new(db.clone())),
             Box::new(schedule::GetTaskHistoryTool::new(db.clone())),
-            Box::new(export_chat::ExportChatTool::new(db, &config.data_dir)),
-            Box::new(sub_agent::SubAgentTool::new(config)),
+            Box::new(export_chat::ExportChatTool::new(
+                db.clone(),
+                &config.data_dir,
+            )),
+            Box::new(sub_agent::SubAgentTool::new(config, db.clone())),
             Box::new(activate_skill::ActivateSkillTool::new(&skills_data_dir)),
             Box::new(sync_skills::SyncSkillsTool::new(&skills_data_dir)),
             Box::new(todo::TodoReadTool::new(&config.data_dir)),

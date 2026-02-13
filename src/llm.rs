@@ -1963,10 +1963,6 @@ mod tests {
             control_chat_ids: vec![],
             max_session_messages: 40,
             compact_keep_recent: 20,
-            whatsapp_access_token: None,
-            whatsapp_phone_number_id: None,
-            whatsapp_verify_token: None,
-            whatsapp_webhook_port: 8080,
             discord_bot_token: None,
             discord_allowed_channels: vec![],
             show_thinking: false,
@@ -1979,6 +1975,7 @@ mod tests {
             web_rate_window_seconds: 10,
             web_run_history_limit: 512,
             web_session_idle_ttl_seconds: 300,
+            model_prices: vec![],
         };
         // Should not panic
         let _provider = create_provider(&config);
@@ -2006,10 +2003,6 @@ mod tests {
             control_chat_ids: vec![],
             max_session_messages: 40,
             compact_keep_recent: 20,
-            whatsapp_access_token: None,
-            whatsapp_phone_number_id: None,
-            whatsapp_verify_token: None,
-            whatsapp_webhook_port: 8080,
             discord_bot_token: None,
             discord_allowed_channels: vec![],
             show_thinking: false,
@@ -2022,6 +2015,7 @@ mod tests {
             web_rate_window_seconds: 10,
             web_run_history_limit: 512,
             web_session_idle_ttl_seconds: 300,
+            model_prices: vec![],
         };
         let _provider = create_provider(&config);
     }

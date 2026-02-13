@@ -25,6 +25,7 @@ use crate::channel::{
 use crate::config::{Config, WorkingDirIsolation};
 use crate::db::{call_blocking, ChatSummary, StoredMessage};
 use crate::runtime::AppState;
+use crate::usage::build_usage_report;
 
 static WEB_ASSETS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/web/dist");
 
@@ -384,6 +385,11 @@ struct RunStatusQuery {
 }
 
 #[derive(Debug, Deserialize)]
+struct UsageQuery {
+    session_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct UpdateConfigRequest {
     llm_provider: Option<String>,
     api_key: Option<String>,
@@ -393,6 +399,12 @@ struct UpdateConfigRequest {
     max_tool_iterations: Option<usize>,
     max_document_size_mb: Option<u64>,
     working_dir_isolation: Option<WorkingDirIsolation>,
+
+    telegram_bot_token: Option<String>,
+    bot_username: Option<String>,
+    discord_bot_token: Option<String>,
+    discord_allowed_channels: Option<Vec<u64>>,
+
     show_thinking: Option<bool>,
     web_enabled: Option<bool>,
     web_host: Option<String>,
@@ -423,12 +435,6 @@ fn redact_config(config: &Config) -> serde_json::Value {
     }
     if cfg.openai_api_key.is_some() {
         cfg.openai_api_key = Some("***".into());
-    }
-    if cfg.whatsapp_access_token.is_some() {
-        cfg.whatsapp_access_token = Some("***".into());
-    }
-    if cfg.whatsapp_verify_token.is_some() {
-        cfg.whatsapp_verify_token = Some("***".into());
     }
     if cfg.discord_bot_token.is_some() {
         cfg.discord_bot_token = Some("***".into());
@@ -507,6 +513,19 @@ async fn api_update_config(
     if let Some(v) = body.working_dir_isolation {
         cfg.working_dir_isolation = v;
     }
+    if let Some(v) = body.telegram_bot_token {
+        cfg.telegram_bot_token = v;
+    }
+    if let Some(v) = body.bot_username {
+        cfg.bot_username = v;
+    }
+    if let Some(v) = body.discord_bot_token {
+        cfg.discord_bot_token = if v.trim().is_empty() { None } else { Some(v) };
+    }
+    if let Some(v) = body.discord_allowed_channels {
+        cfg.discord_allowed_channels = v;
+    }
+
     if let Some(v) = body.show_thinking {
         cfg.show_thinking = v;
     }
@@ -673,6 +692,27 @@ async fn api_history(
         "session_key": session_key,
         "chat_id": chat_id,
         "messages": items,
+    })))
+}
+
+async fn api_usage(
+    headers: HeaderMap,
+    State(state): State<WebState>,
+    Query(query): Query<UsageQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    require_auth(&headers, state.auth_token.as_deref())?;
+
+    let session_key = normalize_session_key(query.session_key.as_deref());
+    let chat_id = resolve_chat_id_for_session_key(&state, &session_key).await?;
+    let report = build_usage_report(state.app_state.db.clone(), &state.app_state.config, chat_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(json!({
+        "ok": true,
+        "session_key": session_key,
+        "chat_id": chat_id,
+        "report": report,
     })))
 }
 
@@ -1251,6 +1291,7 @@ fn build_router(web_state: WebState) -> Router {
         .route("/api/config", get(api_get_config).put(api_update_config))
         .route("/api/sessions", get(api_sessions))
         .route("/api/history", get(api_history))
+        .route("/api/usage", get(api_usage))
         .route("/api/send", post(api_send))
         .route("/api/send_stream", post(api_send_stream))
         .route("/api/stream", get(api_stream))
@@ -1408,10 +1449,6 @@ mod tests {
             control_chat_ids: vec![],
             max_session_messages: 40,
             compact_keep_recent: 20,
-            whatsapp_access_token: None,
-            whatsapp_phone_number_id: None,
-            whatsapp_verify_token: None,
-            whatsapp_webhook_port: 8080,
             discord_bot_token: None,
             discord_allowed_channels: vec![],
             show_thinking: false,
@@ -1424,6 +1461,7 @@ mod tests {
             web_rate_window_seconds: 10,
             web_run_history_limit: 512,
             web_session_idle_ttl_seconds: 300,
+            model_prices: vec![],
         };
         let dir = std::env::temp_dir().join(format!("microclaw_webtest_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1725,6 +1763,44 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(260)).await;
         let resp3 = app.oneshot(mk_req("r3")).await.unwrap();
         assert_eq!(resp3.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_api_usage_returns_report() {
+        let web_state = test_web_state(Box::new(DummyLlm), None, WebLimits::default());
+        let db = web_state.app_state.db.clone();
+        call_blocking(db, |d| {
+            d.upsert_chat(123, Some("main"), "web")?;
+            d.log_llm_usage(
+                123,
+                "web",
+                "anthropic",
+                "claude-test",
+                1200,
+                300,
+                "agent_loop",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let app = build_router(web_state);
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/usage?session_key=main")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let report = v.get("report").and_then(|x| x.as_str()).unwrap_or_default();
+        assert!(report.contains("Token Usage"));
+        assert!(report.contains("This chat"));
     }
 
     #[tokio::test]

@@ -15,12 +15,12 @@
   <img src="screenshots/screenshot2.png" width="45%" />
 </p>
 
-An agentic AI assistant for chat surfaces, inspired by [nanoclaw](https://github.com/gavrielc/nanoclaw/) and incorporating some of its design ideas. MicroClaw is Telegram-first (with optional WhatsApp Cloud API webhook support) and works with multiple LLM providers (Anthropic + OpenAI-compatible APIs). It supports full tool execution: run shell commands, read/write/edit files, search codebases, browse the web, schedule tasks, and maintain persistent memory across conversations.
+An agentic AI assistant for chat surfaces, inspired by [nanoclaw](https://github.com/gavrielc/nanoclaw/) and incorporating some of its design ideas. MicroClaw is Telegram/Discord/Web-first and works with multiple LLM providers (Anthropic + OpenAI-compatible APIs). It supports full tool execution: run shell commands, read/write/edit files, search codebases, browse the web, schedule tasks, and maintain persistent memory across conversations.
 
 ## How it works
 
 ```
-Chat message (Telegram / WhatsApp)
+Chat message (Telegram)
     |
     v
  Store in SQLite --> Load chat history + memory
@@ -60,7 +60,7 @@ For a deeper dive into the architecture and design decisions, read: **[Building 
 - **Group chat catch-up** -- when mentioned in a group, the bot reads all messages since its last reply (not just the last N)
 - **Continuous typing indicator** -- typing indicator stays active for the full duration of processing
 - **Persistent memory** -- CLAUDE.md files at global and per-chat scopes, loaded into every request
-- **Message splitting** -- long responses are automatically split at newline boundaries to fit channel limits (Telegram/WhatsApp)
+- **Message splitting** -- long responses are automatically split at newline boundaries to fit channel limits (Telegram)
 
 ## Tools
 
@@ -76,7 +76,7 @@ For a deeper dive into the architecture and design decisions, read: **[Building 
 | `write_memory` | Write persistent CLAUDE.md memory |
 | `web_search` | Search the web via DuckDuckGo (returns titles, URLs, snippets) |
 | `web_fetch` | Fetch a URL and return plain text (HTML stripped, max 20KB) |
-| `send_message` | Send mid-conversation messages; supports attachments for Telegram/WhatsApp/Discord via `attachment_path` + optional `caption` |
+| `send_message` | Send mid-conversation messages; supports attachments for Telegram/Discord via `attachment_path` + optional `caption` |
 | `schedule_task` | Schedule a recurring (cron) or one-time task |
 | `list_scheduled_tasks` | List all active/paused tasks for a chat |
 | `pause_scheduled_task` | Pause a scheduled task |
@@ -140,6 +140,7 @@ Unavailable skills are filtered automatically by platform/dependencies, so unsup
 
 **Commands:**
 - `/skills` -- list all available skills
+- `/usage` -- show token usage summary (current chat + global totals)
 
 ## MCP
 
@@ -290,7 +291,7 @@ cp target/release/microclaw /usr/local/bin/
 
 When `web_enabled: true`, MicroClaw serves a local Web UI (default `http://127.0.0.1:10961`).
 
-- Session list includes chats from all channels stored in SQLite (`telegram`, `whatsapp`, `discord`, `web`)
+- Session list includes chats from all channels stored in SQLite (`telegram`, `discord`, `web`)
 - You can review and manage history (refresh / clear context / delete)
 - Non-web channels are read-only in Web UI by default (send from source channel)
 - If there are no sessions yet, Web UI auto-generates a new key like `session-YYYYMMDDHHmmss`
@@ -438,6 +439,7 @@ All configuration is via `microclaw.config.yaml`:
 | `bot_username` | Yes | -- | Bot username (without @) |
 | `llm_provider` | No | `anthropic` | Provider preset ID (or custom ID). `anthropic` uses native Anthropic API, others use OpenAI-compatible API |
 | `model` | No | provider-specific | Model name |
+| `model_prices` | No | `[]` | Optional per-model pricing table (USD per 1M tokens) used by `/usage` cost estimates |
 | `llm_base_url` | No | provider preset default | Custom provider base URL |
 | `data_dir` | No | `./microclaw.data` | Data root (`runtime` data in `data_dir/runtime`, skills in `data_dir/skills`) |
 | `working_dir` | No | `./tmp` | Default working directory for tool operations; relative paths in `bash/read_file/write_file/edit_file/glob/grep` resolve from here |
@@ -524,7 +526,6 @@ src/
     config.rs            # Environment variable loading
     error.rs             # Error types (thiserror)
     telegram.rs          # Telegram handler, agentic tool-use loop, session resume, context compaction, typing indicator
-    whatsapp.rs          # Optional WhatsApp Cloud API webhook handler
     llm.rs               # LLM provider abstraction (Anthropic + OpenAI-compatible)
     claude.rs            # Canonical message/tool schema + Anthropic-compatible types
     db.rs                # SQLite: messages, chats, scheduled_tasks, sessions

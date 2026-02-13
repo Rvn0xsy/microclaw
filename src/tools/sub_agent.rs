@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use serde_json::json;
+use std::sync::Arc;
 use tracing::info;
 
 use super::{auth_context_from_input, schema_object, Tool, ToolRegistry, ToolResult};
@@ -7,17 +8,20 @@ use crate::claude::{ContentBlock, Message, MessageContent, ResponseContentBlock,
 use crate::config::Config;
 #[cfg(test)]
 use crate::config::WorkingDirIsolation;
+use crate::db::{call_blocking, Database};
 
 const MAX_SUB_AGENT_ITERATIONS: usize = 10;
 
 pub struct SubAgentTool {
     config: Config,
+    db: Arc<Database>,
 }
 
 impl SubAgentTool {
-    pub fn new(config: &Config) -> Self {
+    pub fn new(config: &Config, db: Arc<Database>) -> Self {
         SubAgentTool {
             config: config.clone(),
+            db,
         }
     }
 }
@@ -86,6 +90,31 @@ impl Tool for SubAgentTool {
                     return ToolResult::error(format!("Sub-agent API error: {e}"));
                 }
             };
+
+            if let Some(usage) = &response.usage {
+                let chat_id = auth_context.as_ref().map(|a| a.caller_chat_id).unwrap_or(0);
+                let caller_channel = auth_context
+                    .as_ref()
+                    .map(|a| a.caller_channel.clone())
+                    .unwrap_or_else(|| "sub_agent".to_string());
+                let provider = self.config.llm_provider.clone();
+                let model = self.config.model.clone();
+                let input_tokens = i64::from(usage.input_tokens);
+                let output_tokens = i64::from(usage.output_tokens);
+                let _ = call_blocking(self.db.clone(), move |db| {
+                    db.log_llm_usage(
+                        chat_id,
+                        &caller_channel,
+                        &provider,
+                        &model,
+                        input_tokens,
+                        output_tokens,
+                        "sub_agent",
+                    )
+                    .map(|_| ())
+                })
+                .await;
+            }
 
             let stop_reason = response.stop_reason.as_deref().unwrap_or("end_turn");
 
@@ -185,6 +214,7 @@ impl Tool for SubAgentTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Database;
 
     fn test_config() -> Config {
         Config {
@@ -207,10 +237,6 @@ mod tests {
             control_chat_ids: vec![],
             max_session_messages: 40,
             compact_keep_recent: 20,
-            whatsapp_access_token: None,
-            whatsapp_phone_number_id: None,
-            whatsapp_verify_token: None,
-            whatsapp_webhook_port: 8080,
             discord_bot_token: None,
             discord_allowed_channels: vec![],
             show_thinking: false,
@@ -223,12 +249,20 @@ mod tests {
             web_rate_window_seconds: 10,
             web_run_history_limit: 512,
             web_session_idle_ttl_seconds: 300,
+            model_prices: vec![],
         }
+    }
+
+    fn test_db() -> Arc<Database> {
+        let dir =
+            std::env::temp_dir().join(format!("microclaw_sub_agent_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        Arc::new(Database::new(dir.to_str().unwrap()).unwrap())
     }
 
     #[test]
     fn test_sub_agent_tool_name_and_definition() {
-        let tool = SubAgentTool::new(&test_config());
+        let tool = SubAgentTool::new(&test_config(), test_db());
         assert_eq!(tool.name(), "sub_agent");
         let def = tool.definition();
         assert_eq!(def.name, "sub_agent");
@@ -242,7 +276,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sub_agent_missing_task() {
-        let tool = SubAgentTool::new(&test_config());
+        let tool = SubAgentTool::new(&test_config(), test_db());
         let result = tool.execute(json!({})).await;
         assert!(result.is_error);
         assert!(result.content.contains("Missing required parameter: task"));

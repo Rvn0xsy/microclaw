@@ -50,9 +50,6 @@ fn default_max_session_messages() -> usize {
 fn default_compact_keep_recent() -> usize {
     20
 }
-fn default_whatsapp_webhook_port() -> u16 {
-    8080
-}
 fn default_control_chat_ids() -> Vec<i64> {
     Vec::new()
 }
@@ -80,6 +77,10 @@ fn default_web_run_history_limit() -> usize {
 fn default_web_session_idle_ttl_seconds() -> u64 {
     300
 }
+
+fn default_model_prices() -> Vec<ModelPrice> {
+    Vec::new()
+}
 fn is_local_web_host(host: &str) -> bool {
     let h = host.trim().to_ascii_lowercase();
     h == "127.0.0.1" || h == "localhost" || h == "::1"
@@ -90,6 +91,13 @@ fn is_local_web_host(host: &str) -> bool {
 pub enum WorkingDirIsolation {
     Shared,
     Chat,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModelPrice {
+    pub model: String,
+    pub input_per_million_usd: f64,
+    pub output_per_million_usd: f64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -133,14 +141,6 @@ pub struct Config {
     #[serde(default = "default_compact_keep_recent")]
     pub compact_keep_recent: usize,
     #[serde(default)]
-    pub whatsapp_access_token: Option<String>,
-    #[serde(default)]
-    pub whatsapp_phone_number_id: Option<String>,
-    #[serde(default)]
-    pub whatsapp_verify_token: Option<String>,
-    #[serde(default = "default_whatsapp_webhook_port")]
-    pub whatsapp_webhook_port: u16,
-    #[serde(default)]
     pub discord_bot_token: Option<String>,
     #[serde(default)]
     pub discord_allowed_channels: Vec<u64>,
@@ -164,6 +164,8 @@ pub struct Config {
     pub web_run_history_limit: usize,
     #[serde(default = "default_web_session_idle_ttl_seconds")]
     pub web_session_idle_ttl_seconds: u64,
+    #[serde(default = "default_model_prices")]
+    pub model_prices: Vec<ModelPrice>,
 }
 
 impl Config {
@@ -287,6 +289,26 @@ impl Config {
         if self.max_document_size_mb == 0 {
             self.max_document_size_mb = default_max_document_size_mb();
         }
+        for price in &mut self.model_prices {
+            price.model = price.model.trim().to_string();
+            if price.model.is_empty() {
+                return Err(MicroClawError::Config(
+                    "model_prices entries must include non-empty model".into(),
+                ));
+            }
+            if !(price.input_per_million_usd.is_finite() && price.input_per_million_usd >= 0.0) {
+                return Err(MicroClawError::Config(format!(
+                    "model_prices[{}].input_per_million_usd must be >= 0",
+                    price.model
+                )));
+            }
+            if !(price.output_per_million_usd.is_finite() && price.output_per_million_usd >= 0.0) {
+                return Err(MicroClawError::Config(format!(
+                    "model_prices[{}].output_per_million_usd must be >= 0",
+                    price.model
+                )));
+            }
+        }
 
         // Validate required fields
         let has_telegram = !self.telegram_bot_token.trim().is_empty();
@@ -295,25 +317,10 @@ impl Config {
             .as_deref()
             .map(|v| !v.trim().is_empty())
             .unwrap_or(false);
-        let has_whatsapp = self
-            .whatsapp_access_token
-            .as_deref()
-            .map(|v| !v.trim().is_empty())
-            .unwrap_or(false)
-            && self
-                .whatsapp_phone_number_id
-                .as_deref()
-                .map(|v| !v.trim().is_empty())
-                .unwrap_or(false)
-            && self
-                .whatsapp_verify_token
-                .as_deref()
-                .map(|v| !v.trim().is_empty())
-                .unwrap_or(false);
 
-        if !(has_telegram || has_discord || has_whatsapp || self.web_enabled) {
+        if !(has_telegram || has_discord || self.web_enabled) {
             return Err(MicroClawError::Config(
-                "At least one channel must be enabled: telegram_bot_token, discord_bot_token, web_enabled=true, or full WhatsApp credentials".into(),
+                "At least one channel must be enabled: telegram_bot_token, discord_bot_token, or web_enabled=true".into(),
             ));
         }
         if self.api_key.is_empty() && !provider_allows_empty_api_key(&self.llm_provider) {
@@ -329,6 +336,29 @@ impl Config {
         }
 
         Ok(())
+    }
+
+    pub fn model_price(&self, model: &str) -> Option<&ModelPrice> {
+        let needle = model.trim();
+        self.model_prices
+            .iter()
+            .find(|p| p.model.eq_ignore_ascii_case(needle))
+            .or_else(|| self.model_prices.iter().find(|p| p.model == "*"))
+    }
+
+    pub fn estimate_cost_usd(
+        &self,
+        model: &str,
+        input_tokens: i64,
+        output_tokens: i64,
+    ) -> Option<f64> {
+        let price = self.model_price(model)?;
+        let in_tok = input_tokens.max(0) as f64;
+        let out_tok = output_tokens.max(0) as f64;
+        Some(
+            (in_tok / 1_000_000.0) * price.input_per_million_usd
+                + (out_tok / 1_000_000.0) * price.output_per_million_usd,
+        )
     }
 
     /// Save config as YAML to the given path.
@@ -374,10 +404,6 @@ mod tests {
             control_chat_ids: vec![],
             max_session_messages: 40,
             compact_keep_recent: 20,
-            whatsapp_access_token: None,
-            whatsapp_phone_number_id: None,
-            whatsapp_verify_token: None,
-            whatsapp_webhook_port: 8080,
             discord_bot_token: None,
             discord_allowed_channels: vec![],
             show_thinking: false,
@@ -390,6 +416,7 @@ mod tests {
             web_rate_window_seconds: 10,
             web_run_history_limit: 512,
             web_session_idle_ttl_seconds: 300,
+            model_prices: vec![],
         }
     }
 
@@ -761,6 +788,43 @@ mod tests {
     }
 
     #[test]
+    fn test_model_prices_parse_and_estimate() {
+        let yaml = r#"
+telegram_bot_token: tok
+bot_username: bot
+api_key: key
+model_prices:
+  - model: claude-sonnet-4-5-20250929
+    input_per_million_usd: 3.0
+    output_per_million_usd: 15.0
+"#;
+        let mut config: Config = serde_yaml::from_str(yaml).unwrap();
+        config.post_deserialize().unwrap();
+        let est = config
+            .estimate_cost_usd("claude-sonnet-4-5-20250929", 1000, 2000)
+            .unwrap();
+        assert!((est - 0.033).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_model_prices_invalid_rejected() {
+        let yaml = r#"
+telegram_bot_token: tok
+bot_username: bot
+api_key: key
+model_prices:
+  - model: ""
+    input_per_million_usd: 1.0
+    output_per_million_usd: 1.0
+"#;
+        let mut config: Config = serde_yaml::from_str(yaml).unwrap();
+        let err = config.post_deserialize().unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("model_prices entries must include non-empty model"));
+    }
+
+    #[test]
     fn test_config_yaml_with_all_optional_fields() {
         let yaml = r#"
 telegram_bot_token: tok
@@ -772,10 +836,6 @@ allowed_groups: [123, 456]
 control_chat_ids: [999]
 max_session_messages: 60
 compact_keep_recent: 30
-whatsapp_access_token: wa_token
-whatsapp_phone_number_id: phone_id
-whatsapp_verify_token: verify
-whatsapp_webhook_port: 9090
 discord_bot_token: discord_tok
 discord_allowed_channels: [111, 222]
 "#;
@@ -787,7 +847,6 @@ discord_allowed_channels: [111, 222]
         assert_eq!(config.control_chat_ids, vec![999]);
         assert_eq!(config.max_session_messages, 60);
         assert_eq!(config.compact_keep_recent, 30);
-        assert_eq!(config.whatsapp_webhook_port, 9090);
         assert_eq!(config.discord_allowed_channels, vec![111, 222]);
     }
 

@@ -21,16 +21,6 @@ pub struct AppState {
     pub tools: ToolRegistry,
 }
 
-fn configured(v: Option<&str>) -> bool {
-    v.map(|s| !s.trim().is_empty()).unwrap_or(false)
-}
-
-fn whatsapp_enabled(config: &Config) -> bool {
-    configured(config.whatsapp_access_token.as_deref())
-        && configured(config.whatsapp_phone_number_id.as_deref())
-        && configured(config.whatsapp_verify_token.as_deref())
-}
-
 pub async fn run(
     config: Config,
     db: Database,
@@ -63,31 +53,6 @@ pub async fn run(
     });
 
     crate::scheduler::spawn_scheduler(state.clone());
-
-    if whatsapp_enabled(&state.config) {
-        let wa_state = state.clone();
-        let token = state
-            .config
-            .whatsapp_access_token
-            .clone()
-            .unwrap_or_default();
-        let phone_id = state
-            .config
-            .whatsapp_phone_number_id
-            .clone()
-            .unwrap_or_default();
-        let verify = state
-            .config
-            .whatsapp_verify_token
-            .clone()
-            .unwrap_or_default();
-        let port = state.config.whatsapp_webhook_port;
-        info!("Starting WhatsApp webhook server on port {port}");
-        tokio::spawn(async move {
-            crate::whatsapp::start_whatsapp_server(wa_state, token, phone_id, verify, port).await;
-        });
-    }
-
     if let Some(ref token) = state.config.discord_bot_token {
         if !token.trim().is_empty() {
             let discord_state = state.clone();
@@ -119,7 +84,6 @@ pub async fn run(
             .as_deref()
             .map(|t| !t.trim().is_empty())
             .unwrap_or(false)
-        || whatsapp_enabled(&state.config)
     {
         info!("Running without Telegram adapter; waiting for other channels");
         tokio::signal::ctrl_c()
@@ -128,7 +92,7 @@ pub async fn run(
         Ok(())
     } else {
         Err(anyhow!(
-            "No channel is enabled. Configure Telegram, Discord, WhatsApp, or web_enabled=true."
+            "No channel is enabled. Configure Telegram, Discord, or web_enabled=true."
         ))
     }
 }

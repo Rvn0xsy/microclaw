@@ -4,7 +4,6 @@ use tracing::info;
 
 use crate::claude::{ContentBlock, ImageSource, Message, MessageContent, ResponseContentBlock};
 use crate::db::{call_blocking, StoredMessage};
-use crate::llm::LlmProvider;
 use crate::runtime::AppState;
 use crate::tools::ToolAuthContext;
 
@@ -225,9 +224,16 @@ pub(crate) async fn process_with_agent_impl(
 
     // Compact if messages exceed threshold
     if messages.len() > state.config.max_session_messages {
-        archive_conversation(&state.config.data_dir, chat_id, &messages);
+        archive_conversation(
+            &state.config.data_dir,
+            context.caller_channel,
+            chat_id,
+            &messages,
+        );
         messages = compact_messages(
-            state.llm.as_ref(),
+            state,
+            context.caller_channel,
+            chat_id,
             &messages,
             state.config.compact_keep_recent,
         )
@@ -275,6 +281,27 @@ pub(crate) async fn process_with_agent_impl(
                 .await?
         };
 
+        if let Some(usage) = &response.usage {
+            let channel = context.caller_channel.to_string();
+            let provider = state.config.llm_provider.clone();
+            let model = state.config.model.clone();
+            let input_tokens = i64::from(usage.input_tokens);
+            let output_tokens = i64::from(usage.output_tokens);
+            let _ = call_blocking(state.db.clone(), move |db| {
+                db.log_llm_usage(
+                    chat_id,
+                    &channel,
+                    &provider,
+                    &model,
+                    input_tokens,
+                    output_tokens,
+                    "agent_loop",
+                )
+                .map(|_| ())
+            })
+            .await;
+        }
+
         let stop_reason = response.stop_reason.as_deref().unwrap_or("end_turn");
 
         if stop_reason == "end_turn" || stop_reason == "max_tokens" {
@@ -305,12 +332,23 @@ pub(crate) async fn process_with_agent_impl(
             } else {
                 strip_thinking(&text)
             };
+            let final_text = if display_text.trim().is_empty() {
+                if stop_reason == "max_tokens" {
+                    "I reached the model output limit before producing a visible reply. Please ask me to continue."
+                        .to_string()
+                } else {
+                    "I processed your request but produced an empty visible reply. Please ask me to retry."
+                        .to_string()
+                }
+            } else {
+                display_text
+            };
             if let Some(tx) = event_tx {
                 let _ = tx.send(AgentEvent::FinalResponse {
-                    text: display_text.clone(),
+                    text: final_text.clone(),
                 });
             }
-            return Ok(display_text);
+            return Ok(final_text);
         }
 
         if stop_reason == "tool_use" {
@@ -645,11 +683,17 @@ pub(crate) fn strip_images_for_session(messages: &mut [Message]) {
 }
 
 /// Archive the full conversation to a markdown file before compaction.
-/// Saved to `<data_dir>/groups/<chat_id>/conversations/<timestamp>.md`.
-pub fn archive_conversation(data_dir: &str, chat_id: i64, messages: &[Message]) {
+/// Saved to `<data_dir>/groups/<channel>/<chat_id>/conversations/<timestamp>.md`.
+pub fn archive_conversation(data_dir: &str, channel: &str, chat_id: i64, messages: &[Message]) {
     let now = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+    let channel_dir = if channel.trim().is_empty() {
+        "unknown"
+    } else {
+        channel.trim()
+    };
     let dir = std::path::PathBuf::from(data_dir)
         .join("groups")
+        .join(channel_dir)
         .join(chat_id.to_string())
         .join("conversations");
 
@@ -679,7 +723,9 @@ pub fn archive_conversation(data_dir: &str, chat_id: i64, messages: &[Message]) 
 
 /// Compact old messages by summarizing them via Claude, keeping recent messages verbatim.
 async fn compact_messages(
-    llm: &dyn LlmProvider,
+    state: &AppState,
+    caller_channel: &str,
+    chat_id: i64,
     messages: &[Message],
     keep_recent: usize,
 ) -> Vec<Message> {
@@ -714,22 +760,53 @@ async fn compact_messages(
         content: MessageContent::Text(format!("{summarize_prompt}\n\n---\n\n{summary_input}")),
     }];
 
-    let summary = match llm
-        .send_message("You are a helpful summarizer.", summarize_messages, None)
-        .await
+    let summary = match tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        state
+            .llm
+            .send_message("You are a helpful summarizer.", summarize_messages, None),
+    )
+    .await
     {
-        Ok(response) => response
-            .content
-            .iter()
-            .filter_map(|b| match b {
-                ResponseContentBlock::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join(""),
-        Err(e) => {
+        Ok(Ok(response)) => {
+            if let Some(usage) = &response.usage {
+                let channel = caller_channel.to_string();
+                let provider = state.config.llm_provider.clone();
+                let model = state.config.model.clone();
+                let input_tokens = i64::from(usage.input_tokens);
+                let output_tokens = i64::from(usage.output_tokens);
+                let _ = call_blocking(state.db.clone(), move |db| {
+                    db.log_llm_usage(
+                        chat_id,
+                        &channel,
+                        &provider,
+                        &model,
+                        input_tokens,
+                        output_tokens,
+                        "compaction",
+                    )
+                    .map(|_| ())
+                })
+                .await;
+            }
+            response
+                .content
+                .iter()
+                .filter_map(|b| match b {
+                    ResponseContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("")
+        }
+        Ok(Err(e)) => {
             tracing::warn!("Compaction summarization failed: {e}, falling back to truncation");
-            // Fallback: just keep recent messages
+            return recent_messages.to_vec();
+        }
+        Err(_) => {
+            tracing::warn!(
+                "Compaction summarization timed out after 60s, falling back to truncation"
+            );
             return recent_messages.to_vec();
         }
     };

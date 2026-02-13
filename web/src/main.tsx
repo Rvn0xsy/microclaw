@@ -24,11 +24,13 @@ import {
 import {
   Button,
   Callout,
+  Card,
   Dialog,
   Flex,
   Heading,
   Select,
   Switch,
+  Tabs,
   Text,
   TextField,
   Theme,
@@ -501,6 +503,85 @@ function ThreadPane({ adapter, initialMessages, runtimeKey }: ThreadPaneProps) {
   )
 }
 
+function parseDiscordChannelCsv(input: string): number[] {
+  const out: number[] = []
+  for (const part of input.split(',')) {
+    const trimmed = part.trim()
+    if (!trimmed) continue
+    const n = Number(trimmed)
+    if (Number.isInteger(n) && n > 0) {
+      out.push(n)
+    }
+  }
+  return Array.from(new Set(out))
+}
+
+function normalizeWorkingDirIsolation(value: unknown): 'chat' | 'shared' {
+  const normalized = String(value || '').trim().toLowerCase()
+  return normalized === 'shared' ? 'shared' : 'chat'
+}
+
+type ConfigFieldCardProps = {
+  label: string
+  description: React.ReactNode
+  children: React.ReactNode
+}
+
+function ConfigFieldCard({ label, description, children }: ConfigFieldCardProps) {
+  return (
+    <Card className="p-3">
+      <Text size="2" weight="medium">{label}</Text>
+      <Text size="1" color="gray" className="mt-1 block">{description}</Text>
+      <div className="mt-2">{children}</div>
+    </Card>
+  )
+}
+
+type ConfigToggleCardProps = {
+  label: string
+  description?: React.ReactNode
+  checked: boolean
+  onCheckedChange: (checked: boolean) => void
+  className: string
+  style?: React.CSSProperties
+}
+
+function ConfigToggleCard({ label, description, checked, onCheckedChange, className, style }: ConfigToggleCardProps) {
+  return (
+    <div className={className} style={style}>
+      <Flex justify="between" align="center">
+        <div>
+          <Text size="2">{label}</Text>
+          {description ? (
+            <Text size="1" color="gray" className="mt-1 block">
+              {description}
+            </Text>
+          ) : null}
+        </div>
+        <Switch checked={checked} onCheckedChange={onCheckedChange} />
+      </Flex>
+    </div>
+  )
+}
+
+type ConfigStepsCardProps = {
+  title?: string
+  steps: React.ReactNode[]
+}
+
+function ConfigStepsCard({ title = 'Setup Steps', steps }: ConfigStepsCardProps) {
+  return (
+    <Card className="mt-3 p-3">
+      <Text size="2" weight="bold">{title}</Text>
+      <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm text-slate-400">
+        {steps.map((step, index) => (
+          <li key={index}>{step}</li>
+        ))}
+      </ol>
+    </Card>
+  )
+}
+
 function App() {
   const [appearance, setAppearance] = useState<Appearance>(readAppearance())
   const [uiTheme, setUiTheme] = useState<UiTheme>(readUiTheme())
@@ -518,6 +599,11 @@ function App() {
   const [config, setConfig] = useState<ConfigPayload | null>(null)
   const [configDraft, setConfigDraft] = useState<Record<string, unknown>>({})
   const [saveStatus, setSaveStatus] = useState<string>('')
+  const [usageOpen, setUsageOpen] = useState<boolean>(false)
+  const [usageLoading, setUsageLoading] = useState<boolean>(false)
+  const [usageReport, setUsageReport] = useState<string>('')
+  const [usageError, setUsageError] = useState<string>('')
+  const [usageSession, setUsageSession] = useState<string>('')
 
   const sessionItems = useMemo(() => {
     const map = new Map<string, SessionItem>()
@@ -827,6 +913,10 @@ function App() {
     }
   }
 
+
+
+
+
   async function openConfig(): Promise<void> {
     setSaveStatus('')
     const data = await api<{ config?: ConfigPayload }>('/api/config')
@@ -836,7 +926,13 @@ function App() {
       model: data.config?.model || defaultModelForProvider(String(data.config?.llm_provider || 'anthropic')),
       llm_base_url: String(data.config?.llm_base_url || ''),
       api_key: '',
-      working_dir_isolation: String(
+      telegram_bot_token: '',
+      bot_username: String(data.config?.bot_username || ''),
+      discord_bot_token: '',
+      discord_allowed_channels_csv: Array.isArray(data.config?.discord_allowed_channels)
+        ? (data.config?.discord_allowed_channels as number[]).join(',')
+        : '',
+      working_dir_isolation: normalizeWorkingDirIsolation(
         data.config?.working_dir_isolation || DEFAULT_CONFIG_VALUES.working_dir_isolation,
       ),
       max_tokens: Number(data.config?.max_tokens ?? 8192),
@@ -848,6 +944,24 @@ function App() {
       web_port: Number(data.config?.web_port ?? 10961),
     })
     setConfigOpen(true)
+  }
+
+  async function openUsage(targetSession = sessionKey): Promise<void> {
+    setUsageLoading(true)
+    setUsageError('')
+    setUsageReport('')
+    setUsageSession(targetSession)
+    try {
+      const query = new URLSearchParams({ session_key: targetSession })
+      const data = await api<{ report?: string }>(`/api/usage?${query.toString()}`)
+      setUsageReport(String(data.report || '').trim())
+      setUsageOpen(true)
+    } catch (e) {
+      setUsageError(e instanceof Error ? e.message : String(e))
+      setUsageOpen(true)
+    } finally {
+      setUsageLoading(false)
+    }
   }
 
   function setConfigField(field: string, value: unknown): void {
@@ -870,6 +984,18 @@ function App() {
           break
         case 'max_tokens':
           next.max_tokens = DEFAULT_CONFIG_VALUES.max_tokens
+          break
+        case 'telegram_bot_token':
+          next.telegram_bot_token = ''
+          break
+        case 'bot_username':
+          next.bot_username = ''
+          break
+        case 'discord_bot_token':
+          next.discord_bot_token = ''
+          break
+        case 'discord_allowed_channels_csv':
+          next.discord_allowed_channels_csv = ''
           break
         case 'working_dir_isolation':
           next.working_dir_isolation = DEFAULT_CONFIG_VALUES.working_dir_isolation
@@ -904,7 +1030,9 @@ function App() {
       const payload: Record<string, unknown> = {
         llm_provider: String(configDraft.llm_provider || ''),
         model: String(configDraft.model || ''),
-        working_dir_isolation: String(
+        bot_username: String(configDraft.bot_username || '').trim(),
+        discord_allowed_channels: parseDiscordChannelCsv(String(configDraft.discord_allowed_channels_csv || '')),
+        working_dir_isolation: normalizeWorkingDirIsolation(
           configDraft.working_dir_isolation || DEFAULT_CONFIG_VALUES.working_dir_isolation,
         ),
         max_tokens: Number(configDraft.max_tokens || 8192),
@@ -923,12 +1051,19 @@ function App() {
       const apiKey = String(configDraft.api_key || '').trim()
       if (apiKey) payload.api_key = apiKey
 
+      const tg = String(configDraft.telegram_bot_token || '').trim()
+      if (tg) payload.telegram_bot_token = tg
+
+      const discordToken = String(configDraft.discord_bot_token || '').trim()
+      if (discordToken) payload.discord_bot_token = discordToken
+
       await api('/api/config', { method: 'PUT', body: JSON.stringify(payload) })
       setSaveStatus('Saved. Restart microclaw to apply changes.')
     } catch (e) {
       setSaveStatus(`Save failed: ${e instanceof Error ? e.message : String(e)}`)
     }
   }
+
 
   useEffect(() => {
     saveAppearance(appearance)
@@ -939,6 +1074,7 @@ function App() {
     saveUiTheme(uiTheme)
     document.documentElement.setAttribute('data-ui-theme', uiTheme)
   }, [uiTheme])
+
 
   useEffect(() => {
     ;(async () => {
@@ -1013,6 +1149,7 @@ function App() {
             onResetSession={(key) => void onResetSessionByKey(key)}
             onDeleteSession={(key) => void onDeleteSessionByKey(key)}
             onOpenConfig={openConfig}
+            onOpenUsage={() => openUsage(sessionKey)}
             onNewSession={createSession}
           />
 
@@ -1061,218 +1198,319 @@ function App() {
             </div>
           </main>
         </div>
-
         <Dialog.Root open={configOpen} onOpenChange={setConfigOpen}>
-          <Dialog.Content maxWidth="760px">
-            <Dialog.Title>Runtime Config</Dialog.Title>
+          <Dialog.Content maxWidth="1120px" className="overflow-hidden flex flex-col" style={{ width: "1120px", height: "760px", maxWidth: "1120px", maxHeight: "760px" }}>
+            <Dialog.Title>Settings</Dialog.Title>
             <Dialog.Description size="2" mb="3">
-              Save writes to microclaw.config.yaml. Restart is required.
+              Channel-first configuration. Save writes to microclaw.config.yaml. Restart is required.
             </Dialog.Description>
-            {config ? (
-              <Flex direction="column" gap="4">
-                <div className={sectionCardClass} style={sectionCardStyle}>
-                  <Text size="3" weight="bold">
-                    LLM
-                  </Text>
-                  <div className="mt-3 grid grid-cols-1 gap-3">
-                    <div>
-                      <Flex justify="between" align="center" mb="1">
-                        <Text size="1" color="gray">Provider</Text>
-                        <Button size="1" variant="ghost" onClick={() => resetConfigField('llm_provider')}>Reset</Button>
-                      </Flex>
-                      <Select.Root
-                        value={String(configDraft.llm_provider || DEFAULT_CONFIG_VALUES.llm_provider)}
-                        onValueChange={(value) => setConfigField('llm_provider', value)}
-                      >
-                        <Select.Trigger placeholder="Select provider" />
-                        <Select.Content>
-                          {providerOptions.map((provider) => (
-                            <Select.Item key={provider} value={provider}>
-                              {provider}
-                            </Select.Item>
-                          ))}
-                        </Select.Content>
-                      </Select.Root>
-                    </div>
+            <div className="mt-2 min-h-0 flex-1">
+              {config ? (
+                <Tabs.Root defaultValue="general" orientation="vertical" className="h-full min-h-0">
+                <div className="grid h-full grid-cols-[240px_minmax(0,1fr)] gap-4">
+                  <Card className="h-full p-3" style={sectionCardStyle}>
+                    <Tabs.List className="mc-settings-tabs-list flex w-full flex-col gap-1">
+                      <Text size="1" color="gray" className="px-2 pt-1 uppercase tracking-wide">Runtime</Text>
+                      <Tabs.Trigger value="general" className="mc-settings-tab-trigger w-full justify-start rounded-lg px-3 py-2 text-[18px] leading-6 bg-transparent data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-200 hover:bg-white/8">⚙️  General</Tabs.Trigger>
+                      <Tabs.Trigger value="model" className="mc-settings-tab-trigger w-full justify-start rounded-lg px-3 py-2 text-[18px] leading-6 bg-transparent data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-200 hover:bg-white/8">🧠  Model</Tabs.Trigger>
 
-                    <div>
-                      <Flex justify="between" align="center" mb="1">
-                        <Text size="1" color="gray">Model</Text>
-                        <Button size="1" variant="ghost" onClick={() => resetConfigField('model')}>Reset</Button>
-                      </Flex>
-                      <TextField.Root
-                        value={String(configDraft.model || defaultModelForProvider(String(configDraft.llm_provider || DEFAULT_CONFIG_VALUES.llm_provider)))}
-                        onChange={(e) => setConfigField('model', e.target.value)}
-                        placeholder="claude-sonnet-4-5-20250929"
-                      />
-                      {modelOptions.length > 0 ? (
+                      <Text size="1" color="gray" className="px-2 pt-3 uppercase tracking-wide">Channels</Text>
+                      <Tabs.Trigger value="telegram" className="mc-settings-tab-trigger w-full justify-start rounded-lg px-3 py-2 text-[18px] leading-6 bg-transparent data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-200 hover:bg-white/8">✈️  Telegram</Tabs.Trigger>
+                      <Tabs.Trigger value="discord" className="mc-settings-tab-trigger w-full justify-start rounded-lg px-3 py-2 text-[18px] leading-6 bg-transparent data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-200 hover:bg-white/8">💬  Discord</Tabs.Trigger>
+                      
+                      <Text size="1" color="gray" className="px-2 pt-3 uppercase tracking-wide">Integrations</Text>
+                      <Tabs.Trigger value="web" className="mc-settings-tab-trigger w-full justify-start rounded-lg px-3 py-2 text-[18px] leading-6 bg-transparent data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-200 hover:bg-white/8">🌐  Web</Tabs.Trigger>
+                    </Tabs.List>
+                  </Card>
+
+                  <div className="min-w-0 overflow-y-auto pr-1">
+                    <Tabs.Content value="general">
+                      <div className={sectionCardClass} style={sectionCardStyle}>
+                        <Text size="3" weight="bold">General</Text>
                         <Text size="1" color="gray" className="mt-1 block">
-                          Suggested: {modelOptions.join(' / ')}
+                          Runtime defaults used across all channels.
                         </Text>
-                      ) : null}
-                    </div>
-
-                    {currentProvider === 'custom' ? (
-                      <div>
-                        <Flex justify="between" align="center" mb="1">
-                          <Text size="1" color="gray">API Host</Text>
-                          <Button size="1" variant="ghost" onClick={() => resetConfigField('llm_base_url')}>Reset</Button>
-                        </Flex>
-                        <TextField.Root
-                          value={String(configDraft.llm_base_url || '')}
-                          onChange={(e) => setConfigField('llm_base_url', e.target.value)}
-                          placeholder="https://your-provider.example/v1"
-                        />
+                        <Text size="1" color="gray" className="mt-2 block">working_dir_isolation: chat = isolated workspace per chat; shared = one shared workspace.</Text>
+                        <Text size="1" color="gray" className="mt-1 block">max_tokens / max_tool_iterations / max_document_size_mb control response budget and tool loop safety.</Text>
+                        <div className="mt-4 space-y-3">
+                          <ConfigFieldCard label="working_dir_isolation" description={<>Use <code>chat</code> for per-chat isolation, or <code>shared</code> for one shared workspace.</>}>
+                            <select
+                              className="mt-2 w-full rounded-md border border-[color:var(--mc-border-soft)] bg-transparent px-3 py-2 text-base text-[color:inherit] outline-none focus:border-[color:var(--mc-accent)]"
+                              value={normalizeWorkingDirIsolation(
+                                configDraft.working_dir_isolation || DEFAULT_CONFIG_VALUES.working_dir_isolation,
+                              )}
+                              onChange={(e) => setConfigField('working_dir_isolation', e.target.value)}
+                            >
+                              <option value="chat">chat (per-chat isolated workspace)</option>
+                              <option value="shared">shared (single shared workspace)</option>
+                            </select>
+                          </ConfigFieldCard>
+                          <ConfigFieldCard label="max_tokens" description={<>Maximum output tokens for one model response.</>}>
+                            <TextField.Root
+                              className="mt-2"
+                              value={String(configDraft.max_tokens || DEFAULT_CONFIG_VALUES.max_tokens)}
+                              onChange={(e) => setConfigField('max_tokens', e.target.value)}
+                              placeholder="8192"
+                            />
+                          </ConfigFieldCard>
+                          <ConfigFieldCard label="max_tool_iterations" description={<>Upper bound for tool loop iterations in one request.</>}>
+                            <TextField.Root
+                              className="mt-2"
+                              value={String(configDraft.max_tool_iterations || DEFAULT_CONFIG_VALUES.max_tool_iterations)}
+                              onChange={(e) => setConfigField('max_tool_iterations', e.target.value)}
+                              placeholder="100"
+                            />
+                          </ConfigFieldCard>
+                          <ConfigFieldCard label="max_document_size_mb" description={<>Maximum uploaded file size in MB.</>}>
+                            <TextField.Root
+                              className="mt-2"
+                              value={String(configDraft.max_document_size_mb || DEFAULT_CONFIG_VALUES.max_document_size_mb)}
+                              onChange={(e) => setConfigField('max_document_size_mb', e.target.value)}
+                              placeholder="100"
+                            />
+                          </ConfigFieldCard>
+                        </div>
+                        <div className="mt-4 grid grid-cols-1 gap-3">
+                          <ConfigToggleCard
+                            label="show_thinking"
+                            description={<>Show intermediate reasoning text in responses.</>}
+                            checked={Boolean(configDraft.show_thinking)}
+                            onCheckedChange={(checked) => setConfigField('show_thinking', checked)}
+                            className={toggleCardClass}
+                            style={toggleCardStyle}
+                          />
+                          <ConfigToggleCard
+                            label="web_enabled"
+                            description={<>Enable built-in Web UI and API endpoint.</>}
+                            checked={Boolean(configDraft.web_enabled)}
+                            onCheckedChange={(checked) => setConfigField('web_enabled', checked)}
+                            className={toggleCardClass}
+                            style={toggleCardStyle}
+                          />
+                        </div>
                       </div>
-                    ) : null}
+                    </Tabs.Content>
 
-                    <div>
-                      <Text size="1" color="gray">API key (leave blank to keep existing)</Text>
-                      <TextField.Root
-                        className="mt-2"
-                        value={String(configDraft.api_key || '')}
-                        onChange={(e) => setConfigField('api_key', e.target.value)}
-                        placeholder="api_key"
-                      />
-                    </div>
-                  </div>
-                </div>
+                    <Tabs.Content value="model">
+                      <div className={sectionCardClass} style={sectionCardStyle}>
+                        <Text size="3" weight="bold">Model</Text>
+                        <Text size="1" color="gray" className="mt-1 block">
+                          LLM provider and API settings.
+                        </Text>
+                        <Text size="1" color="gray" className="mt-2 block">llm_provider selects routing preset; model is the exact model id sent to provider API.</Text>
+                        <Text size="1" color="gray" className="mt-1 block">For custom providers set llm_base_url. Keep api_key empty only if your deployment handles auth elsewhere.</Text>
+                        <div className="mt-4 space-y-3">
+                          <ConfigFieldCard label="llm_provider" description={<>Select provider preset for request routing and defaults.</>}>
+                            <div className="mt-2">
+                              <Select.Root
+                                value={String(configDraft.llm_provider || DEFAULT_CONFIG_VALUES.llm_provider)}
+                                onValueChange={(value) => setConfigField('llm_provider', value)}
+                              >
+                                <Select.Trigger className="w-full mc-select-trigger-full" placeholder="Select provider" />
+                                <Select.Content>
+                                  {providerOptions.map((provider) => (
+                                    <Select.Item key={provider} value={provider}>
+                                      {provider}
+                                    </Select.Item>
+                                  ))}
+                                </Select.Content>
+                              </Select.Root>
+                            </div>
+                          </ConfigFieldCard>
 
-                <div className={sectionCardClass} style={sectionCardStyle}>
-                  <Text size="3" weight="bold">
-                    Runtime
-                  </Text>
-                  <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
-                    <div>
-                      <Flex justify="between" align="center" mb="1">
-                        <Text size="1" color="gray">working_dir_isolation</Text>
-                        <Button size="1" variant="ghost" onClick={() => resetConfigField('working_dir_isolation')}>
-                          Reset
-                        </Button>
-                      </Flex>
-                      <Select.Root
-                        value={String(configDraft.working_dir_isolation || DEFAULT_CONFIG_VALUES.working_dir_isolation)}
-                        onValueChange={(value) => setConfigField('working_dir_isolation', value)}
-                      >
-                        <Select.Trigger placeholder="Select isolation mode" />
-                        <Select.Content>
-                          <Select.Item value="shared">shared</Select.Item>
-                          <Select.Item value="chat">chat</Select.Item>
-                        </Select.Content>
-                      </Select.Root>
-                      <Text size="1" color="gray" className="mt-1 block">
-                        shared: working_dir/shared, chat: working_dir/chat/&lt;channel&gt;/&lt;chat_id&gt;
-                      </Text>
-                    </div>
-                    <div>
-                      <Flex justify="between" align="center" mb="1">
-                        <Text size="1" color="gray">Max tokens</Text>
-                        <Button size="1" variant="ghost" onClick={() => resetConfigField('max_tokens')}>Reset</Button>
-                      </Flex>
-                      <TextField.Root
-                        value={String(configDraft.max_tokens || DEFAULT_CONFIG_VALUES.max_tokens)}
-                        onChange={(e) => setConfigField('max_tokens', e.target.value)}
-                        placeholder="max_tokens"
-                      />
-                    </div>
-                    <div>
-                      <Flex justify="between" align="center" mb="1">
-                        <Text size="1" color="gray">Max tool iterations</Text>
-                        <Button size="1" variant="ghost" onClick={() => resetConfigField('max_tool_iterations')}>Reset</Button>
-                      </Flex>
-                      <TextField.Root
-                        value={String(configDraft.max_tool_iterations || DEFAULT_CONFIG_VALUES.max_tool_iterations)}
-                        onChange={(e) => setConfigField('max_tool_iterations', e.target.value)}
-                        placeholder="max_tool_iterations"
-                      />
-                    </div>
-                    <div>
-                      <Flex justify="between" align="center" mb="1">
-                        <Text size="1" color="gray">Max document size (MB)</Text>
-                        <Button size="1" variant="ghost" onClick={() => resetConfigField('max_document_size_mb')}>Reset</Button>
-                      </Flex>
-                      <TextField.Root
-                        value={String(configDraft.max_document_size_mb || DEFAULT_CONFIG_VALUES.max_document_size_mb)}
-                        onChange={(e) => setConfigField('max_document_size_mb', e.target.value)}
-                        placeholder="max_document_size_mb"
-                      />
-                    </div>
-                  </div>
-                </div>
+                          <ConfigFieldCard label="model" description={<>Exact model id to use for requests.</>}>
+                            <TextField.Root
+                              className="mt-2"
+                              value={String(configDraft.model || defaultModelForProvider(String(configDraft.llm_provider || DEFAULT_CONFIG_VALUES.llm_provider)))}
+                              onChange={(e) => setConfigField('model', e.target.value)}
+                              placeholder="claude-sonnet-4-5-20250929"
+                            />
+                            {modelOptions.length > 0 ? (
+                              <Text size="1" color="gray" className="mt-2 block">Suggested: {modelOptions.join(' / ')}</Text>
+                            ) : null}
+                          </ConfigFieldCard>
 
-                <div className={sectionCardClass} style={sectionCardStyle}>
-                  <Text size="3" weight="bold">
-                    Web
-                  </Text>
-                  <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
-                    <div>
-                      <Flex justify="between" align="center" mb="1">
-                        <Text size="1" color="gray">Host</Text>
-                        <Button size="1" variant="ghost" onClick={() => resetConfigField('web_host')}>Reset</Button>
-                      </Flex>
-                      <TextField.Root
-                        value={String(configDraft.web_host || DEFAULT_CONFIG_VALUES.web_host)}
-                        onChange={(e) => setConfigField('web_host', e.target.value)}
-                        placeholder="web_host"
-                      />
-                    </div>
-                    <div>
-                      <Flex justify="between" align="center" mb="1">
-                        <Text size="1" color="gray">Port</Text>
-                        <Button size="1" variant="ghost" onClick={() => resetConfigField('web_port')}>Reset</Button>
-                      </Flex>
-                      <TextField.Root
-                        value={String(configDraft.web_port || DEFAULT_CONFIG_VALUES.web_port)}
-                        onChange={(e) => setConfigField('web_port', e.target.value)}
-                        placeholder="web_port"
-                      />
-                    </div>
-                  </div>
-                  <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
-                    <div className={toggleCardClass} style={toggleCardStyle}>
-                      <Flex justify="between" align="center">
-                        <Text size="2">show_thinking</Text>
-                        <Switch
-                          checked={Boolean(configDraft.show_thinking)}
-                          onCheckedChange={(checked) => setConfigField('show_thinking', checked)}
+                          {currentProvider === 'custom' ? (
+                            <ConfigFieldCard label="llm_base_url" description={<>Base URL for OpenAI-compatible custom provider endpoint.</>}>
+                              <TextField.Root
+                                className="mt-2"
+                                value={String(configDraft.llm_base_url || '')}
+                                onChange={(e) => setConfigField('llm_base_url', e.target.value)}
+                                placeholder="https://api.example.com/v1"
+                              />
+                          </ConfigFieldCard>
+                          ) : null}
+
+                          <ConfigFieldCard label="api_key" description={<>Provider API key. Leave blank to keep current secret unchanged.</>}>
+                            <TextField.Root
+                              className="mt-2"
+                              value={String(configDraft.api_key || '')}
+                              onChange={(e) => setConfigField('api_key', e.target.value)}
+                              placeholder="sk-..."
+                            />
+                          </ConfigFieldCard>
+                        </div>
+                      </div>
+                    </Tabs.Content>
+
+                    <Tabs.Content value="telegram">
+                      <div className={sectionCardClass} style={sectionCardStyle}>
+                        <Text size="3" weight="bold">Telegram</Text>
+                        <ConfigStepsCard
+                          steps={[
+                            <>Open Telegram and chat with <code>@BotFather</code>.</>,
+                            <>Run <code>/newbot</code>, set name and username (must end with <code>bot</code>).</>,
+                            <>Copy the bot token and paste below.</>,
+                            <>Set <code>bot_username</code> without <code>@</code>.</>,
+                            <>In groups, mention the bot to trigger replies.</>,
+                          ]}
                         />
-                      </Flex>
-                      <Button size="1" variant="ghost" className="mt-2" onClick={() => resetConfigField('show_thinking')}>
-                        Reset to default
-                      </Button>
-                    </div>
-                    <div className={toggleCardClass} style={toggleCardStyle}>
-                      <Flex justify="between" align="center">
-                        <Text size="2">web_enabled</Text>
-                        <Switch
-                          checked={Boolean(configDraft.web_enabled)}
-                          onCheckedChange={(checked) => setConfigField('web_enabled', checked)}
+                        <Text size="1" color="gray" className="mt-3 block">
+                          Required: bot token and username. Leave token unchanged if already configured.
+                        </Text>
+                        <div className="mt-4 space-y-3">
+                          <ConfigFieldCard label="telegram_bot_token" description={<>BotFather token for sending and receiving Telegram messages. Leave blank to keep current secret unchanged.</>}>
+                            <TextField.Root
+                              className="mt-2"
+                              value={String(configDraft.telegram_bot_token || '')}
+                              onChange={(e) => setConfigField('telegram_bot_token', e.target.value)}
+                              placeholder="123456789:AA..."
+                            />
+                          </ConfigFieldCard>
+                          <ConfigFieldCard label="bot_username" description={<>Telegram bot username without <code>@</code>, used for group mention trigger.</>}>
+                            <TextField.Root
+                              className="mt-2"
+                              value={String(configDraft.bot_username || '')}
+                              onChange={(e) => setConfigField('bot_username', e.target.value)}
+                              placeholder="my_microclaw_bot"
+                            />
+                          </ConfigFieldCard>
+                        </div>
+                      </div>
+                    </Tabs.Content>
+
+                    <Tabs.Content value="discord">
+                      <div className={sectionCardClass} style={sectionCardStyle}>
+                        <Text size="3" weight="bold">Discord</Text>
+                        <ConfigStepsCard
+                          steps={[
+                            <>Open Discord Developer Portal and create an application + bot.</>,
+                            <>Enable <code>Message Content Intent</code> under Bot settings.</>,
+                            <>Invite bot with scopes/permissions: bot, View Channels, Send Messages, Read Message History.</>,
+                            <>Paste bot token below.</>,
+                            <>Optional: limit handling to specific channel IDs.</>,
+                          ]}
                         />
-                      </Flex>
-                      <Button size="1" variant="ghost" className="mt-2" onClick={() => resetConfigField('web_enabled')}>
-                        Reset to default
-                      </Button>
-                    </div>
+                        <Text size="1" color="gray" className="mt-3 block">
+                          Required: bot token. Optional: restrict handling to listed channel IDs.
+                        </Text>
+                        <div className="mt-4 space-y-3">
+                          <ConfigFieldCard label="discord_bot_token" description={<>Discord bot token from Developer Portal. Leave blank to keep current secret unchanged.</>}>
+                            <TextField.Root
+                              className="mt-2"
+                              value={String(configDraft.discord_bot_token || '')}
+                              onChange={(e) => setConfigField('discord_bot_token', e.target.value)}
+                              placeholder="MTAx..."
+                            />
+                          </ConfigFieldCard>
+                          <ConfigFieldCard label="discord_allowed_channels" description={<>Optional allowlist. Only listed channel IDs can trigger the bot.</>}>
+                            <TextField.Root
+                              className="mt-2"
+                              value={String(configDraft.discord_allowed_channels_csv || '')}
+                              onChange={(e) => setConfigField('discord_allowed_channels_csv', e.target.value)}
+                              placeholder="1234567890, 9876543210"
+                            />
+                          </ConfigFieldCard>
+                        </div>
+                      </div>
+                    </Tabs.Content>
+
+                    <Tabs.Content value="web">
+                      <div className={sectionCardClass} style={sectionCardStyle}>
+                        <Text size="3" weight="bold">Web</Text>
+                        <ConfigStepsCard
+                          steps={[
+                            <>Keep <code>web_enabled</code> on for local UI access.</>,
+                            <>Use <code>127.0.0.1</code> for local-only host, or set LAN host explicitly.</>,
+                            <>Choose web port (default <code>10961</code>).</>,
+                          ]}
+                        />
+                        <Text size="1" color="gray" className="mt-3 block">
+                          For local only, keep host as 127.0.0.1. Use 0.0.0.0 only behind trusted network controls.
+                        </Text>
+                        <div className="mt-4 space-y-3">
+                          <ConfigFieldCard label="web_host" description={<>Use <code>127.0.0.1</code> for local-only. Use <code>0.0.0.0</code> only when intentionally exposing on LAN.</>}>
+                            <TextField.Root
+                              className="mt-2"
+                              value={String(configDraft.web_host || DEFAULT_CONFIG_VALUES.web_host)}
+                              onChange={(e) => setConfigField('web_host', e.target.value)}
+                              placeholder="127.0.0.1"
+                            />
+                          </ConfigFieldCard>
+                          <ConfigFieldCard label="web_port" description={<>HTTP port for Web UI and API endpoint.</>}>
+                            <TextField.Root
+                              className="mt-2"
+                              value={String(configDraft.web_port || DEFAULT_CONFIG_VALUES.web_port)}
+                              onChange={(e) => setConfigField('web_port', e.target.value)}
+                              placeholder="10961"
+                            />
+                          </ConfigFieldCard>
+                        </div>
+                      </div>
+                    </Tabs.Content>
+
                   </div>
                 </div>
+                </Tabs.Root>
+              ) : (
+                <Text size="2" color="gray">Loading...</Text>
+              )}
+            </div>
 
-                {saveStatus ? (
-                  <Text size="2" color={saveStatus.startsWith('Save failed') ? 'red' : 'green'}>
-                    {saveStatus}
-                  </Text>
-                ) : null}
-                <Flex justify="end" gap="2" mt="1">
-                  <Dialog.Close>
-                    <Button variant="soft">Close</Button>
-                  </Dialog.Close>
-                  <Button onClick={() => void saveConfigChanges()}>Save</Button>
-                </Flex>
+            <div className="mt-3 flex items-center justify-between border-t border-[color:var(--mc-border-soft)] pt-3">
+              {saveStatus ? (
+                <Text size="2" color={saveStatus.startsWith('Save failed') ? 'red' : 'green'}>
+                  {saveStatus}
+                </Text>
+              ) : (
+                <span />
+              )}
+              <Flex justify="end" gap="2">
+                <Dialog.Close>
+                  <Button variant="soft">Close</Button>
+                </Dialog.Close>
+                <Button onClick={() => void saveConfigChanges()}>Save</Button>
               </Flex>
-            ) : (
-              <Text size="2" color="gray">
-                Loading...
-              </Text>
-            )}
+            </div>
+          </Dialog.Content>
+        </Dialog.Root>
+        <Dialog.Root open={usageOpen} onOpenChange={setUsageOpen}>
+          <Dialog.Content maxWidth="980px" className="overflow-hidden flex flex-col" style={{ width: '980px', height: '720px', maxWidth: '980px', maxHeight: '720px' }}>
+            <Dialog.Title>Usage Panel</Dialog.Title>
+            <Dialog.Description size="2" mb="3">
+              Token and cost summary for session <code>{usageSession || sessionKey}</code>
+            </Dialog.Description>
+            <div className="mb-3">
+              <Flex gap="2">
+                <Button size="2" variant="soft" onClick={() => void openUsage(sessionKey)} disabled={usageLoading}>
+                  Refresh Current Session
+                </Button>
+                <Button size="2" variant="soft" onClick={() => void openUsage(usageSession || sessionKey)} disabled={usageLoading}>
+                  Refresh This Panel
+                </Button>
+              </Flex>
+            </div>
+            <Card className="min-h-0 flex-1 overflow-auto p-3">
+              {usageLoading ? (
+                <Text size="2">Loading usage report...</Text>
+              ) : usageError ? (
+                <Callout.Root color="red" size="1" variant="soft">
+                  <Callout.Text>{usageError}</Callout.Text>
+                </Callout.Root>
+              ) : (
+                <pre className="whitespace-pre-wrap break-words text-[13px] leading-6">{usageReport || '(no usage data)'}</pre>
+              )}
+            </Card>
           </Dialog.Content>
         </Dialog.Root>
       </div>
