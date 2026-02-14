@@ -1983,7 +1983,10 @@ mod tests {
     async fn test_api_memory_observability_returns_series() {
         let web_state = test_web_state(Box::new(DummyLlm), None, WebLimits::default());
         let db = web_state.app_state.db.clone();
-        call_blocking(db, |d| {
+        let started_at_dt = chrono::Utc::now() - chrono::Duration::minutes(1);
+        let started_at = started_at_dt.to_rfc3339();
+        let finished_at = (started_at_dt + chrono::Duration::seconds(1)).to_rfc3339();
+        call_blocking(db, move |d| {
             d.upsert_chat(123, Some("main"), "web")?;
             d.insert_memory_with_metadata(
                 Some(123),
@@ -1994,8 +1997,8 @@ mod tests {
             )?;
             d.log_reflector_run(
                 123,
-                "2026-02-13T00:00:00Z",
-                "2026-02-13T00:00:01Z",
+                &started_at,
+                &finished_at,
                 2,
                 1,
                 0,

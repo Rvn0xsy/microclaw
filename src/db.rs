@@ -2129,7 +2129,7 @@ impl Database {
                         COALESCE(SUM(updated_count), 0),
                         COALESCE(SUM(skipped_count), 0)
                      FROM memory_reflector_runs
-                     WHERE chat_id = ?1 AND started_at >= ?2",
+                     WHERE chat_id = ?1 AND unixepoch(started_at) >= unixepoch(?2)",
                 params![cid, &since_24h],
                 |row| {
                     Ok((
@@ -2148,7 +2148,7 @@ impl Database {
                         COALESCE(SUM(updated_count), 0),
                         COALESCE(SUM(skipped_count), 0)
                      FROM memory_reflector_runs
-                     WHERE started_at >= ?1",
+                     WHERE unixepoch(started_at) >= unixepoch(?1)",
                 params![&since_24h],
                 |row| {
                     Ok((
@@ -2169,7 +2169,7 @@ impl Database {
                         COALESCE(SUM(selected_count), 0),
                         COALESCE(SUM(candidate_count), 0)
                      FROM memory_injection_logs
-                     WHERE chat_id = ?1 AND created_at >= ?2",
+                     WHERE chat_id = ?1 AND unixepoch(created_at) >= unixepoch(?2)",
                     params![cid, &since_24h],
                     |row| {
                         Ok((
@@ -2186,7 +2186,7 @@ impl Database {
                         COALESCE(SUM(selected_count), 0),
                         COALESCE(SUM(candidate_count), 0)
                      FROM memory_injection_logs
-                     WHERE created_at >= ?1",
+                     WHERE unixepoch(created_at) >= unixepoch(?1)",
                     params![&since_24h],
                     |row| {
                         Ok((
@@ -2232,16 +2232,16 @@ impl Database {
         }
         if since.is_some() {
             where_parts.push(if chat_id.is_some() {
-                "started_at >= ?2"
+                "unixepoch(started_at) >= unixepoch(?2)"
             } else {
-                "started_at >= ?1"
+                "unixepoch(started_at) >= unixepoch(?1)"
             });
         }
         if !where_parts.is_empty() {
             query.push_str(" WHERE ");
             query.push_str(&where_parts.join(" AND "));
         }
-        query.push_str(" ORDER BY started_at ASC LIMIT ");
+        query.push_str(" ORDER BY unixepoch(started_at) ASC LIMIT ");
         query.push_str(&limit.max(1).to_string());
         query.push_str(" OFFSET ");
         query.push_str(&offset.to_string());
@@ -2289,16 +2289,16 @@ impl Database {
         }
         if since.is_some() {
             where_parts.push(if chat_id.is_some() {
-                "created_at >= ?2"
+                "unixepoch(created_at) >= unixepoch(?2)"
             } else {
-                "created_at >= ?1"
+                "unixepoch(created_at) >= unixepoch(?1)"
             });
         }
         if !where_parts.is_empty() {
             query.push_str(" WHERE ");
             query.push_str(&where_parts.join(" AND "));
         }
-        query.push_str(" ORDER BY created_at ASC LIMIT ");
+        query.push_str(" ORDER BY unixepoch(created_at) ASC LIMIT ");
         query.push_str(&limit.max(1).to_string());
         query.push_str(" OFFSET ");
         query.push_str(&offset.to_string());
@@ -3430,6 +3430,9 @@ mod tests {
     #[test]
     fn test_memory_observability_summary_rollup() {
         let (db, dir) = test_db();
+        let started_at_dt = chrono::Utc::now() - chrono::Duration::minutes(1);
+        let started_at = started_at_dt.to_rfc3339();
+        let finished_at = (started_at_dt + chrono::Duration::seconds(1)).to_rfc3339();
         db.insert_memory_with_metadata(Some(100), "prod db on 5433", "KNOWLEDGE", "explicit", 0.95)
             .unwrap();
         let stale_id = db
@@ -3438,8 +3441,8 @@ mod tests {
         db.archive_memory(stale_id).unwrap();
         db.log_reflector_run(
             100,
-            "2026-02-13T00:00:00Z",
-            "2026-02-13T00:00:01Z",
+            &started_at,
+            &finished_at,
             3,
             1,
             1,
