@@ -18,15 +18,40 @@ use tracing::{error, info};
 use crate::agent_engine::{
     process_with_agent, process_with_agent_with_events, AgentEvent, AgentRequestContext,
 };
-use crate::channel::{
-    deliver_and_store_bot_message, get_chat_routing, session_source_for_chat, ChatChannel,
-};
+use crate::channel::ConversationKind;
+use crate::channel::{deliver_and_store_bot_message, get_chat_routing, session_source_for_chat};
+use crate::channel_adapter::{ChannelAdapter, ChannelRegistry};
 use crate::config::{Config, WorkingDirIsolation};
 use crate::db::{call_blocking, ChatSummary, StoredMessage};
 use crate::runtime::AppState;
 use crate::usage::build_usage_report;
 
 static WEB_ASSETS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/web/dist");
+
+pub struct WebAdapter;
+
+#[async_trait::async_trait]
+impl ChannelAdapter for WebAdapter {
+    fn name(&self) -> &str {
+        "web"
+    }
+
+    fn chat_type_routes(&self) -> Vec<(&str, ConversationKind)> {
+        vec![("web", ConversationKind::Private)]
+    }
+
+    fn is_local_only(&self) -> bool {
+        true
+    }
+
+    fn allows_cross_chat(&self) -> bool {
+        false
+    }
+
+    async fn send_text(&self, _external_chat_id: &str, _text: &str) -> Result<(), String> {
+        Ok(())
+    }
+}
 
 #[derive(Clone)]
 struct WebState {
@@ -411,6 +436,12 @@ struct UpdateConfigRequest {
     discord_bot_token: Option<String>,
     discord_allowed_channels: Option<Vec<u64>>,
 
+    /// Generic per-channel config updates. Keys are channel names (e.g. "slack", "feishu").
+    /// Values are objects with channel-specific fields. Non-empty string values are merged
+    /// into `cfg.channels[name]`; this avoids adding per-channel fields here.
+    #[serde(default)]
+    channel_configs: Option<HashMap<String, HashMap<String, serde_json::Value>>>,
+
     reflector_enabled: Option<bool>,
     reflector_interval_mins: Option<u64>,
 
@@ -425,6 +456,43 @@ struct UpdateConfigRequest {
     web_run_history_limit: Option<usize>,
     web_session_idle_ttl_seconds: Option<u64>,
 }
+
+/// Convert a serde_json::Value to a serde_yaml::Value for channel config merging.
+fn json_to_yaml_value(v: &serde_json::Value) -> serde_yaml::Value {
+    match v {
+        serde_json::Value::Null => serde_yaml::Value::Null,
+        serde_json::Value::Bool(b) => serde_yaml::Value::Bool(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                serde_yaml::Value::Number(i.into())
+            } else if let Some(u) = n.as_u64() {
+                serde_yaml::Value::Number(u.into())
+            } else if let Some(f) = n.as_f64() {
+                serde_yaml::Value::Number(serde_yaml::Number::from(f))
+            } else {
+                serde_yaml::Value::Null
+            }
+        }
+        serde_json::Value::String(s) => serde_yaml::Value::String(s.clone()),
+        serde_json::Value::Array(arr) => {
+            serde_yaml::Value::Sequence(arr.iter().map(json_to_yaml_value).collect())
+        }
+        serde_json::Value::Object(obj) => {
+            let mut map = serde_yaml::Mapping::new();
+            for (k, v) in obj {
+                map.insert(serde_yaml::Value::String(k.clone()), json_to_yaml_value(v));
+            }
+            serde_yaml::Value::Mapping(map)
+        }
+    }
+}
+
+/// Channel secret field names to redact in API responses.
+/// Adding a new channel only requires adding an entry here.
+const CHANNEL_SECRET_FIELDS: &[(&str, &[&str])] = &[
+    ("slack", &["bot_token", "app_token"]),
+    ("feishu", &["app_secret"]),
+];
 
 fn config_path_for_save() -> Result<PathBuf, (StatusCode, String)> {
     match Config::resolve_config_path() {
@@ -453,6 +521,20 @@ fn redact_config(config: &Config) -> serde_json::Value {
     }
     if cfg.web_auth_token.is_some() {
         cfg.web_auth_token = Some("***".into());
+    }
+
+    // Redact secrets in channels map using declarative list
+    for (channel_name, secret_fields) in CHANNEL_SECRET_FIELDS {
+        if let Some(channel_val) = cfg.channels.get_mut(*channel_name) {
+            if let Some(map) = channel_val.as_mapping_mut() {
+                for field in *secret_fields {
+                    let key = serde_yaml::Value::String((*field).to_string());
+                    if map.contains_key(&key) {
+                        map.insert(key, serde_yaml::Value::String("***".into()));
+                    }
+                }
+            }
+        }
     }
 
     json!(cfg)
@@ -556,6 +638,28 @@ async fn api_update_config(
         cfg.discord_allowed_channels = v;
     }
 
+    // Generic channel config merge — handles any channel (slack, feishu, future ones)
+    if let Some(channel_configs) = body.channel_configs {
+        for (channel_name, fields) in channel_configs {
+            let entry = cfg
+                .channels
+                .entry(channel_name)
+                .or_insert_with(|| serde_yaml::Value::Mapping(Default::default()));
+            if let Some(map) = entry.as_mapping_mut() {
+                for (field_key, json_val) in fields {
+                    // Skip empty strings (treated as "no change")
+                    if let Some(s) = json_val.as_str() {
+                        if s.trim().is_empty() {
+                            continue;
+                        }
+                    }
+                    let yaml_val = json_to_yaml_value(&json_val);
+                    map.insert(serde_yaml::Value::String(field_key), yaml_val);
+                }
+            }
+        }
+    }
+
     if let Some(v) = body.reflector_enabled {
         cfg.reflector_enabled = v;
     }
@@ -609,8 +713,8 @@ async fn api_update_config(
     })))
 }
 
-fn map_chat_to_session(chat: ChatSummary) -> SessionItem {
-    let source = session_source_for_chat(&chat.chat_type, chat.chat_title.as_deref());
+fn map_chat_to_session(registry: &ChannelRegistry, chat: ChatSummary) -> SessionItem {
+    let source = session_source_for_chat(registry, &chat.chat_type, chat.chat_title.as_deref());
 
     let fallback = format!("{}:{}", source, chat.chat_id);
     let mut label = chat.chat_title.clone().unwrap_or_else(|| fallback.clone());
@@ -690,7 +794,7 @@ async fn api_sessions(
 
     let sessions = chats
         .into_iter()
-        .map(map_chat_to_session)
+        .map(|c| map_chat_to_session(&state.app_state.channel_registry, c))
         .collect::<Vec<_>>();
     Ok(Json(json!({ "ok": true, "sessions": sessions })))
 }
@@ -1244,11 +1348,15 @@ async fn send_and_store_response_with_events(
         .to_string();
 
     if let Some(explicit_chat_id) = parsed_chat_id {
-        let is_web = get_chat_routing(state.app_state.db.clone(), explicit_chat_id)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
-            .map(|r| r.channel == ChatChannel::Web)
-            .unwrap_or(false);
+        let is_web = get_chat_routing(
+            &state.app_state.channel_registry,
+            state.app_state.db.clone(),
+            explicit_chat_id,
+        )
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .map(|r| r.channel_name == "web")
+        .unwrap_or(false);
         if !is_web {
             return Err((
                 StatusCode::BAD_REQUEST,
@@ -1301,8 +1409,7 @@ async fn send_and_store_response_with_events(
     };
 
     deliver_and_store_bot_message(
-        state.app_state.telegram_bot.as_ref(),
-        Some(&state.app_state.config),
+        &state.app_state.channel_registry,
         state.app_state.db.clone(),
         &state.app_state.config.bot_username,
         chat_id,
@@ -1329,11 +1436,15 @@ async fn api_reset(
     let session_key = normalize_session_key(body.session_key.as_deref());
     let chat_id = resolve_chat_id_for_session_key(&state, &session_key).await?;
 
-    let is_web = get_chat_routing(state.app_state.db.clone(), chat_id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
-        .map(|r| r.channel == ChatChannel::Web)
-        .unwrap_or(false);
+    let is_web = get_chat_routing(
+        &state.app_state.channel_registry,
+        state.app_state.db.clone(),
+        chat_id,
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+    .map(|r| r.channel_name == "web")
+    .unwrap_or(false);
 
     let deleted = if is_web {
         let deleted = call_blocking(state.app_state.db.clone(), move |db| {
@@ -1467,6 +1578,7 @@ fn build_router(web_state: WebState) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channel_adapter::ChannelRegistry;
     use crate::config::{Config, WorkingDirIsolation};
     use crate::db::call_blocking;
     use crate::llm::LlmProvider;
@@ -1476,7 +1588,6 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use teloxide::Bot;
     use tower::ServiceExt;
 
     #[test]
@@ -1636,6 +1747,7 @@ mod tests {
             reflector_enabled: true,
             reflector_interval_mins: 15,
             soul_path: None,
+            channels: std::collections::HashMap::new(),
         };
         let dir = std::env::temp_dir().join(format!("microclaw_webtest_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1644,16 +1756,18 @@ mod tests {
         let runtime_dir = cfg.runtime_data_dir();
         std::fs::create_dir_all(&runtime_dir).unwrap();
         let db = Arc::new(Database::new(&runtime_dir).unwrap());
-        let bot = Bot::new("123456:TEST_TOKEN");
+        let mut registry = ChannelRegistry::new();
+        registry.register(Arc::new(WebAdapter));
+        let channel_registry = Arc::new(registry);
         let state = AppState {
             config: cfg.clone(),
-            telegram_bot: Some(bot.clone()),
+            channel_registry: channel_registry.clone(),
             db: db.clone(),
             memory: MemoryManager::new(&runtime_dir),
             skills: SkillManager::from_skills_dir(&cfg.skills_data_dir()),
             llm,
             embedding: None,
-            tools: ToolRegistry::new(&cfg, Some(bot), db),
+            tools: ToolRegistry::new(&cfg, channel_registry, db),
         };
         Arc::new(state)
     }
@@ -2078,9 +2192,14 @@ mod tests {
         let external = call_blocking(db.clone(), move |d| d.get_chat_external_id(chat_id))
             .await
             .unwrap();
-        let routing = get_chat_routing(db, chat_id).await.unwrap();
+        let test_registry = {
+            let mut r = ChannelRegistry::new();
+            r.register(Arc::new(WebAdapter));
+            Arc::new(r)
+        };
+        let routing = get_chat_routing(&test_registry, db, chat_id).await.unwrap();
 
-        assert_eq!(routing.map(|r| r.channel), Some(ChatChannel::Web));
+        assert_eq!(routing.map(|r| r.channel_name), Some("web".to_string()));
         assert_eq!(external.as_deref(), Some("scoped-main"));
     }
 }

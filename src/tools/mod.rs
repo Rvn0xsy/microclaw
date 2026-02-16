@@ -25,13 +25,12 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::{path::Path, path::PathBuf, time::Instant};
 
-use async_trait::async_trait;
-use serde_json::json;
-use teloxide::prelude::*;
-
+use crate::channel_adapter::ChannelRegistry;
 use crate::config::{Config, WorkingDirIsolation};
 use crate::db::Database;
 use crate::llm_types::ToolDefinition;
+use async_trait::async_trait;
+use serde_json::json;
 
 pub struct ToolResult {
     pub content: String,
@@ -263,7 +262,7 @@ pub fn resolve_tool_working_dir(
 }
 
 impl ToolRegistry {
-    pub fn new(config: &Config, telegram_bot: Option<Bot>, db: Arc<Database>) -> Self {
+    pub fn new(config: &Config, channel_registry: Arc<ChannelRegistry>, db: Arc<Database>) -> Self {
         let working_dir = PathBuf::from(&config.working_dir);
         if let Err(e) = std::fs::create_dir_all(&working_dir) {
             tracing::warn!(
@@ -303,21 +302,36 @@ impl ToolRegistry {
             Box::new(memory::WriteMemoryTool::new(&config.data_dir, db.clone())),
             Box::new(web_fetch::WebFetchTool),
             Box::new(web_search::WebSearchTool),
-            Box::new(send_message::SendMessageTool::new_with_config(
-                telegram_bot,
+            Box::new(send_message::SendMessageTool::new(
+                channel_registry.clone(),
                 db.clone(),
                 config.bot_username.clone(),
-                config.clone(),
             )),
             Box::new(schedule::ScheduleTaskTool::new(
+                channel_registry.clone(),
                 db.clone(),
                 config.timezone.clone(),
             )),
-            Box::new(schedule::ListTasksTool::new(db.clone())),
-            Box::new(schedule::PauseTaskTool::new(db.clone())),
-            Box::new(schedule::ResumeTaskTool::new(db.clone())),
-            Box::new(schedule::CancelTaskTool::new(db.clone())),
-            Box::new(schedule::GetTaskHistoryTool::new(db.clone())),
+            Box::new(schedule::ListTasksTool::new(
+                channel_registry.clone(),
+                db.clone(),
+            )),
+            Box::new(schedule::PauseTaskTool::new(
+                channel_registry.clone(),
+                db.clone(),
+            )),
+            Box::new(schedule::ResumeTaskTool::new(
+                channel_registry.clone(),
+                db.clone(),
+            )),
+            Box::new(schedule::CancelTaskTool::new(
+                channel_registry.clone(),
+                db.clone(),
+            )),
+            Box::new(schedule::GetTaskHistoryTool::new(
+                channel_registry.clone(),
+                db.clone(),
+            )),
             Box::new(export_chat::ExportChatTool::new(
                 db.clone(),
                 &config.data_dir,

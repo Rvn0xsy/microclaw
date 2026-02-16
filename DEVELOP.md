@@ -13,7 +13,7 @@ cargo run -- start
 ## Prerequisites
 
 - Rust 1.70+ (2021 edition)
-- At least one enabled channel adapter (Telegram bot token from @BotFather, Discord bot token from Discord Developer Portal, or Web UI)
+- At least one enabled channel adapter (Telegram bot token from @BotFather, Discord bot token from Discord Developer Portal, Slack app/bot tokens, Feishu/Lark app credentials, or Web UI)
 - An Anthropic API key
 
 No other external dependencies. SQLite is bundled via `rusqlite`.
@@ -34,6 +34,8 @@ src/
                          #   - Group chat catch-up logic
                          #   - Response splitting
     discord.rs           # Discord message handler (serenity gateway), reuses process_with_claude
+    channels/slack.rs    # Slack adapter (Socket Mode WebSocket)
+    channels/feishu.rs   # Feishu/Lark adapter (WebSocket long connection or webhook)
     claude.rs            # Anthropic Messages API client:
                          #   - Request/response types with serde
                          #   - HTTP calls with retry on 429
@@ -113,7 +115,7 @@ Platform message (via adapter)
     Abort typing indicator
        |
        v
-    Send response (split at channel limits: Telegram 4096 / Discord 2000)
+    Send response (split at channel limits: Telegram 4096 / Discord 2000 / Slack 4000 / Feishu 4000)
        |
        v
     Store bot response in SQLite

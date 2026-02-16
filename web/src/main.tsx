@@ -140,6 +140,75 @@ const DEFAULT_CONFIG_VALUES = {
   embedding_dim: '',
 }
 
+// ---------------------------------------------------------------------------
+// Declarative dynamic-channel definitions for the Settings panel.
+// To add a new channel, just append an entry here — no other UI code changes.
+// ---------------------------------------------------------------------------
+interface DynChannelField {
+  /** YAML key inside channels.<name>, e.g. "bot_token" */
+  yamlKey: string
+  /** Label shown in the settings panel */
+  label: string
+  /** Input placeholder */
+  placeholder: string
+  /** Description shown in ConfigFieldCard */
+  description: string
+  /** If true, field value is a secret (not pre-filled from server config) */
+  secret: boolean
+}
+interface DynChannelDef {
+  /** Channel name, e.g. "slack" */
+  name: string
+  /** Display title for the tab header */
+  title: string
+  /** Emoji icon for the tab trigger */
+  icon: string
+  /** Setup steps shown in ConfigStepsCard */
+  steps: string[]
+  /** Hint text below the steps */
+  hint: string
+  /** Config fields */
+  fields: DynChannelField[]
+}
+
+const DYNAMIC_CHANNELS: DynChannelDef[] = [
+  {
+    name: 'slack',
+    title: 'Slack',
+    icon: '🔗',
+    steps: [
+      'Go to api.slack.com/apps and create a new app.',
+      'Enable Socket Mode and create an app-level token (xapp-).',
+      'Add bot token scopes: chat:write, channels:history, groups:history, im:history, mpim:history, app_mentions:read.',
+      'Install to workspace and copy the Bot User OAuth Token (xoxb-).',
+      'Enable Event Subscriptions and subscribe to: message.channels, message.groups, message.im, message.mpim, app_mention.',
+    ],
+    hint: 'Required: bot token and app token. Leave tokens blank to keep current secrets unchanged.',
+    fields: [
+      { yamlKey: 'bot_token', label: 'slack_bot_token', placeholder: 'xoxb-...', description: 'Bot User OAuth Token (xoxb-) for sending messages. Leave blank to keep current secret unchanged.', secret: true },
+      { yamlKey: 'app_token', label: 'slack_app_token', placeholder: 'xapp-...', description: 'App-level token (xapp-) for Socket Mode connection. Leave blank to keep current secret unchanged.', secret: true },
+    ],
+  },
+  {
+    name: 'feishu',
+    title: 'Feishu / Lark',
+    icon: '🐦',
+    steps: [
+      'Go to Feishu Open Platform (or Lark Developer for international) and create a custom app.',
+      'Copy the App ID and App Secret from Credentials.',
+      'Add permissions: im:message, im:message:send_as_bot, im:resource.',
+      'Enable Long Connection mode (recommended) or configure a webhook URL.',
+      'Subscribe to event: im.message.receive_v1.',
+    ],
+    hint: 'Required: App ID and App Secret. Domain defaults to "feishu" (China); use "lark" for international.',
+    fields: [
+      { yamlKey: 'app_id', label: 'feishu_app_id', placeholder: 'cli_xxx', description: 'App ID from Feishu Open Platform credentials.', secret: false },
+      { yamlKey: 'app_secret', label: 'feishu_app_secret', placeholder: 'xxx', description: 'App Secret from Feishu Open Platform. Leave blank to keep current secret unchanged.', secret: true },
+      { yamlKey: 'domain', label: 'feishu_domain', placeholder: 'feishu', description: 'Use "feishu" for China, "lark" for international, or a custom base URL.', secret: false },
+    ],
+  },
+]
+
 const UI_THEME_OPTIONS: { key: UiTheme; label: string; color: string }[] = [
   { key: 'green', label: 'Green', color: '#34d399' },
   { key: 'blue', label: 'Blue', color: '#60a5fa' },
@@ -965,6 +1034,16 @@ function App() {
       embedding_base_url: String(data.config?.embedding_base_url || ''),
       embedding_model: String(data.config?.embedding_model || ''),
       embedding_dim: String(data.config?.embedding_dim || ''),
+      // Dynamic channel fields — initialize from server config
+      ...Object.fromEntries(
+        DYNAMIC_CHANNELS.flatMap((ch) => {
+          const chCfg = (data.config?.channels as Record<string, Record<string, unknown>> | undefined)?.[ch.name] || {}
+          return ch.fields.map((f) => [
+            `${ch.name}__${f.yamlKey}`,
+            f.secret ? '' : String(chCfg[f.yamlKey] || ''),
+          ])
+        }),
+      ),
     })
     setConfigOpen(true)
   }
@@ -1083,6 +1162,15 @@ function App() {
           next.embedding_dim = DEFAULT_CONFIG_VALUES.embedding_dim
           break
         default:
+          // Handle dynamic channel fields
+          for (const ch of DYNAMIC_CHANNELS) {
+            for (const f of ch.fields) {
+              const key = `${ch.name}__${f.yamlKey}`
+              if (field === key) {
+                next[key] = ''
+              }
+            }
+          }
           break
       }
       return next
@@ -1150,6 +1238,24 @@ function App() {
 
       const embeddingApiKey = String(configDraft.embedding_api_key || '').trim()
       if (embeddingApiKey) payload.embedding_api_key = embeddingApiKey
+
+      // Build generic channel_configs from dynamic channel definitions
+      const channelConfigs: Record<string, Record<string, unknown>> = {}
+      for (const ch of DYNAMIC_CHANNELS) {
+        const fields: Record<string, unknown> = {}
+        let hasAny = false
+        for (const f of ch.fields) {
+          const val = String(configDraft[`${ch.name}__${f.yamlKey}`] || '').trim()
+          if (val) {
+            fields[f.yamlKey] = val
+            hasAny = true
+          }
+        }
+        if (hasAny) channelConfigs[ch.name] = fields
+      }
+      if (Object.keys(channelConfigs).length > 0) {
+        payload.channel_configs = channelConfigs
+      }
 
       await api('/api/config', { method: 'PUT', body: JSON.stringify(payload) })
       setSaveStatus('Saved. Restart microclaw to apply changes.')
@@ -1311,7 +1417,10 @@ function App() {
                       <Text size="1" color="gray" className="px-2 pt-3 uppercase tracking-wide">Channels</Text>
                       <Tabs.Trigger value="telegram" className="mc-settings-tab-trigger w-full justify-start rounded-lg px-3 py-2 text-[18px] leading-6 bg-transparent data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-200 hover:bg-white/8">✈️  Telegram</Tabs.Trigger>
                       <Tabs.Trigger value="discord" className="mc-settings-tab-trigger w-full justify-start rounded-lg px-3 py-2 text-[18px] leading-6 bg-transparent data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-200 hover:bg-white/8">💬  Discord</Tabs.Trigger>
-                      
+                      {DYNAMIC_CHANNELS.map((ch) => (
+                        <Tabs.Trigger key={ch.name} value={ch.name} className="mc-settings-tab-trigger w-full justify-start rounded-lg px-3 py-2 text-[18px] leading-6 bg-transparent data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-200 hover:bg-white/8">{ch.icon}  {ch.title}</Tabs.Trigger>
+                      ))}
+
                       <Text size="1" color="gray" className="px-2 pt-3 uppercase tracking-wide">Integrations</Text>
                       <Tabs.Trigger value="web" className="mc-settings-tab-trigger w-full justify-start rounded-lg px-3 py-2 text-[18px] leading-6 bg-transparent data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-200 hover:bg-white/8">🌐  Web</Tabs.Trigger>
                     </Tabs.List>
@@ -1602,6 +1711,31 @@ function App() {
                         </div>
                       </div>
                     </Tabs.Content>
+
+                    {DYNAMIC_CHANNELS.map((ch) => (
+                      <Tabs.Content key={ch.name} value={ch.name}>
+                        <div className={sectionCardClass} style={sectionCardStyle}>
+                          <Text size="3" weight="bold">{ch.title}</Text>
+                          <ConfigStepsCard steps={ch.steps.map((s, i) => <span key={i}>{s}</span>)} />
+                          <Text size="1" color="gray" className="mt-3 block">{ch.hint}</Text>
+                          <div className="mt-4 space-y-3">
+                            {ch.fields.map((f) => {
+                              const stateKey = `${ch.name}__${f.yamlKey}`
+                              return (
+                                <ConfigFieldCard key={stateKey} label={f.label} description={<>{f.description}</>}>
+                                  <TextField.Root
+                                    className="mt-2"
+                                    value={String(configDraft[stateKey] || '')}
+                                    onChange={(e) => setConfigField(stateKey, e.target.value)}
+                                    placeholder={f.placeholder}
+                                  />
+                                </ConfigFieldCard>
+                              )
+                            })}
+                          </div>
+                        </div>
+                      </Tabs.Content>
+                    ))}
 
                     <Tabs.Content value="web">
                       <div className={sectionCardClass} style={sectionCardStyle}>

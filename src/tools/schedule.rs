@@ -6,6 +6,7 @@ use serde_json::json;
 
 use super::{authorize_chat_access, schema_object, Tool, ToolResult};
 use crate::channel::enforce_channel_policy;
+use crate::channel_adapter::ChannelRegistry;
 use crate::db::{call_blocking, Database};
 use crate::llm_types::ToolDefinition;
 
@@ -25,13 +26,19 @@ fn compute_next_run(cron_expr: &str, tz_name: &str) -> Result<String, String> {
 // --- schedule_task ---
 
 pub struct ScheduleTaskTool {
+    registry: Arc<ChannelRegistry>,
     db: Arc<Database>,
     default_timezone: String,
 }
 
 impl ScheduleTaskTool {
-    pub fn new(db: Arc<Database>, default_timezone: String) -> Self {
+    pub fn new(
+        registry: Arc<ChannelRegistry>,
+        db: Arc<Database>,
+        default_timezone: String,
+    ) -> Self {
         ScheduleTaskTool {
+            registry,
             db,
             default_timezone,
         }
@@ -85,7 +92,9 @@ impl Tool for ScheduleTaskTool {
         if let Err(e) = authorize_chat_access(&input, chat_id) {
             return ToolResult::error(e);
         }
-        if let Err(e) = enforce_channel_policy(self.db.clone(), &input, chat_id).await {
+        if let Err(e) =
+            enforce_channel_policy(&self.registry, self.db.clone(), &input, chat_id).await
+        {
             return ToolResult::error(e);
         }
         let prompt = match input.get("prompt").and_then(|v| v.as_str()) {
@@ -148,12 +157,13 @@ impl Tool for ScheduleTaskTool {
 // --- list_tasks ---
 
 pub struct ListTasksTool {
+    registry: Arc<ChannelRegistry>,
     db: Arc<Database>,
 }
 
 impl ListTasksTool {
-    pub fn new(db: Arc<Database>) -> Self {
-        ListTasksTool { db }
+    pub fn new(registry: Arc<ChannelRegistry>, db: Arc<Database>) -> Self {
+        ListTasksTool { registry, db }
     }
 }
 
@@ -187,7 +197,9 @@ impl Tool for ListTasksTool {
         if let Err(e) = authorize_chat_access(&input, chat_id) {
             return ToolResult::error(e);
         }
-        if let Err(e) = enforce_channel_policy(self.db.clone(), &input, chat_id).await {
+        if let Err(e) =
+            enforce_channel_policy(&self.registry, self.db.clone(), &input, chat_id).await
+        {
             return ToolResult::error(e);
         }
 
@@ -213,12 +225,13 @@ impl Tool for ListTasksTool {
 // --- pause_task ---
 
 pub struct PauseTaskTool {
+    registry: Arc<ChannelRegistry>,
     db: Arc<Database>,
 }
 
 impl PauseTaskTool {
-    pub fn new(db: Arc<Database>) -> Self {
-        PauseTaskTool { db }
+    pub fn new(registry: Arc<ChannelRegistry>, db: Arc<Database>) -> Self {
+        PauseTaskTool { registry, db }
     }
 }
 
@@ -258,7 +271,9 @@ impl Tool for PauseTaskTool {
         if let Err(e) = authorize_chat_access(&input, task.chat_id) {
             return ToolResult::error(e);
         }
-        if let Err(e) = enforce_channel_policy(self.db.clone(), &input, task.chat_id).await {
+        if let Err(e) =
+            enforce_channel_policy(&self.registry, self.db.clone(), &input, task.chat_id).await
+        {
             return ToolResult::error(e);
         }
 
@@ -277,12 +292,13 @@ impl Tool for PauseTaskTool {
 // --- resume_task ---
 
 pub struct ResumeTaskTool {
+    registry: Arc<ChannelRegistry>,
     db: Arc<Database>,
 }
 
 impl ResumeTaskTool {
-    pub fn new(db: Arc<Database>) -> Self {
-        ResumeTaskTool { db }
+    pub fn new(registry: Arc<ChannelRegistry>, db: Arc<Database>) -> Self {
+        ResumeTaskTool { registry, db }
     }
 }
 
@@ -322,7 +338,9 @@ impl Tool for ResumeTaskTool {
         if let Err(e) = authorize_chat_access(&input, task.chat_id) {
             return ToolResult::error(e);
         }
-        if let Err(e) = enforce_channel_policy(self.db.clone(), &input, task.chat_id).await {
+        if let Err(e) =
+            enforce_channel_policy(&self.registry, self.db.clone(), &input, task.chat_id).await
+        {
             return ToolResult::error(e);
         }
 
@@ -341,12 +359,13 @@ impl Tool for ResumeTaskTool {
 // --- cancel_task ---
 
 pub struct CancelTaskTool {
+    registry: Arc<ChannelRegistry>,
     db: Arc<Database>,
 }
 
 impl CancelTaskTool {
-    pub fn new(db: Arc<Database>) -> Self {
-        CancelTaskTool { db }
+    pub fn new(registry: Arc<ChannelRegistry>, db: Arc<Database>) -> Self {
+        CancelTaskTool { registry, db }
     }
 }
 
@@ -386,7 +405,9 @@ impl Tool for CancelTaskTool {
         if let Err(e) = authorize_chat_access(&input, task.chat_id) {
             return ToolResult::error(e);
         }
-        if let Err(e) = enforce_channel_policy(self.db.clone(), &input, task.chat_id).await {
+        if let Err(e) =
+            enforce_channel_policy(&self.registry, self.db.clone(), &input, task.chat_id).await
+        {
             return ToolResult::error(e);
         }
 
@@ -405,12 +426,13 @@ impl Tool for CancelTaskTool {
 // --- get_task_history ---
 
 pub struct GetTaskHistoryTool {
+    registry: Arc<ChannelRegistry>,
     db: Arc<Database>,
 }
 
 impl GetTaskHistoryTool {
-    pub fn new(db: Arc<Database>) -> Self {
-        GetTaskHistoryTool { db }
+    pub fn new(registry: Arc<ChannelRegistry>, db: Arc<Database>) -> Self {
+        GetTaskHistoryTool { registry, db }
     }
 }
 
@@ -454,7 +476,9 @@ impl Tool for GetTaskHistoryTool {
         if let Err(e) = authorize_chat_access(&input, task.chat_id) {
             return ToolResult::error(e);
         }
-        if let Err(e) = enforce_channel_policy(self.db.clone(), &input, task.chat_id).await {
+        if let Err(e) =
+            enforce_channel_policy(&self.registry, self.db.clone(), &input, task.chat_id).await
+        {
             return ToolResult::error(e);
         }
         let limit = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
@@ -492,8 +516,16 @@ impl Tool for GetTaskHistoryTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channel_adapter::ChannelRegistry;
     use crate::db::Database;
+    use crate::web::WebAdapter;
     use serde_json::json;
+
+    fn test_registry() -> Arc<ChannelRegistry> {
+        let mut registry = ChannelRegistry::new();
+        registry.register(Arc::new(WebAdapter));
+        Arc::new(registry)
+    }
 
     fn test_db() -> (Arc<Database>, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("microclaw_sched_{}", uuid::Uuid::new_v4()));
@@ -537,7 +569,7 @@ mod tests {
     #[tokio::test]
     async fn test_schedule_task_cron() {
         let (db, dir) = test_db();
-        let tool = ScheduleTaskTool::new(db, "UTC".into());
+        let tool = ScheduleTaskTool::new(test_registry(), db, "UTC".into());
         let result = tool
             .execute(json!({
                 "chat_id": 100,
@@ -555,7 +587,7 @@ mod tests {
     #[tokio::test]
     async fn test_schedule_task_once() {
         let (db, dir) = test_db();
-        let tool = ScheduleTaskTool::new(db, "UTC".into());
+        let tool = ScheduleTaskTool::new(test_registry(), db, "UTC".into());
         let result = tool
             .execute(json!({
                 "chat_id": 100,
@@ -572,7 +604,7 @@ mod tests {
     #[tokio::test]
     async fn test_schedule_task_invalid_once_timestamp() {
         let (db, dir) = test_db();
-        let tool = ScheduleTaskTool::new(db, "UTC".into());
+        let tool = ScheduleTaskTool::new(test_registry(), db, "UTC".into());
         let result = tool
             .execute(json!({
                 "chat_id": 100,
@@ -589,7 +621,7 @@ mod tests {
     #[tokio::test]
     async fn test_schedule_task_invalid_type() {
         let (db, dir) = test_db();
-        let tool = ScheduleTaskTool::new(db, "UTC".into());
+        let tool = ScheduleTaskTool::new(test_registry(), db, "UTC".into());
         let result = tool
             .execute(json!({
                 "chat_id": 100,
@@ -606,7 +638,7 @@ mod tests {
     #[tokio::test]
     async fn test_schedule_task_missing_params() {
         let (db, dir) = test_db();
-        let tool = ScheduleTaskTool::new(db, "UTC".into());
+        let tool = ScheduleTaskTool::new(test_registry(), db, "UTC".into());
         let result = tool.execute(json!({})).await;
         assert!(result.is_error);
         assert!(result.content.contains("Missing"));
@@ -616,7 +648,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_tasks_empty() {
         let (db, dir) = test_db();
-        let tool = ListTasksTool::new(db);
+        let tool = ListTasksTool::new(test_registry(), db);
         let result = tool.execute(json!({"chat_id": 100})).await;
         assert!(!result.is_error);
         assert!(result.content.contains("No scheduled tasks"));
@@ -637,7 +669,7 @@ mod tests {
         )
         .unwrap();
 
-        let tool = ListTasksTool::new(db);
+        let tool = ListTasksTool::new(test_registry(), db);
         let result = tool.execute(json!({"chat_id": 100})).await;
         assert!(!result.is_error);
         assert!(result.content.contains("task A"));
@@ -653,12 +685,12 @@ mod tests {
             .create_scheduled_task(100, "test", "cron", "0 * * * * *", "2024-01-01T00:00:00Z")
             .unwrap();
 
-        let pause_tool = PauseTaskTool::new(db.clone());
+        let pause_tool = PauseTaskTool::new(test_registry(), db.clone());
         let result = pause_tool.execute(json!({"task_id": id})).await;
         assert!(!result.is_error);
         assert!(result.content.contains("paused"));
 
-        let resume_tool = ResumeTaskTool::new(db.clone());
+        let resume_tool = ResumeTaskTool::new(test_registry(), db.clone());
         let result = resume_tool.execute(json!({"task_id": id})).await;
         assert!(!result.is_error);
         assert!(result.content.contains("resumed"));
@@ -668,7 +700,7 @@ mod tests {
     #[tokio::test]
     async fn test_pause_nonexistent_task() {
         let (db, dir) = test_db();
-        let tool = PauseTaskTool::new(db);
+        let tool = PauseTaskTool::new(test_registry(), db);
         let result = tool.execute(json!({"task_id": 9999})).await;
         assert!(result.is_error);
         assert!(result.content.contains("not found"));
@@ -682,7 +714,7 @@ mod tests {
             .create_scheduled_task(100, "test", "cron", "0 * * * * *", "2024-01-01T00:00:00Z")
             .unwrap();
 
-        let tool = CancelTaskTool::new(db.clone());
+        let tool = CancelTaskTool::new(test_registry(), db.clone());
         let result = tool.execute(json!({"task_id": id})).await;
         assert!(!result.is_error);
         assert!(result.content.contains("cancelled"));
@@ -696,7 +728,7 @@ mod tests {
     #[tokio::test]
     async fn test_schedule_task_with_timezone() {
         let (db, dir) = test_db();
-        let tool = ScheduleTaskTool::new(db, "UTC".into());
+        let tool = ScheduleTaskTool::new(test_registry(), db, "UTC".into());
         let result = tool
             .execute(json!({
                 "chat_id": 100,
@@ -718,7 +750,7 @@ mod tests {
         let task_id = db
             .create_scheduled_task(100, "test", "cron", "0 * * * * *", "2024-01-01T00:00:00Z")
             .unwrap();
-        let tool = GetTaskHistoryTool::new(db);
+        let tool = GetTaskHistoryTool::new(test_registry(), db);
         let result = tool.execute(json!({"task_id": task_id})).await;
         assert!(!result.is_error);
         assert!(result.content.contains("No run history"));
@@ -753,7 +785,7 @@ mod tests {
         )
         .unwrap();
 
-        let tool = GetTaskHistoryTool::new(db);
+        let tool = GetTaskHistoryTool::new(test_registry(), db);
         let result = tool.execute(json!({"task_id": task_id})).await;
         assert!(!result.is_error);
         assert!(result.content.contains("OK"));
@@ -766,7 +798,7 @@ mod tests {
     #[tokio::test]
     async fn test_schedule_task_permission_denied_cross_chat() {
         let (db, dir) = test_db();
-        let tool = ScheduleTaskTool::new(db, "UTC".into());
+        let tool = ScheduleTaskTool::new(test_registry(), db, "UTC".into());
         let result = tool
             .execute(json!({
                 "chat_id": 200,
@@ -790,7 +822,7 @@ mod tests {
         let task_id = db
             .create_scheduled_task(200, "test", "cron", "0 * * * * *", "2024-01-01T00:00:00Z")
             .unwrap();
-        let tool = PauseTaskTool::new(db);
+        let tool = PauseTaskTool::new(test_registry(), db);
         let result = tool
             .execute(json!({
                 "task_id": task_id,
@@ -810,7 +842,7 @@ mod tests {
         let (db, dir) = test_db();
         db.upsert_chat(100, Some("web-main"), "web").unwrap();
         db.upsert_chat(200, Some("other"), "private").unwrap();
-        let tool = ScheduleTaskTool::new(db, "UTC".into());
+        let tool = ScheduleTaskTool::new(test_registry(), db, "UTC".into());
         let result = tool
             .execute(json!({
                 "chat_id": 200,
@@ -833,7 +865,7 @@ mod tests {
     #[tokio::test]
     async fn test_schedule_task_allowed_for_control_chat_cross_chat() {
         let (db, dir) = test_db();
-        let tool = ScheduleTaskTool::new(db.clone(), "UTC".into());
+        let tool = ScheduleTaskTool::new(test_registry(), db.clone(), "UTC".into());
         let result = tool
             .execute(json!({
                 "chat_id": 200,
@@ -858,7 +890,7 @@ mod tests {
         let task_id = db
             .create_scheduled_task(200, "test", "cron", "0 * * * * *", "2024-01-01T00:00:00Z")
             .unwrap();
-        let tool = PauseTaskTool::new(db.clone());
+        let tool = PauseTaskTool::new(test_registry(), db.clone());
         let result = tool
             .execute(json!({
                 "task_id": task_id,

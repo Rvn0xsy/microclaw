@@ -1,6 +1,7 @@
 pub mod agent_engine;
 pub mod builtin_skills;
 pub mod channel;
+pub mod channel_adapter;
 pub mod channels;
 pub mod codex_auth;
 pub mod config;

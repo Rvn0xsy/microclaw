@@ -46,6 +46,7 @@ fn minimal_config() -> Config {
         reflector_enabled: true,
         reflector_interval_mins: 15,
         soul_path: None,
+        channels: std::collections::HashMap::new(),
     }
 }
 

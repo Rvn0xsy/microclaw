@@ -1,13 +1,17 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use async_trait::async_trait;
+use serde::Deserialize;
 use teloxide::prelude::*;
-use teloxide::types::{ChatAction, ParseMode};
+use teloxide::types::{ChatAction, InputFile, ParseMode};
 use tracing::{error, info, warn};
 
 use crate::agent_engine::{
     archive_conversation, process_with_agent_with_events, AgentEvent, AgentRequestContext,
 };
+use crate::channel::ConversationKind;
+use crate::channel_adapter::ChannelAdapter;
 use crate::db::{call_blocking, StoredMessage};
 use crate::llm_types::Message;
 #[cfg(test)]
@@ -15,6 +19,132 @@ use crate::llm_types::{ContentBlock, ImageSource, MessageContent};
 use crate::runtime::AppState;
 use crate::text::floor_char_boundary;
 use crate::usage::build_usage_report;
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TelegramChannelConfig {
+    pub bot_token: String,
+    #[serde(default)]
+    pub bot_username: String,
+    #[serde(default)]
+    pub allowed_groups: Vec<i64>,
+}
+
+pub struct TelegramAdapter {
+    bot: Bot,
+    config: TelegramChannelConfig,
+}
+
+impl TelegramAdapter {
+    pub fn new(bot: Bot, config: TelegramChannelConfig) -> Self {
+        TelegramAdapter { bot, config }
+    }
+
+    pub fn bot(&self) -> &Bot {
+        &self.bot
+    }
+
+    pub fn config(&self) -> &TelegramChannelConfig {
+        &self.config
+    }
+
+    fn is_likely_image(file_path: &Path) -> bool {
+        file_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|ext| {
+                matches!(
+                    ext.to_ascii_lowercase().as_str(),
+                    "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tiff" | "tif" | "heic"
+                )
+            })
+            .unwrap_or(false)
+    }
+
+    fn split_telegram_caption(caption: Option<&str>) -> (Option<String>, Option<String>) {
+        const MAX_CAPTION_CHARS: usize = 1024;
+        let Some(caption) = caption else {
+            return (None, None);
+        };
+        let mut it = caption.chars();
+        let head: String = it.by_ref().take(MAX_CAPTION_CHARS).collect();
+        let tail: String = it.collect();
+        if tail.is_empty() {
+            (Some(head), None)
+        } else {
+            (Some(head), Some(tail))
+        }
+    }
+}
+
+#[async_trait]
+impl ChannelAdapter for TelegramAdapter {
+    fn name(&self) -> &str {
+        "telegram"
+    }
+
+    fn chat_type_routes(&self) -> Vec<(&str, ConversationKind)> {
+        vec![
+            ("telegram_private", ConversationKind::Private),
+            ("private", ConversationKind::Private),
+            ("telegram_group", ConversationKind::Group),
+            ("group", ConversationKind::Group),
+            ("supergroup", ConversationKind::Group),
+            ("channel", ConversationKind::Group),
+            ("telegram_supergroup", ConversationKind::Group),
+            ("telegram_channel", ConversationKind::Group),
+        ]
+    }
+
+    async fn send_text(&self, external_chat_id: &str, text: &str) -> Result<(), String> {
+        let telegram_chat_id = external_chat_id
+            .parse::<i64>()
+            .map_err(|_| format!("Invalid Telegram external_chat_id '{}'", external_chat_id))?;
+        send_response(&self.bot, ChatId(telegram_chat_id), text).await;
+        Ok(())
+    }
+
+    async fn send_attachment(
+        &self,
+        external_chat_id: &str,
+        file_path: &Path,
+        caption: Option<&str>,
+    ) -> Result<String, String> {
+        let telegram_chat_id = external_chat_id
+            .parse::<i64>()
+            .map_err(|_| format!("Invalid Telegram external_chat_id '{}'", external_chat_id))?;
+
+        let (caption_for_attachment, overflow_text) = Self::split_telegram_caption(caption);
+
+        if Self::is_likely_image(file_path) {
+            let mut req = self
+                .bot
+                .send_photo(ChatId(telegram_chat_id), InputFile::file(file_path));
+            if let Some(c) = &caption_for_attachment {
+                req = req.caption(c.clone());
+            }
+            req.await
+                .map_err(|e| format!("Failed to send Telegram photo: {e}"))?;
+        } else {
+            let mut req = self
+                .bot
+                .send_document(ChatId(telegram_chat_id), InputFile::file(file_path));
+            if let Some(c) = &caption_for_attachment {
+                req = req.caption(c.clone());
+            }
+            req.await
+                .map_err(|e| format!("Failed to send Telegram attachment: {e}"))?;
+        }
+
+        if let Some(extra) = overflow_text {
+            send_response(&self.bot, ChatId(telegram_chat_id), &extra).await;
+        }
+
+        Ok(match caption {
+            Some(c) => format!("[attachment:{}] {}", file_path.display(), c),
+            None => format!("[attachment:{}]", file_path.display()),
+        })
+    }
+}
 
 /// Escape XML special characters in user-supplied content to prevent prompt injection.
 /// User messages are wrapped in XML tags; escaping ensures the content cannot break out.

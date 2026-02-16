@@ -24,6 +24,95 @@ use crate::codex_auth::{
 use crate::error::MicroClawError;
 use crate::text::floor_char_boundary;
 
+// ---------------------------------------------------------------------------
+// Declarative channel metadata: adding a new channel only requires adding
+// an entry to DYNAMIC_CHANNELS below. Everything else (fields, load, save,
+// validate, display order) is derived automatically.
+// ---------------------------------------------------------------------------
+
+/// One config field for a channel that lives under `channels.<name>.<key>`.
+struct ChannelFieldDef {
+    /// YAML key inside `channels.<name>`, e.g. "bot_token"
+    yaml_key: &'static str,
+    /// Display label in the TUI
+    label: &'static str,
+    /// Placeholder / default value
+    default: &'static str,
+    /// Whether the value is secret (masked in the TUI)
+    secret: bool,
+    /// Whether the value is required when the channel is enabled
+    required: bool,
+}
+
+/// Metadata for one dynamic channel (stored in `channels:` map).
+struct DynamicChannelDef {
+    /// Channel name, e.g. "slack"
+    name: &'static str,
+    /// Detection heuristic: the channel is considered present in an existing
+    /// config when any of these YAML keys have a non-empty value.
+    #[allow(dead_code)]
+    presence_keys: &'static [&'static str],
+    /// Field definitions for this channel
+    fields: &'static [ChannelFieldDef],
+}
+
+/// Registry of all dynamic channels. Add a new channel here and it will
+/// automatically appear in the setup wizard (field list, load, save, validate).
+const DYNAMIC_CHANNELS: &[DynamicChannelDef] = &[
+    DynamicChannelDef {
+        name: "slack",
+        presence_keys: &["bot_token", "app_token"],
+        fields: &[
+            ChannelFieldDef {
+                yaml_key: "bot_token",
+                label: "Slack bot token (xoxb-...)",
+                default: "",
+                secret: true,
+                required: true,
+            },
+            ChannelFieldDef {
+                yaml_key: "app_token",
+                label: "Slack app token (xapp-...)",
+                default: "",
+                secret: true,
+                required: true,
+            },
+        ],
+    },
+    DynamicChannelDef {
+        name: "feishu",
+        presence_keys: &["app_id", "app_secret"],
+        fields: &[
+            ChannelFieldDef {
+                yaml_key: "app_id",
+                label: "Feishu app ID",
+                default: "",
+                secret: false,
+                required: true,
+            },
+            ChannelFieldDef {
+                yaml_key: "app_secret",
+                label: "Feishu app secret",
+                default: "",
+                secret: true,
+                required: true,
+            },
+            ChannelFieldDef {
+                yaml_key: "domain",
+                label: "Feishu domain (feishu/lark/custom)",
+                default: "feishu",
+                secret: false,
+                required: false,
+            },
+        ],
+    },
+];
+
+/// Build the setup-wizard field key from channel name + yaml key.
+fn dynamic_field_key(channel: &str, yaml_key: &str) -> String {
+    format!("DYN_{}_{}", channel.to_uppercase(), yaml_key.to_uppercase())
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ProviderProtocol {
     Anthropic,
@@ -221,8 +310,8 @@ fn provider_display(provider: &str) -> String {
 
 #[derive(Clone)]
 struct Field {
-    key: &'static str,
-    label: &'static str,
+    key: String,
+    label: String,
     value: String,
     required: bool,
     secret: bool,
@@ -268,8 +357,12 @@ struct PickerState {
 }
 
 impl SetupApp {
-    fn channel_options() -> &'static [&'static str] {
-        &["telegram", "discord"]
+    fn channel_options() -> Vec<&'static str> {
+        let mut opts = vec!["telegram", "discord"];
+        for ch in DYNAMIC_CHANNELS {
+            opts.push(ch.name);
+        }
+        opts
     }
 
     fn new() -> Self {
@@ -292,50 +385,50 @@ impl SetupApp {
         let mut app = Self {
             fields: vec![
                 Field {
-                    key: "ENABLED_CHANNELS",
-                    label: "Enabled channels (csv, empty = setup later)",
+                    key: "ENABLED_CHANNELS".into(),
+                    label: "Enabled channels (csv, empty = setup later)".into(),
                     value: enabled_channels,
                     required: false,
                     secret: false,
                 },
                 Field {
-                    key: "TELEGRAM_BOT_TOKEN",
-                    label: "Telegram bot token",
+                    key: "TELEGRAM_BOT_TOKEN".into(),
+                    label: "Telegram bot token".into(),
                     value: existing.get("TELEGRAM_BOT_TOKEN").cloned().unwrap_or_default(),
                     required: false,
                     secret: true,
                 },
                 Field {
-                    key: "BOT_USERNAME",
-                    label: "Telegram username (no @)",
+                    key: "BOT_USERNAME".into(),
+                    label: "Telegram username (no @)".into(),
                     value: existing.get("BOT_USERNAME").cloned().unwrap_or_default(),
                     required: false,
                     secret: false,
                 },
                 Field {
-                    key: "DISCORD_BOT_TOKEN",
-                    label: "Discord bot token",
+                    key: "DISCORD_BOT_TOKEN".into(),
+                    label: "Discord bot token".into(),
                     value: existing.get("DISCORD_BOT_TOKEN").cloned().unwrap_or_default(),
                     required: false,
                     secret: true,
                 },
                 Field {
-                    key: "LLM_PROVIDER",
-                    label: "LLM provider (preset/custom)",
+                    key: "LLM_PROVIDER".into(),
+                    label: "LLM provider (preset/custom)".into(),
                     value: provider,
                     required: true,
                     secret: false,
                 },
                 Field {
-                    key: "LLM_API_KEY",
-                    label: "LLM API key",
+                    key: "LLM_API_KEY".into(),
+                    label: "LLM API key".into(),
                     value: llm_api_key,
                     required: true,
                     secret: true,
                 },
                 Field {
-                    key: "LLM_MODEL",
-                    label: "LLM model",
+                    key: "LLM_MODEL".into(),
+                    label: "LLM model".into(),
                     value: existing
                         .get("LLM_MODEL")
                         .cloned()
@@ -344,8 +437,8 @@ impl SetupApp {
                     secret: false,
                 },
                 Field {
-                    key: "LLM_BASE_URL",
-                    label: "LLM base URL (optional)",
+                    key: "LLM_BASE_URL".into(),
+                    label: "LLM base URL (optional)".into(),
                     value: existing
                         .get("LLM_BASE_URL")
                         .cloned()
@@ -354,8 +447,8 @@ impl SetupApp {
                     secret: false,
                 },
                 Field {
-                    key: "DATA_DIR",
-                    label: "Data root directory",
+                    key: "DATA_DIR".into(),
+                    label: "Data root directory".into(),
                     value: existing
                         .get("DATA_DIR")
                         .cloned()
@@ -364,15 +457,15 @@ impl SetupApp {
                     secret: false,
                 },
                 Field {
-                    key: "TIMEZONE",
-                    label: "Timezone (IANA)",
+                    key: "TIMEZONE".into(),
+                    label: "Timezone (IANA)".into(),
                     value: existing.get("TIMEZONE").cloned().unwrap_or_else(|| "UTC".into()),
                     required: false,
                     secret: false,
                 },
                 Field {
-                    key: "WORKING_DIR",
-                    label: "Default working directory",
+                    key: "WORKING_DIR".into(),
+                    label: "Default working directory".into(),
                     value: existing
                         .get("WORKING_DIR")
                         .cloned()
@@ -381,8 +474,8 @@ impl SetupApp {
                     secret: false,
                 },
                 Field {
-                    key: "REFLECTOR_ENABLED",
-                    label: "Memory reflector enabled (true/false)",
+                    key: "REFLECTOR_ENABLED".into(),
+                    label: "Memory reflector enabled (true/false)".into(),
                     value: existing
                         .get("REFLECTOR_ENABLED")
                         .cloned()
@@ -391,8 +484,8 @@ impl SetupApp {
                     secret: false,
                 },
                 Field {
-                    key: "REFLECTOR_INTERVAL_MINS",
-                    label: "Memory reflector interval (minutes)",
+                    key: "REFLECTOR_INTERVAL_MINS".into(),
+                    label: "Memory reflector interval (minutes)".into(),
                     value: existing
                         .get("REFLECTOR_INTERVAL_MINS")
                         .cloned()
@@ -401,8 +494,8 @@ impl SetupApp {
                     secret: false,
                 },
                 Field {
-                    key: "MEMORY_TOKEN_BUDGET",
-                    label: "Memory token budget (structured memories)",
+                    key: "MEMORY_TOKEN_BUDGET".into(),
+                    label: "Memory token budget (structured memories)".into(),
                     value: existing
                         .get("MEMORY_TOKEN_BUDGET")
                         .cloned()
@@ -411,36 +504,36 @@ impl SetupApp {
                     secret: false,
                 },
                 Field {
-                    key: "EMBEDDING_PROVIDER",
-                    label: "Embedding provider (optional: openai/ollama)",
+                    key: "EMBEDDING_PROVIDER".into(),
+                    label: "Embedding provider (optional: openai/ollama)".into(),
                     value: existing.get("EMBEDDING_PROVIDER").cloned().unwrap_or_default(),
                     required: false,
                     secret: false,
                 },
                 Field {
-                    key: "EMBEDDING_API_KEY",
-                    label: "Embedding API key (optional)",
+                    key: "EMBEDDING_API_KEY".into(),
+                    label: "Embedding API key (optional)".into(),
                     value: existing.get("EMBEDDING_API_KEY").cloned().unwrap_or_default(),
                     required: false,
                     secret: true,
                 },
                 Field {
-                    key: "EMBEDDING_BASE_URL",
-                    label: "Embedding base URL (optional)",
+                    key: "EMBEDDING_BASE_URL".into(),
+                    label: "Embedding base URL (optional)".into(),
                     value: existing.get("EMBEDDING_BASE_URL").cloned().unwrap_or_default(),
                     required: false,
                     secret: false,
                 },
                 Field {
-                    key: "EMBEDDING_MODEL",
-                    label: "Embedding model (optional)",
+                    key: "EMBEDDING_MODEL".into(),
+                    label: "Embedding model (optional)".into(),
                     value: existing.get("EMBEDDING_MODEL").cloned().unwrap_or_default(),
                     required: false,
                     secret: false,
                 },
                 Field {
-                    key: "EMBEDDING_DIM",
-                    label: "Embedding dimension (optional)",
+                    key: "EMBEDDING_DIM".into(),
+                    label: "Embedding dimension (optional)".into(),
                     value: existing.get("EMBEDDING_DIM").cloned().unwrap_or_default(),
                     required: false,
                     secret: false,
@@ -457,8 +550,26 @@ impl SetupApp {
             completion_summary: Vec::new(),
         };
 
+        // Generate fields for dynamic channels (slack, feishu, etc.)
+        for ch in DYNAMIC_CHANNELS {
+            for f in ch.fields {
+                let key = dynamic_field_key(ch.name, f.yaml_key);
+                let value = existing
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or_else(|| f.default.to_string());
+                app.fields.push(Field {
+                    key,
+                    label: f.label.to_string(),
+                    value,
+                    required: false,
+                    secret: f.secret,
+                });
+            }
+        }
+
         app.fields
-            .sort_by_key(|field| Self::field_display_order(field.key));
+            .sort_by_key(|field| Self::field_display_order(&field.key));
         app
     }
 
@@ -488,6 +599,11 @@ impl SetupApp {
                     {
                         enabled.push("discord");
                     }
+                    for ch in DYNAMIC_CHANNELS {
+                        if config.channels.contains_key(ch.name) {
+                            enabled.push(ch.name);
+                        }
+                    }
                     map.insert("ENABLED_CHANNELS".into(), enabled.join(","));
                     map.insert("TELEGRAM_BOT_TOKEN".into(), config.telegram_bot_token);
                     map.insert("BOT_USERNAME".into(), config.bot_username);
@@ -495,6 +611,17 @@ impl SetupApp {
                         "DISCORD_BOT_TOKEN".into(),
                         config.discord_bot_token.unwrap_or_default(),
                     );
+                    // Extract dynamic channel configs
+                    for ch in DYNAMIC_CHANNELS {
+                        if let Some(ch_map) = config.channels.get(ch.name) {
+                            for f in ch.fields {
+                                if let Some(v) = ch_map.get(f.yaml_key).and_then(|v| v.as_str()) {
+                                    let key = dynamic_field_key(ch.name, f.yaml_key);
+                                    map.insert(key, v.to_string());
+                                }
+                            }
+                        }
+                    }
                     map.insert("LLM_PROVIDER".into(), config.llm_provider);
                     map.insert("LLM_API_KEY".into(), config.api_key);
                     if !config.model.is_empty() {
@@ -581,10 +708,11 @@ impl SetupApp {
 
     fn enabled_channels(&self) -> Vec<String> {
         let raw = self.field_value("ENABLED_CHANNELS");
+        let valid_channels: Vec<&str> = Self::channel_options();
         let mut out = Vec::new();
         for part in raw.split(',') {
             let p = part.trim().to_lowercase();
-            if !matches!(p.as_str(), "telegram" | "discord") {
+            if !valid_channels.contains(&p.as_str()) {
                 continue;
             }
             if !out.iter().any(|v| v == &p) {
@@ -628,6 +756,22 @@ impl SetupApp {
                 return Err(MicroClawError::Config(
                     "BOT_USERNAME should not include '@'".into(),
                 ));
+            }
+        }
+
+        for ch in DYNAMIC_CHANNELS {
+            if self.channel_enabled(ch.name) {
+                for f in ch.fields {
+                    if f.required {
+                        let key = dynamic_field_key(ch.name, f.yaml_key);
+                        if self.field_value(&key).is_empty() {
+                            return Err(MicroClawError::Config(format!(
+                                "{} is required when {} is enabled",
+                                key, ch.name
+                            )));
+                        }
+                    }
+                }
             }
         }
 
@@ -834,7 +978,7 @@ impl SetupApp {
     }
 
     fn open_picker_for_selected(&mut self) -> bool {
-        match self.selected_field().key {
+        match self.selected_field().key.as_str() {
             "LLM_PROVIDER" => {
                 let idx = self.provider_index(&self.field_value("LLM_PROVIDER"));
                 self.picker = Some(PickerState {
@@ -986,14 +1130,14 @@ impl SetupApp {
     }
 
     fn clear_selected_field(&mut self) {
-        let key = self.selected_field().key;
+        let key = self.selected_field().key.clone();
         self.selected_field_mut().value.clear();
         self.status = format!("Cleared {key}");
     }
 
     fn restore_selected_field_default(&mut self) {
-        let key = self.selected_field().key;
-        let default = self.default_value_for_field(key);
+        let key = self.selected_field().key.clone();
+        let default = self.default_value_for_field(&key);
         if default.is_empty() {
             self.status = format!("{key} has no default");
         } else {
@@ -1003,6 +1147,9 @@ impl SetupApp {
     }
 
     fn section_for_key(key: &str) -> &'static str {
+        if key.starts_with("DYN_") {
+            return "Channel";
+        }
         match key {
             "DATA_DIR"
             | "TIMEZONE"
@@ -1021,6 +1168,20 @@ impl SetupApp {
     }
 
     fn field_display_order(key: &str) -> usize {
+        if key.starts_with("DYN_") {
+            // Compute ordering based on position in DYNAMIC_CHANNELS
+            let mut offset = 0usize;
+            for ch in DYNAMIC_CHANNELS {
+                for f in ch.fields {
+                    let expected = dynamic_field_key(ch.name, f.yaml_key);
+                    if expected == key {
+                        return 24 + offset;
+                    }
+                    offset += 1;
+                }
+            }
+            return 24 + offset;
+        }
         match key {
             "DATA_DIR" => 0,
             "TIMEZONE" => 1,
@@ -1046,7 +1207,7 @@ impl SetupApp {
     }
 
     fn current_section(&self) -> &'static str {
-        Self::section_for_key(self.selected_field().key)
+        Self::section_for_key(&self.selected_field().key)
     }
 
     fn progress_bar(&self, width: usize) -> String {
@@ -1274,10 +1435,17 @@ fn save_config_yaml(
     let get = |key: &str| values.get(key).cloned().unwrap_or_default();
 
     let enabled_raw = get("ENABLED_CHANNELS");
+    let valid_channel_names: Vec<&str> = {
+        let mut v = vec!["telegram", "discord"];
+        for ch in DYNAMIC_CHANNELS {
+            v.push(ch.name);
+        }
+        v
+    };
     let mut channels = Vec::new();
     for part in enabled_raw.split(',') {
         let p = part.trim().to_lowercase();
-        if matches!(p.as_str(), "telegram" | "discord") && !channels.iter().any(|v| v == &p) {
+        if valid_channel_names.contains(&p.as_str()) && !channels.iter().any(|v| v == &p) {
             channels.push(p);
         }
     }
@@ -1285,6 +1453,17 @@ fn save_config_yaml(
     let has_tg =
         !get("TELEGRAM_BOT_TOKEN").trim().is_empty() || !get("BOT_USERNAME").trim().is_empty();
     let has_discord = !get("DISCORD_BOT_TOKEN").trim().is_empty();
+    // Check which dynamic channels have at least one non-empty field value
+    let dynamic_channel_present: Vec<(&DynamicChannelDef, bool)> = DYNAMIC_CHANNELS
+        .iter()
+        .map(|ch| {
+            let present = ch.fields.iter().any(|f| {
+                let key = dynamic_field_key(ch.name, f.yaml_key);
+                !get(&key).trim().is_empty()
+            });
+            (ch, present)
+        })
+        .collect();
 
     let mut yaml = String::new();
     yaml.push_str("# MicroClaw configuration\n\n");
@@ -1296,6 +1475,11 @@ fn save_config_yaml(
         }
         if has_discord {
             inferred.push("discord");
+        }
+        for (ch, present) in &dynamic_channel_present {
+            if *present {
+                inferred.push(ch.name);
+            }
         }
         if inferred.is_empty() {
             "setup later".to_string()
@@ -1324,6 +1508,28 @@ fn save_config_yaml(
     }
 
     yaml.push_str("web_enabled: true\n\n");
+
+    // Channels section (dynamic channels: Slack, Feishu, etc.)
+    let any_dynamic = dynamic_channel_present.iter().any(|(_, present)| *present);
+    if any_dynamic {
+        yaml.push_str("channels:\n");
+        for (ch, present) in &dynamic_channel_present {
+            if !present {
+                continue;
+            }
+            yaml.push_str(&format!("  {}:\n", ch.name));
+            for f in ch.fields {
+                let key = dynamic_field_key(ch.name, f.yaml_key);
+                let val = get(&key);
+                // Skip optional fields that match the default value
+                if !f.required && val == f.default && !val.is_empty() {
+                    continue;
+                }
+                yaml.push_str(&format!("    {}: \"{}\"\n", f.yaml_key, val));
+            }
+        }
+        yaml.push('\n');
+    }
 
     yaml.push_str(
         "# LLM provider (anthropic, openai-codex, ollama, openai, openrouter, deepseek, google, etc.)\n",
@@ -1512,7 +1718,7 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, app: &SetupApp) {
     let mut lines = Vec::<Line>::new();
     let mut last_section = "";
     for (i, f) in app.fields.iter().enumerate() {
-        let section = SetupApp::section_for_key(f.key);
+        let section = SetupApp::section_for_key(&f.key);
         if section != last_section {
             if !lines.is_empty() {
                 lines.push(Line::from(""));
@@ -1561,7 +1767,7 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, app: &SetupApp) {
     let help = Paragraph::new(vec![
         Line::from(vec![
             Span::styled("Key: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(field.key, Style::default().fg(Color::Magenta)),
+            Span::styled(field.key.clone(), Style::default().fg(Color::Magenta)),
         ]),
         Line::from(vec![
             Span::styled("Required: ", Style::default().fg(Color::DarkGray)),

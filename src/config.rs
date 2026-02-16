@@ -1,9 +1,13 @@
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+
 use crate::codex_auth::{
     codex_auth_file_has_access_token, is_openai_codex_provider, provider_allows_empty_api_key,
 };
 use crate::error::MicroClawError;
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 fn default_telegram_bot_token() -> String {
     String::new()
@@ -117,10 +121,7 @@ pub struct ModelPrice {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
-    #[serde(default = "default_telegram_bot_token")]
-    pub telegram_bot_token: String,
-    #[serde(default = "default_bot_username")]
-    pub bot_username: String,
+    // --- LLM / API ---
     #[serde(default = "default_llm_provider")]
     pub llm_provider: String,
     #[serde(default = "default_api_key")]
@@ -141,18 +142,22 @@ pub struct Config {
     pub max_document_size_mb: u64,
     #[serde(default = "default_memory_token_budget")]
     pub memory_token_budget: usize,
+    #[serde(default = "default_max_session_messages")]
+    pub max_session_messages: usize,
+    #[serde(default = "default_compact_keep_recent")]
+    pub compact_keep_recent: usize,
+    #[serde(default)]
+    pub show_thinking: bool,
+
+    // --- Paths & environment ---
     #[serde(default = "default_data_dir")]
     pub data_dir: String,
     #[serde(default = "default_working_dir")]
     pub working_dir: String,
     #[serde(default = "default_working_dir_isolation")]
     pub working_dir_isolation: WorkingDirIsolation,
-    #[serde(default)]
-    pub openai_api_key: Option<String>,
     #[serde(default = "default_timezone")]
     pub timezone: String,
-    #[serde(default)]
-    pub allowed_groups: Vec<i64>,
     #[serde(default = "default_control_chat_ids")]
     pub control_chat_ids: Vec<i64>,
     #[serde(default = "default_max_session_messages")]
@@ -167,6 +172,8 @@ pub struct Config {
     pub discord_no_mention: bool,
     #[serde(default)]
     pub show_thinking: bool,
+
+    // --- Web UI ---
     #[serde(default = "default_web_enabled")]
     pub web_enabled: bool,
     #[serde(default = "default_web_host")]
@@ -185,8 +192,8 @@ pub struct Config {
     pub web_run_history_limit: usize,
     #[serde(default = "default_web_session_idle_ttl_seconds")]
     pub web_session_idle_ttl_seconds: u64,
-    #[serde(default = "default_model_prices")]
-    pub model_prices: Vec<ModelPrice>,
+
+    // --- Embedding ---
     #[serde(default)]
     pub embedding_provider: Option<String>,
     #[serde(default)]
@@ -197,14 +204,43 @@ pub struct Config {
     pub embedding_model: Option<String>,
     #[serde(default)]
     pub embedding_dim: Option<usize>,
+    #[serde(default)]
+    pub openai_api_key: Option<String>,
+
+    // --- Pricing ---
+    #[serde(default = "default_model_prices")]
+    pub model_prices: Vec<ModelPrice>,
+
+    // --- Reflector ---
     #[serde(default = "default_reflector_enabled")]
     pub reflector_enabled: bool,
     #[serde(default = "default_reflector_interval_mins")]
     pub reflector_interval_mins: u64,
+
+    // --- Soul ---
     /// Path to a SOUL.md file that defines the bot's personality, voice, and values.
     /// If not set, looks for SOUL.md in data_dir root, then current directory.
     #[serde(default = "default_soul_path")]
     pub soul_path: Option<String>,
+
+    // --- Channel registry (new dynamic config) ---
+    /// Per-channel configuration. Keys are channel names (e.g. "telegram", "discord", "slack", "web").
+    /// Each value is channel-specific config deserialized by the adapter.
+    /// If empty, synthesized from legacy flat fields below in post_deserialize().
+    #[serde(default)]
+    pub channels: HashMap<String, serde_yaml::Value>,
+
+    // --- Legacy channel fields (deprecated, use `channels:` instead) ---
+    #[serde(default = "default_telegram_bot_token")]
+    pub telegram_bot_token: String,
+    #[serde(default = "default_bot_username")]
+    pub bot_username: String,
+    #[serde(default)]
+    pub allowed_groups: Vec<i64>,
+    #[serde(default)]
+    pub discord_bot_token: Option<String>,
+    #[serde(default)]
+    pub discord_allowed_channels: Vec<u64>,
 }
 
 impl Config {
@@ -380,17 +416,61 @@ impl Config {
             }
         }
 
+        // Synthesize `channels` map from legacy flat fields if empty
+        if self.channels.is_empty() {
+            if !self.telegram_bot_token.trim().is_empty() {
+                self.channels.insert(
+                    "telegram".into(),
+                    serde_yaml::to_value(serde_json::json!({
+                        "bot_token": self.telegram_bot_token,
+                        "bot_username": self.bot_username,
+                        "allowed_groups": self.allowed_groups,
+                    }))
+                    .unwrap(),
+                );
+            }
+            if let Some(ref token) = self.discord_bot_token {
+                if !token.trim().is_empty() {
+                    self.channels.insert(
+                        "discord".into(),
+                        serde_yaml::to_value(serde_json::json!({
+                            "bot_token": token,
+                            "allowed_channels": self.discord_allowed_channels,
+                        }))
+                        .unwrap(),
+                    );
+                }
+            }
+            if self.web_enabled {
+                self.channels.insert(
+                    "web".into(),
+                    serde_yaml::to_value(serde_json::json!({
+                        "enabled": true,
+                        "host": self.web_host,
+                        "port": self.web_port,
+                        "auth_token": self.web_auth_token,
+                    }))
+                    .unwrap(),
+                );
+            }
+        }
+
         // Validate required fields
-        let has_telegram = !self.telegram_bot_token.trim().is_empty();
+        let has_telegram =
+            !self.telegram_bot_token.trim().is_empty() || self.channels.contains_key("telegram");
         let has_discord = self
             .discord_bot_token
             .as_deref()
             .map(|v| !v.trim().is_empty())
-            .unwrap_or(false);
+            .unwrap_or(false)
+            || self.channels.contains_key("discord");
+        let has_slack = self.channels.contains_key("slack");
+        let has_feishu = self.channels.contains_key("feishu");
+        let has_web = self.web_enabled || self.channels.contains_key("web");
 
-        if !(has_telegram || has_discord || self.web_enabled) {
+        if !(has_telegram || has_discord || has_slack || has_feishu || has_web) {
             return Err(MicroClawError::Config(
-                "At least one channel must be enabled: telegram_bot_token, discord_bot_token, or web_enabled=true".into(),
+                "At least one channel must be enabled: telegram_bot_token, discord_bot_token, channels.slack, channels.feishu, or web_enabled=true".into(),
             ));
         }
         if self.api_key.is_empty() && !provider_allows_empty_api_key(&self.llm_provider) {
@@ -421,6 +501,13 @@ impl Config {
         }
 
         Ok(())
+    }
+
+    /// Deserialize a typed channel config from the `channels` map.
+    pub fn channel_config<T: DeserializeOwned>(&self, name: &str) -> Option<T> {
+        self.channels
+            .get(name)
+            .and_then(|v| serde_yaml::from_value(v.clone()).ok())
     }
 
     pub fn model_price(&self, model: &str) -> Option<&ModelPrice> {
@@ -513,6 +600,7 @@ mod tests {
             reflector_enabled: true,
             reflector_interval_mins: 15,
             soul_path: None,
+            channels: HashMap::new(),
         }
     }
 

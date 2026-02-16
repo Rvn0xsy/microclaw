@@ -7,7 +7,7 @@ use tracing::{error, info};
 use crate::agent_engine::process_with_agent;
 use crate::agent_engine::AgentRequestContext;
 use crate::channel::{
-    deliver_and_store_bot_message, get_chat_routing, ChatChannel, ChatRouting, ConversationKind,
+    deliver_and_store_bot_message, get_chat_routing, ChatRouting, ConversationKind,
 };
 use crate::db::call_blocking;
 use crate::llm_types::{Message, MessageContent, ResponseContentBlock};
@@ -43,12 +43,12 @@ async fn run_due_tasks(state: &Arc<AppState>) {
 
         let started_at = Utc::now();
         let started_at_str = started_at.to_rfc3339();
-        let routing = get_chat_routing(state.db.clone(), task.chat_id)
+        let routing = get_chat_routing(&state.channel_registry, state.db.clone(), task.chat_id)
             .await
             .ok()
             .flatten()
             .unwrap_or(ChatRouting {
-                channel: ChatChannel::Telegram,
+                channel_name: "telegram".to_string(),
                 conversation: ConversationKind::Private,
             });
 
@@ -56,7 +56,7 @@ async fn run_due_tasks(state: &Arc<AppState>) {
         let (success, result_summary) = match process_with_agent(
             state,
             AgentRequestContext {
-                caller_channel: routing.channel.as_caller_channel(),
+                caller_channel: &routing.channel_name,
                 chat_id: task.chat_id,
                 chat_type: routing.conversation.as_agent_chat_type(),
             },
@@ -68,8 +68,7 @@ async fn run_due_tasks(state: &Arc<AppState>) {
             Ok(response) => {
                 if !response.is_empty() {
                     let _ = deliver_and_store_bot_message(
-                        state.telegram_bot.as_ref(),
-                        Some(&state.config),
+                        &state.channel_registry,
                         state.db.clone(),
                         &state.config.bot_username,
                         task.chat_id,
@@ -88,8 +87,7 @@ async fn run_due_tasks(state: &Arc<AppState>) {
                 error!("Scheduler: task #{} failed: {e}", task.id);
                 let err_text = format!("Scheduled task #{} failed: {e}", task.id);
                 let _ = deliver_and_store_bot_message(
-                    state.telegram_bot.as_ref(),
-                    Some(&state.config),
+                    &state.channel_registry,
                     state.db.clone(),
                     &state.config.bot_username,
                     task.chat_id,
@@ -201,6 +199,37 @@ fn should_merge_duplicate(
         return true;
     }
     incoming_content.len() > existing.content.len() + 8
+}
+
+fn is_corrective_action_item(content: &str) -> bool {
+    let lower = content.to_ascii_lowercase();
+    let trimmed = lower.trim();
+    trimmed.starts_with("todo:")
+        || trimmed.starts_with("todo ")
+        || trimmed.contains(" ensure ")
+        || trimmed.starts_with("ensure ")
+}
+
+fn looks_like_broken_behavior_fact(content: &str) -> bool {
+    let lower = content.to_ascii_lowercase();
+    let broken_cues = [
+        "tool calls were broken",
+        "typed tool calls as text",
+        "posted as text",
+        "authentication error",
+        "auth fails",
+        "not following instructions",
+        "isn't following instructions",
+        "failed",
+        "broke ",
+        "was broken",
+        "error on",
+    ];
+    broken_cues.iter().any(|cue| lower.contains(cue))
+}
+
+fn should_skip_memory_poisoning_risk(content: &str) -> bool {
+    looks_like_broken_behavior_fact(content) && !is_corrective_action_item(content)
 }
 
 #[cfg(feature = "sqlite-vec")]
@@ -503,6 +532,10 @@ async fn reflect_for_chat(state: &Arc<AppState>, chat_id: i64) {
             Some(c) => c,
             None => continue,
         };
+        if should_skip_memory_poisoning_risk(&content) {
+            skipped += 1;
+            continue;
+        }
         if !memory_quality::memory_quality_ok(&content) {
             continue;
         }
@@ -713,5 +746,32 @@ mod tests {
         assert!(jaccard_similar("", "", 0.5));
         // One empty => intersection=0, union=1 => 0.0 < 0.5
         assert!(!jaccard_similar("hello", "", 0.5));
+    }
+
+    #[test]
+    fn test_reflector_prompt_includes_memory_poisoning_guardrails() {
+        assert!(REFLECTOR_SYSTEM_PROMPT.contains("CRITICAL"));
+        assert!(REFLECTOR_SYSTEM_PROMPT.contains("NEVER describe broken behavior as a fact"));
+        assert!(REFLECTOR_SYSTEM_PROMPT.contains("TODO: ensure tool calls always execute"));
+    }
+
+    #[test]
+    fn test_should_skip_memory_poisoning_risk_for_broken_behavior_fact() {
+        assert!(should_skip_memory_poisoning_risk(
+            "proactive-agent skill broke tool calling; tool calls posted as text"
+        ));
+        assert!(should_skip_memory_poisoning_risk(
+            "got 401 authentication error on Discord"
+        ));
+    }
+
+    #[test]
+    fn test_should_not_skip_memory_poisoning_risk_for_action_items() {
+        assert!(!should_skip_memory_poisoning_risk(
+            "TODO: ensure tool calls always execute via tool system"
+        ));
+        assert!(!should_skip_memory_poisoning_risk(
+            "Ensure TOOLS.md rules are followed for every tool call"
+        ));
     }
 }

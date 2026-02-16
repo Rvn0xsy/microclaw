@@ -3,49 +3,28 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::json;
-use teloxide::prelude::*;
-use teloxide::types::InputFile;
 use tracing::{info, warn};
 
 use super::{authorize_chat_access, schema_object, Tool, ToolResult};
 use crate::channel::{
-    deliver_and_store_bot_message, enforce_channel_policy, get_required_chat_routing, ChatChannel,
+    deliver_and_store_bot_message, enforce_channel_policy, get_required_chat_routing,
 };
-use crate::config::Config;
+use crate::channel_adapter::ChannelRegistry;
 use crate::db::{call_blocking, Database, StoredMessage};
 use crate::llm_types::ToolDefinition;
 
 pub struct SendMessageTool {
-    bot: Option<Bot>,
+    registry: Arc<ChannelRegistry>,
     db: Arc<Database>,
     bot_username: String,
-    config: Option<Config>,
-    http_client: reqwest::Client,
 }
 
 impl SendMessageTool {
-    pub fn new(bot: Option<Bot>, db: Arc<Database>, bot_username: String) -> Self {
+    pub fn new(registry: Arc<ChannelRegistry>, db: Arc<Database>, bot_username: String) -> Self {
         SendMessageTool {
-            bot,
+            registry,
             db,
             bot_username,
-            config: None,
-            http_client: reqwest::Client::new(),
-        }
-    }
-
-    pub fn new_with_config(
-        bot: Option<Bot>,
-        db: Arc<Database>,
-        bot_username: String,
-        config: Config,
-    ) -> Self {
-        SendMessageTool {
-            bot,
-            db,
-            bot_username,
-            config: Some(config),
-            http_client: reqwest::Client::new(),
         }
     }
 
@@ -69,146 +48,6 @@ impl SendMessageTool {
             .map_err(|e| format!("Failed to resolve external chat id: {e}"))?;
         Ok(external.unwrap_or_else(|| chat_id.to_string()))
     }
-
-    fn is_likely_image(file_path: &std::path::Path) -> bool {
-        file_path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|ext| {
-                matches!(
-                    ext.to_ascii_lowercase().as_str(),
-                    "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tiff" | "tif" | "heic"
-                )
-            })
-            .unwrap_or(false)
-    }
-
-    fn split_telegram_caption(caption: Option<String>) -> (Option<String>, Option<String>) {
-        const MAX_CAPTION_CHARS: usize = 1024;
-        let Some(caption) = caption else {
-            return (None, None);
-        };
-        let mut it = caption.chars();
-        let head: String = it.by_ref().take(MAX_CAPTION_CHARS).collect();
-        let tail: String = it.collect();
-        if tail.is_empty() {
-            (Some(head), None)
-        } else {
-            (Some(head), Some(tail))
-        }
-    }
-
-    async fn send_telegram_attachment(
-        &self,
-        chat_id: i64,
-        file_path: PathBuf,
-        caption: Option<String>,
-    ) -> Result<String, String> {
-        let bot = self
-            .bot
-            .as_ref()
-            .ok_or_else(|| "telegram_bot_token not configured".to_string())?;
-        let (caption_for_attachment, overflow_text) = Self::split_telegram_caption(caption.clone());
-
-        let external_chat_id = self.resolve_external_chat_id(chat_id).await?;
-        let telegram_chat_id = external_chat_id.parse::<i64>().map_err(|_| {
-            format!(
-                "Invalid Telegram external_chat_id '{}' for internal chat {}",
-                external_chat_id, chat_id
-            )
-        })?;
-
-        if Self::is_likely_image(&file_path) {
-            let mut req =
-                bot.send_photo(ChatId(telegram_chat_id), InputFile::file(file_path.clone()));
-            if let Some(c) = &caption_for_attachment {
-                req = req.caption(c.clone());
-            }
-            req.await
-                .map_err(|e| format!("Failed to send Telegram photo: {e}"))?;
-        } else {
-            let mut req =
-                bot.send_document(ChatId(telegram_chat_id), InputFile::file(file_path.clone()));
-            if let Some(c) = &caption_for_attachment {
-                req = req.caption(c.clone());
-            }
-            req.await
-                .map_err(|e| format!("Failed to send Telegram attachment: {e}"))?;
-        }
-
-        if let Some(extra) = overflow_text {
-            crate::telegram::send_response(bot, ChatId(telegram_chat_id), &extra).await;
-        }
-
-        Ok(match caption {
-            Some(c) => format!("[attachment:{}] {}", file_path.display(), c),
-            None => format!("[attachment:{}]", file_path.display()),
-        })
-    }
-
-    async fn send_discord_attachment(
-        &self,
-        chat_id: i64,
-        file_path: PathBuf,
-        caption: Option<String>,
-    ) -> Result<String, String> {
-        let cfg = self
-            .config
-            .as_ref()
-            .ok_or_else(|| "send_message config unavailable".to_string())?;
-        let token = cfg
-            .discord_bot_token
-            .as_deref()
-            .filter(|v| !v.trim().is_empty())
-            .ok_or_else(|| "discord_bot_token not configured".to_string())?;
-        let external_chat_id = self.resolve_external_chat_id(chat_id).await?;
-        let discord_chat_id = external_chat_id.parse::<u64>().map_err(|_| {
-            format!(
-                "Invalid Discord external_chat_id '{}' for internal chat {}",
-                external_chat_id, chat_id
-            )
-        })?;
-
-        let filename = file_path
-            .file_name()
-            .and_then(|v| v.to_str())
-            .unwrap_or("attachment.bin")
-            .to_string();
-        let bytes = tokio::fs::read(&file_path)
-            .await
-            .map_err(|e| format!("Failed to read attachment file: {e}"))?;
-
-        let payload = json!({ "content": caption.clone().unwrap_or_default() });
-        let form = reqwest::multipart::Form::new()
-            .text("payload_json", payload.to_string())
-            .part(
-                "files[0]",
-                reqwest::multipart::Part::bytes(bytes).file_name(filename),
-            );
-
-        let url = format!("https://discord.com/api/v10/channels/{discord_chat_id}/messages");
-        let resp = self
-            .http_client
-            .post(url)
-            .header(reqwest::header::AUTHORIZATION, format!("Bot {token}"))
-            .multipart(form)
-            .send()
-            .await
-            .map_err(|e| format!("Failed to send Discord attachment: {e}"))?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!(
-                "Failed to send Discord attachment: HTTP {status} {}",
-                body.chars().take(300).collect::<String>()
-            ));
-        }
-
-        Ok(match caption {
-            Some(c) => format!("[attachment:{}] {}", file_path.display(), c),
-            None => format!("[attachment:{}]", file_path.display()),
-        })
-    }
 }
 
 #[async_trait]
@@ -220,7 +59,7 @@ impl Tool for SendMessageTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "send_message".into(),
-            description: "Send a message mid-conversation. Supports text for all channels, and attachments for Telegram/Discord via attachment_path.".into(),
+            description: "Send a message mid-conversation. Supports text for all channels, and attachments for Telegram/Discord/Slack via attachment_path.".into(),
             input_schema: schema_object(
                 json!({
                     "chat_id": {
@@ -281,18 +120,21 @@ impl Tool for SendMessageTool {
             return ToolResult::error(e);
         }
 
-        if let Err(e) = enforce_channel_policy(self.db.clone(), &input, chat_id).await {
+        if let Err(e) =
+            enforce_channel_policy(&self.registry, self.db.clone(), &input, chat_id).await
+        {
             return ToolResult::error(e);
         }
 
         if let Some(path) = attachment_path {
-            let routing = match get_required_chat_routing(self.db.clone(), chat_id).await {
-                Ok(v) => v,
-                Err(e) => return ToolResult::error(e),
-            };
+            let routing =
+                match get_required_chat_routing(&self.registry, self.db.clone(), chat_id).await {
+                    Ok(v) => v,
+                    Err(e) => return ToolResult::error(e),
+                };
             info!(
-                "send_message attachment routing: chat_id={}, channel={:?}, path={}",
-                chat_id, routing.channel, path
+                "send_message attachment routing: chat_id={}, channel={}, path={}",
+                chat_id, routing.channel_name, path
             );
 
             let file_path = PathBuf::from(&path);
@@ -318,19 +160,24 @@ impl Tool for SendMessageTool {
                 }
             });
 
-            let send_result = match routing.channel {
-                ChatChannel::Telegram => {
-                    self.send_telegram_attachment(chat_id, file_path.clone(), used_caption.clone())
-                        .await
-                }
-                ChatChannel::Discord => {
-                    self.send_discord_attachment(chat_id, file_path.clone(), used_caption.clone())
-                        .await
-                }
-                ChatChannel::Web => {
-                    Err("attachment sending is not supported for web chat".to_string())
+            let adapter = match self.registry.get(&routing.channel_name) {
+                Some(a) => a,
+                None => {
+                    return ToolResult::error(format!(
+                        "No adapter registered for channel '{}'",
+                        routing.channel_name
+                    ))
                 }
             };
+
+            let external_chat_id = match self.resolve_external_chat_id(chat_id).await {
+                Ok(v) => v,
+                Err(e) => return ToolResult::error(e),
+            };
+
+            let send_result = adapter
+                .send_attachment(&external_chat_id, &file_path, used_caption.as_deref())
+                .await;
 
             match send_result {
                 Ok(content) => {
@@ -360,8 +207,7 @@ impl Tool for SendMessageTool {
             }
         } else {
             match deliver_and_store_bot_message(
-                self.bot.as_ref(),
-                self.config.as_ref(),
+                &self.registry,
                 self.db.clone(),
                 &self.bot_username,
                 chat_id,
@@ -388,6 +234,8 @@ impl Tool for SendMessageTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channel_adapter::ChannelRegistry;
+    use crate::web::WebAdapter;
     use serde_json::json;
 
     fn test_db() -> (Arc<Database>, std::path::PathBuf) {
@@ -400,38 +248,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    #[test]
-    fn test_is_likely_image_by_extension() {
-        assert!(SendMessageTool::is_likely_image(std::path::Path::new(
-            "/tmp/a.JPG"
-        )));
-        assert!(SendMessageTool::is_likely_image(std::path::Path::new(
-            "/tmp/a.png"
-        )));
-        assert!(!SendMessageTool::is_likely_image(std::path::Path::new(
-            "/tmp/a.pdf"
-        )));
-        assert!(!SendMessageTool::is_likely_image(std::path::Path::new(
-            "/tmp/noext"
-        )));
-    }
-
-    #[test]
-    fn test_split_telegram_caption_short_and_long() {
-        let (head1, tail1) = SendMessageTool::split_telegram_caption(Some("hello".into()));
-        assert_eq!(head1.as_deref(), Some("hello"));
-        assert!(tail1.is_none());
-
-        let long = "a".repeat(1200);
-        let (head2, tail2) = SendMessageTool::split_telegram_caption(Some(long));
-        assert_eq!(head2.as_ref().map(|s| s.chars().count()), Some(1024));
-        assert_eq!(tail2.as_ref().map(|s| s.chars().count()), Some(176));
+    fn test_registry() -> Arc<ChannelRegistry> {
+        let mut registry = ChannelRegistry::new();
+        registry.register(Arc::new(WebAdapter));
+        Arc::new(registry)
     }
 
     #[tokio::test]
     async fn test_send_message_permission_denied_before_network() {
         let (db, dir) = test_db();
-        let tool = SendMessageTool::new(Some(Bot::new("123456:TEST_TOKEN")), db, "bot".into());
+        let tool = SendMessageTool::new(test_registry(), db, "bot".into());
         let result = tool
             .execute(json!({
                 "chat_id": 200,
@@ -452,11 +278,7 @@ mod tests {
         let (db, dir) = test_db();
         db.upsert_chat(999, Some("web-main"), "web").unwrap();
 
-        let tool = SendMessageTool::new(
-            Some(Bot::new("123456:TEST_TOKEN")),
-            db.clone(),
-            "bot".into(),
-        );
+        let tool = SendMessageTool::new(test_registry(), db.clone(), "bot".into());
         let result = tool
             .execute(json!({
                 "chat_id": 999,
@@ -482,7 +304,24 @@ mod tests {
         db.upsert_chat(100, Some("web-main"), "web").unwrap();
         db.upsert_chat(200, Some("tg"), "private").unwrap();
 
-        let tool = SendMessageTool::new(Some(Bot::new("123456:TEST_TOKEN")), db, "bot".into());
+        // Need telegram adapter registered for "private" chat type
+        let mut registry = ChannelRegistry::new();
+        registry.register(Arc::new(WebAdapter));
+        // Register a minimal telegram adapter to resolve "private" chat type
+        use crate::channels::telegram::TelegramChannelConfig;
+        use crate::channels::TelegramAdapter;
+        let tg_adapter = TelegramAdapter::new(
+            teloxide::Bot::new("123456:TEST_TOKEN"),
+            TelegramChannelConfig {
+                bot_token: "123456:TEST_TOKEN".into(),
+                bot_username: "bot".into(),
+                allowed_groups: vec![],
+            },
+        );
+        registry.register(Arc::new(tg_adapter));
+        let registry = Arc::new(registry);
+
+        let tool = SendMessageTool::new(registry, db, "bot".into());
         let result = tool
             .execute(json!({
                 "chat_id": 200,
@@ -503,7 +342,7 @@ mod tests {
     #[tokio::test]
     async fn test_send_message_requires_text_or_attachment() {
         let (db, dir) = test_db();
-        let tool = SendMessageTool::new(Some(Bot::new("123456:TEST_TOKEN")), db, "bot".into());
+        let tool = SendMessageTool::new(test_registry(), db, "bot".into());
         let result = tool
             .execute(json!({
                 "chat_id": 999,
@@ -525,7 +364,7 @@ mod tests {
         let attachment = dir.join("sample.txt");
         std::fs::write(&attachment, "hello").unwrap();
 
-        let tool = SendMessageTool::new(Some(Bot::new("123456:TEST_TOKEN")), db, "bot".into());
+        let tool = SendMessageTool::new(test_registry(), db, "bot".into());
         let result = tool
             .execute(json!({
                 "chat_id": 999,
@@ -534,27 +373,7 @@ mod tests {
             }))
             .await;
         assert!(result.is_error);
-        assert!(result.content.contains("not supported for web chat"));
-        cleanup(&dir);
-    }
-
-    #[tokio::test]
-    async fn test_send_attachment_discord_without_config_fails_fast() {
-        let (db, dir) = test_db();
-        db.upsert_chat(123, Some("discord-123"), "discord").unwrap();
-
-        let attachment = dir.join("sample.txt");
-        std::fs::write(&attachment, "hello").unwrap();
-
-        let tool = SendMessageTool::new(Some(Bot::new("123456:TEST_TOKEN")), db, "bot".into());
-        let result = tool
-            .execute(json!({
-                "chat_id": 123,
-                "attachment_path": attachment.to_string_lossy(),
-            }))
-            .await;
-        assert!(result.is_error);
-        assert!(result.content.contains("config unavailable"));
+        assert!(result.content.contains("not supported for web"));
         cleanup(&dir);
     }
 }

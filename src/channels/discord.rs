@@ -1,5 +1,9 @@
+use std::error::Error;
+use std::path::Path;
 use std::sync::Arc;
 
+use serde::Deserialize;
+use serde_json::json;
 use serenity::async_trait;
 use serenity::model::channel::Message as DiscordMessage;
 use serenity::model::gateway::Ready;
@@ -11,12 +15,182 @@ use crate::agent_engine::archive_conversation;
 use crate::agent_engine::process_with_agent_with_events;
 use crate::agent_engine::AgentEvent;
 use crate::agent_engine::AgentRequestContext;
+use crate::channel::ConversationKind;
+use crate::channel_adapter::ChannelAdapter;
 use crate::db::call_blocking;
 use crate::db::StoredMessage;
 use crate::llm_types::Message as LlmMessage;
 use crate::runtime::AppState;
-use crate::text::floor_char_boundary;
+use crate::text::{floor_char_boundary, split_text};
 use crate::usage::build_usage_report;
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DiscordChannelConfig {
+    pub bot_token: String,
+    #[serde(default)]
+    pub allowed_channels: Vec<u64>,
+}
+
+pub struct DiscordAdapter {
+    token: String,
+    http_client: reqwest::Client,
+}
+
+fn format_reqwest_error(prefix: &str, err: &reqwest::Error) -> String {
+    let mut details = Vec::new();
+    if err.is_timeout() {
+        details.push("timeout");
+    }
+    if err.is_connect() {
+        details.push("connect");
+    }
+    if err.is_request() {
+        details.push("request");
+    }
+    if err.is_body() {
+        details.push("body");
+    }
+    if err.is_decode() {
+        details.push("decode");
+    }
+    if err.is_status() {
+        details.push("status");
+    }
+
+    let mut source_chain = Vec::new();
+    let mut source = err.source();
+    while let Some(s) = source {
+        source_chain.push(s.to_string());
+        source = s.source();
+    }
+
+    let url = err
+        .url()
+        .map(|u| u.as_str().to_string())
+        .unwrap_or_default();
+    let class = if details.is_empty() {
+        "unknown".to_string()
+    } else {
+        details.join("|")
+    };
+    if source_chain.is_empty() {
+        format!("{prefix}: {err} [class={class}, url={url}]")
+    } else {
+        format!(
+            "{prefix}: {err} [class={class}, url={url}, source_chain={}]",
+            source_chain.join(" -> ")
+        )
+    }
+}
+
+impl DiscordAdapter {
+    pub fn new(token: String) -> Self {
+        DiscordAdapter {
+            token,
+            http_client: reqwest::Client::new(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ChannelAdapter for DiscordAdapter {
+    fn name(&self) -> &str {
+        "discord"
+    }
+
+    fn chat_type_routes(&self) -> Vec<(&str, ConversationKind)> {
+        vec![("discord", ConversationKind::Private)]
+    }
+
+    async fn send_text(&self, external_chat_id: &str, text: &str) -> Result<(), String> {
+        let discord_chat_id = external_chat_id
+            .parse::<u64>()
+            .map_err(|_| format!("Invalid Discord external_chat_id '{}'", external_chat_id))?;
+
+        let url = format!("https://discord.com/api/v10/channels/{discord_chat_id}/messages");
+
+        for chunk in split_text(text, 2000) {
+            let body = json!({ "content": chunk });
+            let resp = self
+                .http_client
+                .post(&url)
+                .header(
+                    reqwest::header::AUTHORIZATION,
+                    format!("Bot {}", self.token),
+                )
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format_reqwest_error("Failed to send Discord message", &e))?;
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(format!(
+                    "Failed to send Discord message: HTTP {status} {}",
+                    body.chars().take(300).collect::<String>()
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn send_attachment(
+        &self,
+        external_chat_id: &str,
+        file_path: &Path,
+        caption: Option<&str>,
+    ) -> Result<String, String> {
+        let discord_chat_id = external_chat_id
+            .parse::<u64>()
+            .map_err(|_| format!("Invalid Discord external_chat_id '{}'", external_chat_id))?;
+
+        let filename = file_path
+            .file_name()
+            .and_then(|v| v.to_str())
+            .unwrap_or("attachment.bin")
+            .to_string();
+        let bytes = tokio::fs::read(file_path)
+            .await
+            .map_err(|e| format!("Failed to read attachment file: {e}"))?;
+
+        let payload = json!({ "content": caption.unwrap_or_default() });
+        let form = reqwest::multipart::Form::new()
+            .text("payload_json", payload.to_string())
+            .part(
+                "files[0]",
+                reqwest::multipart::Part::bytes(bytes).file_name(filename),
+            );
+
+        let url = format!("https://discord.com/api/v10/channels/{discord_chat_id}/messages");
+        let resp = self
+            .http_client
+            .post(url)
+            .header(
+                reqwest::header::AUTHORIZATION,
+                format!("Bot {}", self.token),
+            )
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| format_reqwest_error("Failed to send Discord attachment", &e))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!(
+                "Failed to send Discord attachment: HTTP {status} {}",
+                body.chars().take(300).collect::<String>()
+            ));
+        }
+
+        Ok(match caption {
+            Some(c) => format!("[attachment:{}] {}", file_path.display(), c),
+            None => format!("[attachment:{}]", file_path.display()),
+        })
+    }
+}
 
 struct Handler {
     app_state: Arc<AppState>,
