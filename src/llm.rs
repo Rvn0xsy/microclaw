@@ -784,6 +784,38 @@ struct OaiErrorDetail {
     message: String,
 }
 
+fn should_retry_with_max_completion_tokens(error_text: &str) -> bool {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(error_text) {
+        let param_is_max_tokens = value
+            .get("error")
+            .and_then(|e| e.get("param"))
+            .and_then(|p| p.as_str())
+            .map(|p| p == "max_tokens")
+            .unwrap_or(false);
+        if param_is_max_tokens {
+            return true;
+        }
+    }
+
+    let lower = error_text.to_ascii_lowercase();
+    lower.contains("max_tokens") && lower.contains("max_completion_tokens")
+}
+
+fn switch_to_max_completion_tokens(body: &mut serde_json::Value) -> bool {
+    if body.get("max_completion_tokens").is_some() {
+        return false;
+    }
+    let Some(max_tokens) = body.get("max_tokens").cloned() else {
+        return false;
+    };
+    if let Some(obj) = body.as_object_mut() {
+        obj.remove("max_tokens");
+        obj.insert("max_completion_tokens".to_string(), max_tokens);
+        return true;
+    }
+    false
+}
+
 #[derive(Debug, Deserialize)]
 struct OaiResponsesResponse {
     output: Vec<OaiResponsesOutputItem>,
@@ -887,6 +919,14 @@ impl LlmProvider for OpenAiProvider {
             }
 
             let text = response.text().await.unwrap_or_default();
+            if should_retry_with_max_completion_tokens(&text)
+                && switch_to_max_completion_tokens(&mut body)
+            {
+                warn!(
+                    "OpenAI-compatible API rejected max_tokens; retrying with max_completion_tokens"
+                );
+                continue;
+            }
             if let Ok(err) = serde_json::from_str::<OaiErrorResponse>(&text) {
                 return Err(MicroClawError::LlmApi(err.error.message));
             }
@@ -935,23 +975,35 @@ impl LlmProvider for OpenAiProvider {
             }
         }
 
-        let mut req = self
-            .http
-            .post(&self.chat_url)
-            .header("Content-Type", "application/json")
-            .json(&body);
-        if !self.api_key.trim().is_empty() {
-            req = req.header("Authorization", format!("Bearer {}", self.api_key));
-        }
-        let response = req.send().await?;
-        let status = response.status();
-        if !status.is_success() {
+        let response = loop {
+            let mut req = self
+                .http
+                .post(&self.chat_url)
+                .header("Content-Type", "application/json")
+                .json(&body);
+            if !self.api_key.trim().is_empty() {
+                req = req.header("Authorization", format!("Bearer {}", self.api_key));
+            }
+            let response = req.send().await?;
+            let status = response.status();
+            if status.is_success() {
+                break response;
+            }
+
             let text = response.text().await.unwrap_or_default();
+            if should_retry_with_max_completion_tokens(&text)
+                && switch_to_max_completion_tokens(&mut body)
+            {
+                warn!(
+                    "OpenAI-compatible API rejected max_tokens; retrying stream with max_completion_tokens"
+                );
+                continue;
+            }
             if let Ok(err) = serde_json::from_str::<OaiErrorResponse>(&text) {
                 return Err(MicroClawError::LlmApi(err.error.message));
             }
             return Err(MicroClawError::LlmApi(format!("HTTP {status}: {text}")));
-        }
+        };
 
         let mut byte_stream = response.bytes_stream();
         let mut sse = SseEventParser::default();
@@ -1920,6 +1972,24 @@ mod tests {
             normalize_stop_reason(Some("stop".into())).as_deref(),
             Some("end_turn")
         );
+    }
+
+    #[test]
+    fn test_should_retry_with_max_completion_tokens() {
+        let err = r#"{"error":{"message":"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.","param":"max_tokens"}}"#;
+        assert!(should_retry_with_max_completion_tokens(err));
+        assert!(!should_retry_with_max_completion_tokens(
+            r#"{"error":{"message":"bad request","param":"messages"}}"#
+        ));
+    }
+
+    #[test]
+    fn test_switch_to_max_completion_tokens() {
+        let mut body = json!({"model":"gpt-5.2","max_tokens":128});
+        assert!(switch_to_max_completion_tokens(&mut body));
+        assert_eq!(body.get("max_tokens"), None);
+        assert_eq!(body["max_completion_tokens"], 128);
+        assert!(!switch_to_max_completion_tokens(&mut body));
     }
 
     #[test]

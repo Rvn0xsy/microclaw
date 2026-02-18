@@ -1345,32 +1345,33 @@ fn perform_online_validation(
             }
             req.send()?
         } else {
-            let body = serde_json::json!({
+            let endpoint = format!("{}/chat/completions", base.trim_end_matches('/'));
+            let mut body = serde_json::json!({
                 "model": model,
                 "max_tokens": 1,
                 "messages": [{"role": "user", "content": "hi"}]
             });
-            let mut req = client
-                .post(format!("{}/chat/completions", base.trim_end_matches('/')))
-                .header("content-type", "application/json")
-                .body(body.to_string());
-            if !api_key.trim().is_empty() {
-                req = req.bearer_auth(api_key);
+            let mut resp = send_openai_validation_chat_request(&client, &endpoint, api_key, &body)?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let text = resp.text().unwrap_or_default();
+                if should_retry_with_max_completion_tokens(&text)
+                    && switch_to_max_completion_tokens(&mut body)
+                {
+                    resp = send_openai_validation_chat_request(&client, &endpoint, api_key, &body)?;
+                } else {
+                    return Err(MicroClawError::Config(format!(
+                        "LLM validation failed: {}",
+                        extract_openai_error_detail(status, &text)
+                    )));
+                }
             }
-            req.send()?
+            resp
         };
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().unwrap_or_default();
-            let detail = serde_json::from_str::<serde_json::Value>(&text)
-                .ok()
-                .and_then(|v| {
-                    v.get("error")
-                        .and_then(|e| e.get("message"))
-                        .and_then(|m| m.as_str())
-                        .map(|s| s.to_string())
-                })
-                .unwrap_or_else(|| format!("HTTP {status}"));
+            let detail = extract_openai_error_detail(status, &text);
             return Err(MicroClawError::Config(format!(
                 "LLM validation failed: {detail}"
             )));
@@ -1379,6 +1380,66 @@ fn perform_online_validation(
     }
 
     Ok(checks)
+}
+
+fn send_openai_validation_chat_request(
+    client: &reqwest::blocking::Client,
+    endpoint: &str,
+    api_key: &str,
+    body: &serde_json::Value,
+) -> Result<reqwest::blocking::Response, reqwest::Error> {
+    let mut req = client
+        .post(endpoint)
+        .header("content-type", "application/json")
+        .body(body.to_string());
+    if !api_key.trim().is_empty() {
+        req = req.bearer_auth(api_key);
+    }
+    req.send()
+}
+
+fn extract_openai_error_detail(status: reqwest::StatusCode, text: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|v| {
+            v.get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(|m| m.as_str())
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_else(|| format!("HTTP {status}"))
+}
+
+fn should_retry_with_max_completion_tokens(error_text: &str) -> bool {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(error_text) {
+        let param_is_max_tokens = value
+            .get("error")
+            .and_then(|e| e.get("param"))
+            .and_then(|p| p.as_str())
+            .map(|p| p == "max_tokens")
+            .unwrap_or(false);
+        if param_is_max_tokens {
+            return true;
+        }
+    }
+
+    let lower = error_text.to_ascii_lowercase();
+    lower.contains("max_tokens") && lower.contains("max_completion_tokens")
+}
+
+fn switch_to_max_completion_tokens(body: &mut serde_json::Value) -> bool {
+    if body.get("max_completion_tokens").is_some() {
+        return false;
+    }
+    let Some(max_tokens) = body.get("max_tokens").cloned() else {
+        return false;
+    };
+    if let Some(obj) = body.as_object_mut() {
+        obj.remove("max_tokens");
+        obj.insert("max_completion_tokens".to_string(), max_tokens);
+        return true;
+    }
+    false
 }
 
 fn resolve_openai_compat_validation_base(
@@ -2193,6 +2254,24 @@ mod tests {
     fn test_resolve_openai_compat_validation_base_openai() {
         let base = resolve_openai_compat_validation_base("openai", "https://api.openai.com", None);
         assert_eq!(base, "https://api.openai.com/v1");
+    }
+
+    #[test]
+    fn test_should_retry_with_max_completion_tokens() {
+        let err = r#"{"error":{"message":"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.","param":"max_tokens"}}"#;
+        assert!(should_retry_with_max_completion_tokens(err));
+        assert!(!should_retry_with_max_completion_tokens(
+            r#"{"error":{"message":"bad request","param":"messages"}}"#
+        ));
+    }
+
+    #[test]
+    fn test_switch_to_max_completion_tokens() {
+        let mut body = serde_json::json!({"model":"gpt-5.2","max_tokens":1});
+        assert!(switch_to_max_completion_tokens(&mut body));
+        assert_eq!(body.get("max_tokens"), None);
+        assert_eq!(body["max_completion_tokens"], 1);
+        assert!(!switch_to_max_completion_tokens(&mut body));
     }
 
     #[test]
