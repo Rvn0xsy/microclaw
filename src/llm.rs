@@ -691,8 +691,8 @@ pub struct OpenAiProvider {
     model: String,
     max_tokens: u32,
     is_openai_codex: bool,
-    is_deepseek_reasoner: bool,
-    is_deepseek_chat_thinking: bool,
+    enable_reasoning_content_bridge: bool,
+    enable_thinking_param: bool,
     prefer_max_completion_tokens: bool,
     chat_url: String,
     responses_url: String,
@@ -718,11 +718,8 @@ impl OpenAiProvider {
     pub fn new(config: &Config) -> Self {
         let is_openai_codex = is_openai_codex_provider(&config.llm_provider);
         let is_deepseek_provider = config.llm_provider.eq_ignore_ascii_case("deepseek");
-        let is_deepseek_reasoner =
-            is_deepseek_provider && config.model.eq_ignore_ascii_case("deepseek-reasoner");
-        let is_deepseek_chat_thinking = is_deepseek_provider
-            && config.model.eq_ignore_ascii_case("deepseek-chat")
-            && config.show_thinking;
+        let enable_reasoning_content_bridge = is_deepseek_provider;
+        let enable_thinking_param = is_deepseek_provider && config.show_thinking;
         let configured_base = config.llm_base_url.as_deref().unwrap_or("");
         let base = resolve_openai_compat_base(&config.llm_provider, configured_base);
 
@@ -746,8 +743,8 @@ impl OpenAiProvider {
             model: config.model.clone(),
             max_tokens: config.max_tokens,
             is_openai_codex,
-            is_deepseek_reasoner,
-            is_deepseek_chat_thinking,
+            enable_reasoning_content_bridge,
+            enable_thinking_param,
             prefer_max_completion_tokens: config.llm_provider.eq_ignore_ascii_case("openai"),
             chat_url: format!("{}/chat/completions", base.trim_end_matches('/')),
             responses_url: format!("{}/responses", base.trim_end_matches('/')),
@@ -755,7 +752,7 @@ impl OpenAiProvider {
     }
 }
 
-fn maybe_enable_deepseek_thinking(body: &mut serde_json::Value, enabled: bool) {
+fn maybe_enable_thinking_param(body: &mut serde_json::Value, enabled: bool) {
     if !enabled {
         return;
     }
@@ -913,9 +910,7 @@ impl LlmProvider for OpenAiProvider {
             return self.send_codex_message(system, messages, tools).await;
         }
 
-        let include_deepseek_reasoning =
-            self.is_deepseek_reasoner || self.is_deepseek_chat_thinking;
-        let oai_messages = if include_deepseek_reasoning {
+        let oai_messages = if self.enable_reasoning_content_bridge {
             translate_messages_to_oai_with_reasoning(system, &messages, true)
         } else {
             translate_messages_to_oai(system, &messages)
@@ -930,7 +925,7 @@ impl LlmProvider for OpenAiProvider {
             self.max_tokens,
             self.prefer_max_completion_tokens,
         );
-        maybe_enable_deepseek_thinking(&mut body, self.is_deepseek_chat_thinking);
+        maybe_enable_thinking_param(&mut body, self.enable_thinking_param);
 
         if let Some(ref tool_defs) = tools {
             if !tool_defs.is_empty() {
@@ -1017,9 +1012,7 @@ impl LlmProvider for OpenAiProvider {
             return Ok(response);
         }
 
-        let include_deepseek_reasoning =
-            self.is_deepseek_reasoner || self.is_deepseek_chat_thinking;
-        let oai_messages = if include_deepseek_reasoning {
+        let oai_messages = if self.enable_reasoning_content_bridge {
             translate_messages_to_oai_with_reasoning(system, &messages, true)
         } else {
             translate_messages_to_oai(system, &messages)
@@ -1035,7 +1028,7 @@ impl LlmProvider for OpenAiProvider {
             self.max_tokens,
             self.prefer_max_completion_tokens,
         );
-        maybe_enable_deepseek_thinking(&mut body, self.is_deepseek_chat_thinking);
+        maybe_enable_thinking_param(&mut body, self.enable_thinking_param);
 
         if let Some(ref tool_defs) = tools {
             if !tool_defs.is_empty() {
@@ -2178,24 +2171,24 @@ mod tests {
     }
 
     #[test]
-    fn test_maybe_enable_deepseek_thinking_enabled() {
-        let mut body = json!({"model":"deepseek-chat","messages":[]});
-        maybe_enable_deepseek_thinking(&mut body, true);
+    fn test_maybe_enable_thinking_param_enabled() {
+        let mut body = json!({"model":"test-model","messages":[]});
+        maybe_enable_thinking_param(&mut body, true);
         assert_eq!(body["thinking"]["type"], "enabled");
     }
 
     #[test]
-    fn test_maybe_enable_deepseek_thinking_disabled() {
-        let mut body = json!({"model":"deepseek-chat","messages":[]});
-        maybe_enable_deepseek_thinking(&mut body, false);
+    fn test_maybe_enable_thinking_param_disabled() {
+        let mut body = json!({"model":"test-model","messages":[]});
+        maybe_enable_thinking_param(&mut body, false);
         assert!(body.get("thinking").is_none());
     }
 
     #[test]
-    fn test_openai_provider_deepseek_chat_thinking_flag() {
+    fn test_openai_provider_capability_flags_for_deepseek() {
         let mut config = Config::test_defaults();
         config.llm_provider = "deepseek".into();
-        config.model = "deepseek-chat".into();
+        config.model = "test-model".into();
         config.show_thinking = true;
         config.data_dir = "/tmp".into();
         config.working_dir = "/tmp".into();
@@ -2204,8 +2197,8 @@ mod tests {
         config.web_port = 3900;
 
         let provider = OpenAiProvider::new(&config);
-        assert!(provider.is_deepseek_chat_thinking);
-        assert!(!provider.is_deepseek_reasoner);
+        assert!(provider.enable_thinking_param);
+        assert!(provider.enable_reasoning_content_bridge);
     }
 
     #[test]
