@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 use std::path::Path;
 use zip::ZipArchive;
 
+#[derive(Clone)]
 pub struct InstallOptions {
     pub force: bool,
     pub skip_gates: bool,

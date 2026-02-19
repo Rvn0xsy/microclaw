@@ -54,6 +54,12 @@ timezone: "UTC"
 # OpenAI API key for voice transcription via Whisper (optional)
 # openai_api_key: ""
 
+# Voice / Speech-to-text configuration
+# voice_provider: "openai"  # "openai" uses OpenAI Whisper API (requires openai_api_key)
+                          # "local" uses voice_transcription_command
+# voice_transcription_command: "whisper-mlx --file {file}"  # Command template for local transcription
+                                                               # Use {file} placeholder for the audio file path
+
 # Session management
 max_session_messages: 40
 compact_keep_recent: 20

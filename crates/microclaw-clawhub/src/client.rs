@@ -21,11 +21,12 @@ impl ClawHubClient {
         &self,
         query: &str,
         limit: usize,
-        sort: &str,
+        _sort: &str,
     ) -> Result<Vec<SearchResult>, MicroClawError> {
+        // Use the dedicated search endpoint that actually filters by query
         let url = format!(
-            "{}/api/v1/skills?q={}&limit={}&sort={}",
-            self.base_url, query, limit, sort
+            "{}/api/v1/search?q={}&limit={}",
+            self.base_url, query, limit
         );
         let mut req = self.client.get(&url);
         if let Some(ref token) = self.token {
@@ -35,10 +36,16 @@ impl ClawHubClient {
             .send()
             .await
             .map_err(|e| MicroClawError::Config(format!("ClawHub request failed: {}", e)))?;
-        let results: Vec<SearchResult> = resp.json().await.map_err(|e| {
+        let search_response: ApiSearchResponse = resp.json().await.map_err(|e| {
             MicroClawError::Config(format!("Failed to parse search results: {}", e))
         })?;
-        Ok(results)
+        // Convert API response items to internal SearchResult type
+        Ok(search_response
+            .results
+            .into_iter()
+            .take(limit)
+            .map(SearchResult::from)
+            .collect())
     }
 
     /// Get skill metadata by slug
@@ -52,10 +59,11 @@ impl ClawHubClient {
             .send()
             .await
             .map_err(|e| MicroClawError::Config(format!("ClawHub request failed: {}", e)))?;
-        let meta: SkillMeta = resp.json().await.map_err(|e| {
+        let get_response: GetSkillResponse = resp.json().await.map_err(|e| {
             MicroClawError::Config(format!("Failed to parse skill metadata: {}", e))
         })?;
-        Ok(meta)
+        // Convert API response to internal SkillMeta type
+        Ok(SkillMeta::from(get_response))
     }
 
     /// Download skill as ZIP bytes
@@ -64,9 +72,12 @@ impl ClawHubClient {
         slug: &str,
         version: &str,
     ) -> Result<Vec<u8>, MicroClawError> {
+        // Use Convex-backed download endpoint (different from REST API)
+        // Format: https://{random}.convex.site/api/v1/download?slug={slug}&version={version}
+        // The subdomain appears to be consistent for all downloads
         let url = format!(
-            "{}/api/v1/skills/{}/download?version={}",
-            self.base_url, slug, version
+            "https://wry-manatee-359.convex.site/api/v1/download?slug={}&version={}",
+            slug, version
         );
         let mut req = self.client.get(&url);
         if let Some(ref token) = self.token {
