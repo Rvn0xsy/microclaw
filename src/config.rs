@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::codex_auth::{
     codex_auth_file_has_access_token, is_openai_codex_provider, provider_allows_empty_api_key,
 };
-use crate::error::MicroClawError;
+use microclaw_core::error::MicroClawError;
 pub use microclaw_tools::sandbox::{SandboxBackend, SandboxConfig, SandboxMode};
 pub use microclaw_tools::types::WorkingDirIsolation;
 

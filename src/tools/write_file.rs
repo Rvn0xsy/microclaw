@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use tracing::info;
 
 use crate::config::WorkingDirIsolation;
-use crate::llm_types::ToolDefinition;
+use microclaw_core::llm_types::ToolDefinition;
 
 use super::{schema_object, Tool, ToolResult};
 
@@ -65,7 +65,7 @@ impl Tool for WriteFileTool {
         let resolved_path = super::resolve_tool_path(&working_dir, path);
         let resolved_path_str = resolved_path.to_string_lossy().to_string();
 
-        if let Err(msg) = crate::tools::path_guard::check_path(&resolved_path_str) {
+        if let Err(msg) = microclaw_tools::path_guard::check_path(&resolved_path_str) {
             return ToolResult::error(msg);
         }
 

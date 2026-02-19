@@ -18,13 +18,15 @@ use tracing::{error, info};
 use crate::agent_engine::{
     process_with_agent, process_with_agent_with_events, AgentEvent, AgentRequestContext,
 };
-use crate::channel::ConversationKind;
-use crate::channel::{deliver_and_store_bot_message, get_chat_routing, session_source_for_chat};
-use crate::channel_adapter::{ChannelAdapter, ChannelRegistry};
 use crate::config::{Config, WorkingDirIsolation};
-use crate::db::{call_blocking, ChatSummary, StoredMessage};
 use crate::runtime::AppState;
 use crate::usage::build_usage_report;
+use microclaw_channels::channel::ConversationKind;
+use microclaw_channels::channel::{
+    deliver_and_store_bot_message, get_chat_routing, session_source_for_chat,
+};
+use microclaw_channels::channel_adapter::{ChannelAdapter, ChannelRegistry};
+use microclaw_storage::db::{call_blocking, ChatSummary, StoredMessage};
 
 static WEB_ASSETS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/web/dist");
 
@@ -1578,14 +1580,14 @@ fn build_router(web_state: WebState) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::channel_adapter::ChannelRegistry;
     use crate::config::{Config, WorkingDirIsolation};
-    use crate::db::call_blocking;
     use crate::llm::LlmProvider;
     use crate::{db::Database, memory::MemoryManager, skills::SkillManager, tools::ToolRegistry};
     use crate::{error::MicroClawError, llm_types::ResponseContentBlock};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
+    use microclaw_channels::channel_adapter::ChannelRegistry;
+    use microclaw_storage::db::call_blocking;
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tower::ServiceExt;
@@ -1618,11 +1620,14 @@ mod tests {
         async fn send_message(
             &self,
             _system: &str,
-            _messages: Vec<crate::llm_types::Message>,
-            _tools: Option<Vec<crate::llm_types::ToolDefinition>>,
-        ) -> Result<crate::llm_types::MessagesResponse, crate::error::MicroClawError> {
-            Ok(crate::llm_types::MessagesResponse {
-                content: vec![crate::llm_types::ResponseContentBlock::Text {
+            _messages: Vec<microclaw_core::llm_types::Message>,
+            _tools: Option<Vec<microclaw_core::llm_types::ToolDefinition>>,
+        ) -> Result<
+            microclaw_core::llm_types::MessagesResponse,
+            microclaw_core::error::MicroClawError,
+        > {
+            Ok(microclaw_core::llm_types::MessagesResponse {
+                content: vec![microclaw_core::llm_types::ResponseContentBlock::Text {
                     text: "hello from llm".into(),
                 }],
                 stop_reason: Some("end_turn".into()),
@@ -1633,10 +1638,13 @@ mod tests {
         async fn send_message_stream(
             &self,
             _system: &str,
-            _messages: Vec<crate::llm_types::Message>,
-            _tools: Option<Vec<crate::llm_types::ToolDefinition>>,
+            _messages: Vec<microclaw_core::llm_types::Message>,
+            _tools: Option<Vec<microclaw_core::llm_types::ToolDefinition>>,
             text_tx: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
-        ) -> Result<crate::llm_types::MessagesResponse, crate::error::MicroClawError> {
+        ) -> Result<
+            microclaw_core::llm_types::MessagesResponse,
+            microclaw_core::error::MicroClawError,
+        > {
             if let Some(tx) = text_tx {
                 let _ = tx.send("hello ".into());
                 let _ = tx.send("from llm".into());
@@ -1654,11 +1662,11 @@ mod tests {
         async fn send_message(
             &self,
             _system: &str,
-            _messages: Vec<crate::llm_types::Message>,
-            _tools: Option<Vec<crate::llm_types::ToolDefinition>>,
-        ) -> Result<crate::llm_types::MessagesResponse, MicroClawError> {
+            _messages: Vec<microclaw_core::llm_types::Message>,
+            _tools: Option<Vec<microclaw_core::llm_types::ToolDefinition>>,
+        ) -> Result<microclaw_core::llm_types::MessagesResponse, MicroClawError> {
             tokio::time::sleep(Duration::from_millis(self.sleep_ms)).await;
-            Ok(crate::llm_types::MessagesResponse {
+            Ok(microclaw_core::llm_types::MessagesResponse {
                 content: vec![ResponseContentBlock::Text {
                     text: "slow".into(),
                 }],
@@ -1677,12 +1685,12 @@ mod tests {
         async fn send_message(
             &self,
             _system: &str,
-            _messages: Vec<crate::llm_types::Message>,
-            _tools: Option<Vec<crate::llm_types::ToolDefinition>>,
-        ) -> Result<crate::llm_types::MessagesResponse, MicroClawError> {
+            _messages: Vec<microclaw_core::llm_types::Message>,
+            _tools: Option<Vec<microclaw_core::llm_types::ToolDefinition>>,
+        ) -> Result<microclaw_core::llm_types::MessagesResponse, MicroClawError> {
             let n = self.calls.fetch_add(1, Ordering::SeqCst);
             if n == 0 {
-                return Ok(crate::llm_types::MessagesResponse {
+                return Ok(microclaw_core::llm_types::MessagesResponse {
                     content: vec![ResponseContentBlock::ToolUse {
                         id: "tool_1".into(),
                         name: "glob".into(),
@@ -1692,7 +1700,7 @@ mod tests {
                     usage: None,
                 });
             }
-            Ok(crate::llm_types::MessagesResponse {
+            Ok(microclaw_core::llm_types::MessagesResponse {
                 content: vec![ResponseContentBlock::Text {
                     text: "after tool".into(),
                 }],

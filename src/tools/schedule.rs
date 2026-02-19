@@ -5,10 +5,10 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use super::{authorize_chat_access, schema_object, Tool, ToolResult};
-use crate::channel::enforce_channel_policy;
-use crate::channel_adapter::ChannelRegistry;
-use crate::db::{call_blocking, Database};
-use crate::llm_types::ToolDefinition;
+use microclaw_channels::channel::enforce_channel_policy;
+use microclaw_channels::channel_adapter::ChannelRegistry;
+use microclaw_core::llm_types::ToolDefinition;
+use microclaw_storage::db::{call_blocking, Database};
 
 fn compute_next_run(cron_expr: &str, tz_name: &str) -> Result<String, String> {
     let tz: chrono_tz::Tz = tz_name
@@ -516,9 +516,9 @@ impl Tool for GetTaskHistoryTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::channel_adapter::ChannelRegistry;
-    use crate::db::Database;
     use crate::web::WebAdapter;
+    use microclaw_channels::channel_adapter::ChannelRegistry;
+    use microclaw_storage::db::Database;
     use serde_json::json;
 
     fn test_registry() -> Arc<ChannelRegistry> {

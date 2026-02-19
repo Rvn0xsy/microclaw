@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use tracing::info;
 
 use crate::config::WorkingDirIsolation;
-use crate::llm_types::ToolDefinition;
+use microclaw_core::llm_types::ToolDefinition;
 
 use super::{schema_object, Tool, ToolResult};
 
@@ -66,7 +66,7 @@ impl Tool for GlobTool {
         let resolved_base = super::resolve_tool_path(&working_dir, base);
         let resolved_base_str = resolved_base.to_string_lossy().to_string();
 
-        if let Err(msg) = crate::tools::path_guard::check_path(&resolved_base_str) {
+        if let Err(msg) = microclaw_tools::path_guard::check_path(&resolved_base_str) {
             return ToolResult::error(msg);
         }
 
@@ -84,7 +84,7 @@ impl Tool for GlobTool {
                     .filter_map(|p| p.ok())
                     .map(|p| p.display().to_string())
                     .collect();
-                matches = crate::tools::path_guard::filter_paths(matches);
+                matches = microclaw_tools::path_guard::filter_paths(matches);
                 matches.sort();
 
                 if matches.is_empty() {

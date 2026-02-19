@@ -5,17 +5,17 @@ use tracing::info;
 #[cfg(feature = "sqlite-vec")]
 use tracing::warn;
 
-use crate::channel_adapter::ChannelRegistry;
 use crate::channels::telegram::TelegramChannelConfig;
 use crate::channels::{DiscordAdapter, FeishuAdapter, SlackAdapter, TelegramAdapter};
 use crate::config::Config;
-use crate::db::Database;
 use crate::embedding::EmbeddingProvider;
 use crate::llm::LlmProvider;
 use crate::memory::MemoryManager;
 use crate::skills::SkillManager;
 use crate::tools::ToolRegistry;
 use crate::web::WebAdapter;
+use microclaw_channels::channel_adapter::ChannelRegistry;
+use microclaw_storage::db::Database;
 
 pub struct AppState {
     pub config: Config,

@@ -2,13 +2,15 @@ use async_trait::async_trait;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{info, warn};
 
-use crate::db::{call_blocking, Database, StoredMessage};
 use crate::embedding::EmbeddingProvider;
-use crate::llm_types::{ContentBlock, ImageSource, Message, MessageContent, ResponseContentBlock};
-use crate::memory_quality;
 use crate::runtime::AppState;
-use crate::text::floor_char_boundary;
 use crate::tools::ToolAuthContext;
+use microclaw_core::llm_types::{
+    ContentBlock, ImageSource, Message, MessageContent, ResponseContentBlock,
+};
+use microclaw_core::text::floor_char_boundary;
+use microclaw_storage::db::{call_blocking, Database, StoredMessage};
+use microclaw_storage::memory_quality;
 
 #[derive(Debug, Clone, Copy)]
 pub struct AgentRequestContext<'a> {
@@ -811,7 +813,7 @@ pub(crate) async fn build_db_memory_context(
         return String::new();
     }
 
-    let mut ordered: Vec<&crate::db::Memory> = Vec::new();
+    let mut ordered: Vec<&microclaw_storage::db::Memory> = Vec::new();
     #[cfg(feature = "sqlite-vec")]
     let mut retrieval_method = "keyword";
     #[cfg(not(feature = "sqlite-vec"))]
@@ -827,7 +829,7 @@ pub(crate) async fn build_db_memory_context(
                     })
                     .await;
                     if let Ok(knn_rows) = knn_result {
-                        let by_id: std::collections::HashMap<i64, &crate::db::Memory> =
+                        let by_id: std::collections::HashMap<i64, &microclaw_storage::db::Memory> =
                             memories.iter().map(|m| (m.id, m)).collect();
                         for (id, _) in knn_rows {
                             if let Some(mem) = by_id.get(&id) {
@@ -851,7 +853,7 @@ pub(crate) async fn build_db_memory_context(
     if ordered.is_empty() {
         // Score by relevance to current query; preserve recency for ties.
         let query_tokens = tokenize_for_relevance(query);
-        let mut scored: Vec<(usize, usize, &crate::db::Memory)> = memories
+        let mut scored: Vec<(usize, usize, &microclaw_storage::db::Memory)> = memories
             .iter()
             .enumerate()
             .map(|(idx, m)| {
@@ -1362,17 +1364,19 @@ async fn compact_messages(
 #[cfg(test)]
 mod tests {
     use super::{build_db_memory_context, process_with_agent, AgentRequestContext};
-    use crate::channel_adapter::ChannelRegistry;
     use crate::config::{Config, WorkingDirIsolation};
-    use crate::db::{Database, StoredMessage};
-    use crate::error::MicroClawError;
     use crate::llm::LlmProvider;
-    use crate::llm_types::{Message, MessagesResponse, ResponseContentBlock, ToolDefinition};
     use crate::memory::MemoryManager;
     use crate::runtime::AppState;
     use crate::skills::SkillManager;
     use crate::tools::ToolRegistry;
     use crate::web::WebAdapter;
+    use microclaw_channels::channel_adapter::ChannelRegistry;
+    use microclaw_core::error::MicroClawError;
+    use microclaw_core::llm_types::{
+        Message, MessagesResponse, ResponseContentBlock, ToolDefinition,
+    };
+    use microclaw_storage::db::{Database, StoredMessage};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
@@ -1419,7 +1423,7 @@ mod tests {
                 });
             }
             let saw_guard = messages.iter().any(|m| match &m.content {
-                crate::llm_types::MessageContent::Text(t) => {
+                microclaw_core::llm_types::MessageContent::Text(t) => {
                     t.contains("[runtime_guard]: Your previous reply had no user-visible text.")
                 }
                 _ => false,

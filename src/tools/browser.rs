@@ -4,9 +4,9 @@ use async_trait::async_trait;
 use serde_json::json;
 use tracing::info;
 
-use crate::llm_types::ToolDefinition;
-use crate::text::floor_char_boundary;
-use crate::tools::command_runner::agent_browser_program;
+use microclaw_core::llm_types::ToolDefinition;
+use microclaw_core::text::floor_char_boundary;
+use microclaw_tools::command_runner::agent_browser_program;
 
 use super::{auth_context_from_input, schema_object, Tool, ToolResult};
 

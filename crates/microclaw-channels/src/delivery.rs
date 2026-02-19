@@ -1,2 +1,2 @@
 // Delivery logic has been absorbed into individual ChannelAdapter implementations.
-// Text splitting is in src/text.rs.
+// Text splitting helpers are in microclaw-core::text.

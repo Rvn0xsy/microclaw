@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::config::Config;
-use crate::db::Database;
+use microclaw_storage::db::Database;
 
 pub async fn build_usage_report(
     db: Arc<Database>,

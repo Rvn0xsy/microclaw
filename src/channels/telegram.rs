@@ -10,15 +10,15 @@ use tracing::{error, info, warn};
 use crate::agent_engine::{
     archive_conversation, process_with_agent_with_events, AgentEvent, AgentRequestContext,
 };
-use crate::channel::ConversationKind;
-use crate::channel_adapter::ChannelAdapter;
-use crate::db::{call_blocking, StoredMessage};
-use crate::llm_types::Message;
-#[cfg(test)]
-use crate::llm_types::{ContentBlock, ImageSource, MessageContent};
 use crate::runtime::AppState;
-use crate::text::floor_char_boundary;
 use crate::usage::build_usage_report;
+use microclaw_channels::channel::ConversationKind;
+use microclaw_channels::channel_adapter::ChannelAdapter;
+use microclaw_core::llm_types::Message;
+#[cfg(test)]
+use microclaw_core::llm_types::{ContentBlock, ImageSource, MessageContent};
+use microclaw_core::text::floor_char_boundary;
+use microclaw_storage::db::{call_blocking, StoredMessage};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct TelegramChannelConfig {
@@ -424,7 +424,7 @@ async fn handle_message(
                         .as_ref()
                         .map(|u| u.username.clone().unwrap_or_else(|| u.first_name.clone()))
                         .unwrap_or_else(|| "Unknown".into());
-                    match crate::transcribe::transcribe_audio(openai_key, &bytes).await {
+                    match microclaw_app::transcribe::transcribe_audio(openai_key, &bytes).await {
                         Ok(transcription) => {
                             text = format!(
                                 "[voice message from {}]: {}",
@@ -914,7 +914,7 @@ mod tests {
         build_system_prompt, history_to_claude_messages, message_to_text, strip_images_for_session,
         strip_thinking,
     };
-    use crate::db::StoredMessage;
+    use microclaw_storage::db::StoredMessage;
 
     fn make_msg(id: &str, sender: &str, content: &str, is_bot: bool, ts: &str) -> StoredMessage {
         StoredMessage {

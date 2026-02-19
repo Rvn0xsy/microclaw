@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::llm_types::ToolDefinition;
 use crate::mcp::{McpServer, McpToolInfo};
+use microclaw_core::llm_types::ToolDefinition;
 
 use super::{Tool, ToolResult};
 

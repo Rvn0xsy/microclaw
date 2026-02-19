@@ -6,12 +6,12 @@ use serde_json::json;
 use tracing::{info, warn};
 
 use super::{authorize_chat_access, schema_object, Tool, ToolResult};
-use crate::channel::{
+use microclaw_channels::channel::{
     deliver_and_store_bot_message, enforce_channel_policy, get_required_chat_routing,
 };
-use crate::channel_adapter::ChannelRegistry;
-use crate::db::{call_blocking, Database, StoredMessage};
-use crate::llm_types::ToolDefinition;
+use microclaw_channels::channel_adapter::ChannelRegistry;
+use microclaw_core::llm_types::ToolDefinition;
+use microclaw_storage::db::{call_blocking, Database, StoredMessage};
 
 pub struct SendMessageTool {
     registry: Arc<ChannelRegistry>,
@@ -234,8 +234,8 @@ impl Tool for SendMessageTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::channel_adapter::ChannelRegistry;
     use crate::web::WebAdapter;
+    use microclaw_channels::channel_adapter::ChannelRegistry;
     use serde_json::json;
 
     fn test_db() -> (Arc<Database>, std::path::PathBuf) {

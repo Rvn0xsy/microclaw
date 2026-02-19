@@ -10,14 +10,14 @@ use crate::agent_engine::archive_conversation;
 use crate::agent_engine::process_with_agent_with_events;
 use crate::agent_engine::AgentEvent;
 use crate::agent_engine::AgentRequestContext;
-use crate::channel::ConversationKind;
-use crate::channel_adapter::ChannelAdapter;
-use crate::db::call_blocking;
-use crate::db::StoredMessage;
-use crate::llm_types::Message as LlmMessage;
 use crate::runtime::AppState;
-use crate::text::split_text;
 use crate::usage::build_usage_report;
+use microclaw_channels::channel::ConversationKind;
+use microclaw_channels::channel_adapter::ChannelAdapter;
+use microclaw_core::llm_types::Message as LlmMessage;
+use microclaw_core::text::split_text;
+use microclaw_storage::db::call_blocking;
+use microclaw_storage::db::StoredMessage;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SlackChannelConfig {

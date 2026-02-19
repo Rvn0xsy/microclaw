@@ -5,9 +5,9 @@ use std::sync::Arc;
 use tracing::info;
 
 use crate::config::WorkingDirIsolation;
-use crate::llm_types::ToolDefinition;
-use crate::sandbox::{SandboxExecOptions, SandboxRouter};
-use crate::text::floor_char_boundary;
+use microclaw_core::llm_types::ToolDefinition;
+use microclaw_core::text::floor_char_boundary;
+use microclaw_tools::sandbox::{SandboxExecOptions, SandboxRouter};
 
 use super::{schema_object, Tool, ToolResult};
 
@@ -96,7 +96,7 @@ impl Tool for BashTool {
         let result = if let Some(router) = &self.sandbox_router {
             router.exec(&session_key, command, &exec_opts).await
         } else {
-            crate::sandbox::exec_host_command(command, &exec_opts).await
+            microclaw_tools::sandbox::exec_host_command(command, &exec_opts).await
         };
 
         match result {

@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::json;
 
-use crate::llm_types::ToolDefinition;
+use microclaw_core::llm_types::ToolDefinition;
 
 use super::{schema_object, Tool, ToolResult};
 

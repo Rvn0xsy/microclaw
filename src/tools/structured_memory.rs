@@ -3,8 +3,8 @@ use serde_json::json;
 use std::sync::Arc;
 use tracing::info;
 
-use crate::db::{call_blocking, Database};
-use crate::llm_types::ToolDefinition;
+use microclaw_core::llm_types::ToolDefinition;
+use microclaw_storage::db::{call_blocking, Database};
 
 use super::{auth_context_from_input, authorize_chat_access, schema_object, Tool, ToolResult};
 

@@ -1,7 +1,8 @@
 use include_dir::{include_dir, Dir, DirEntry};
 use std::path::Path;
 
-static BUILTIN_SKILLS_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/microclaw.data/skills");
+static BUILTIN_SKILLS_DIR: Dir<'_> =
+    include_dir!("$CARGO_MANIFEST_DIR/../../microclaw.data/skills");
 
 pub fn ensure_builtin_skills(data_root: &Path) -> std::io::Result<()> {
     let skills_root = data_root.join("skills");

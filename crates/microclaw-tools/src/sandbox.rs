@@ -6,8 +6,8 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 
-use serde::{Deserialize, Serialize};
 use crate::command_runner::{build_command, shell_command};
+use serde::{Deserialize, Serialize};
 
 fn default_sandbox_mode() -> SandboxMode {
     SandboxMode::Off

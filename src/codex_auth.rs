@@ -2,7 +2,7 @@ use base64::Engine;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
-use crate::error::MicroClawError;
+use microclaw_core::error::MicroClawError;
 
 pub const OPENAI_CODEX_PROVIDER: &str = "openai-codex";
 

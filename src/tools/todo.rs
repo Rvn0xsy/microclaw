@@ -3,7 +3,7 @@ use serde_json::json;
 use std::path::PathBuf;
 use tracing::info;
 
-use crate::llm_types::ToolDefinition;
+use microclaw_core::llm_types::ToolDefinition;
 use microclaw_tools::todo_store::{format_todos, read_todos, write_todos, TodoItem};
 
 use super::{authorize_chat_access, schema_object, Tool, ToolResult};

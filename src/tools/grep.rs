@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use tracing::info;
 
 use crate::config::WorkingDirIsolation;
-use crate::llm_types::ToolDefinition;
+use microclaw_core::llm_types::ToolDefinition;
 
 use super::{schema_object, Tool, ToolResult};
 
@@ -69,7 +69,7 @@ impl Tool for GrepTool {
             super::resolve_tool_working_dir(&self.working_dir, self.working_dir_isolation, &input);
         let resolved_path = super::resolve_tool_path(&working_dir, path);
         let resolved_path_str = resolved_path.to_string_lossy().to_string();
-        if let Err(msg) = crate::tools::path_guard::check_path(&resolved_path_str) {
+        if let Err(msg) = microclaw_tools::path_guard::check_path(&resolved_path_str) {
             return ToolResult::error(msg);
         }
         let file_glob = input.get("glob").and_then(|v| v.as_str());
@@ -133,7 +133,7 @@ fn grep_recursive(
             if entry_path.is_dir() {
                 grep_recursive(&entry_path, file_glob, re, results, file_count)?;
             } else if entry_path.is_file() {
-                if crate::tools::path_guard::is_blocked(&entry_path) {
+                if microclaw_tools::path_guard::is_blocked(&entry_path) {
                     continue;
                 }
                 if let Some(ref pat) = glob_pattern {

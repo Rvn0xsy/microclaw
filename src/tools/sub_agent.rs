@@ -7,10 +7,10 @@ use super::{auth_context_from_input, schema_object, Tool, ToolRegistry, ToolResu
 use crate::config::Config;
 #[cfg(test)]
 use crate::config::WorkingDirIsolation;
-use crate::db::{call_blocking, Database};
-use crate::llm_types::{
+use microclaw_core::llm_types::{
     ContentBlock, Message, MessageContent, ResponseContentBlock, ToolDefinition,
 };
+use microclaw_storage::db::{call_blocking, Database};
 
 const MAX_SUB_AGENT_ITERATIONS: usize = 10;
 
@@ -217,7 +217,7 @@ impl Tool for SubAgentTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::Database;
+    use microclaw_storage::db::Database;
 
     fn test_config() -> Config {
         Config {

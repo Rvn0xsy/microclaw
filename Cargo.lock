@@ -1373,6 +1373,7 @@ version = "0.0.80"
 dependencies = [
  "anyhow",
  "chrono",
+ "include_dir",
  "reqwest",
  "serde_json",
  "tracing",

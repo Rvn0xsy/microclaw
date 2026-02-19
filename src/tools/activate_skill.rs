@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use serde_json::json;
 use tracing::info;
 
-use crate::llm_types::ToolDefinition;
 use crate::skills::SkillManager;
+use microclaw_core::llm_types::ToolDefinition;
 
 use super::{schema_object, Tool, ToolResult};
 

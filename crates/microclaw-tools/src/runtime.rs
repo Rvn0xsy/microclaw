@@ -1,0 +1,285 @@
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
+
+use async_trait::async_trait;
+use microclaw_core::llm_types::ToolDefinition;
+use serde_json::json;
+
+use crate::types::WorkingDirIsolation;
+
+pub struct ToolResult {
+    pub content: String,
+    pub is_error: bool,
+    pub status_code: Option<i32>,
+    pub bytes: usize,
+    pub duration_ms: Option<u128>,
+    pub error_type: Option<String>,
+}
+
+impl ToolResult {
+    pub fn success(content: String) -> Self {
+        let bytes = content.len();
+        ToolResult {
+            content,
+            is_error: false,
+            status_code: Some(0),
+            bytes,
+            duration_ms: None,
+            error_type: None,
+        }
+    }
+
+    pub fn error(content: String) -> Self {
+        let bytes = content.len();
+        ToolResult {
+            content,
+            is_error: true,
+            status_code: Some(1),
+            bytes,
+            duration_ms: None,
+            error_type: Some("tool_error".to_string()),
+        }
+    }
+
+    pub fn with_status_code(mut self, status_code: i32) -> Self {
+        self.status_code = Some(status_code);
+        self
+    }
+
+    pub fn with_error_type(mut self, error_type: impl Into<String>) -> Self {
+        self.error_type = Some(error_type.into());
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolRisk {
+    Low,
+    Medium,
+    High,
+}
+
+impl ToolRisk {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ToolRisk::Low => "low",
+            ToolRisk::Medium => "medium",
+            ToolRisk::High => "high",
+        }
+    }
+}
+
+pub fn tool_risk(name: &str) -> ToolRisk {
+    match name {
+        "bash" => ToolRisk::High,
+        "write_file"
+        | "edit_file"
+        | "write_memory"
+        | "send_message"
+        | "sync_skills"
+        | "schedule_task"
+        | "pause_scheduled_task"
+        | "resume_scheduled_task"
+        | "cancel_scheduled_task"
+        | "structured_memory_delete"
+        | "structured_memory_update" => ToolRisk::Medium,
+        _ => ToolRisk::Low,
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ToolAuthContext {
+    pub caller_channel: String,
+    pub caller_chat_id: i64,
+    pub control_chat_ids: Vec<i64>,
+}
+
+impl ToolAuthContext {
+    pub fn is_control_chat(&self) -> bool {
+        self.control_chat_ids.contains(&self.caller_chat_id)
+    }
+
+    pub fn can_access_chat(&self, target_chat_id: i64) -> bool {
+        self.is_control_chat() || self.caller_chat_id == target_chat_id
+    }
+}
+
+const AUTH_CONTEXT_KEY: &str = "__microclaw_auth";
+
+pub fn auth_context_from_input(input: &serde_json::Value) -> Option<ToolAuthContext> {
+    let ctx = input.get(AUTH_CONTEXT_KEY)?;
+    let caller_channel = ctx
+        .get("caller_channel")
+        .and_then(|v| v.as_str())
+        .unwrap_or("telegram")
+        .to_string();
+    let caller_chat_id = ctx.get("caller_chat_id")?.as_i64()?;
+    let control_chat_ids = ctx
+        .get("control_chat_ids")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|x| x.as_i64()).collect())
+        .unwrap_or_default();
+    Some(ToolAuthContext {
+        caller_channel,
+        caller_chat_id,
+        control_chat_ids,
+    })
+}
+
+pub fn authorize_chat_access(input: &serde_json::Value, target_chat_id: i64) -> Result<(), String> {
+    if let Some(auth) = auth_context_from_input(input) {
+        if !auth.can_access_chat(target_chat_id) {
+            return Err(format!(
+                "Permission denied: chat {} cannot operate on chat {}",
+                auth.caller_chat_id, target_chat_id
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub fn inject_auth_context(input: serde_json::Value, auth: &ToolAuthContext) -> serde_json::Value {
+    let mut obj = match input {
+        serde_json::Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    };
+    obj.insert(
+        AUTH_CONTEXT_KEY.to_string(),
+        json!({
+            "caller_channel": auth.caller_channel,
+            "caller_chat_id": auth.caller_chat_id,
+            "control_chat_ids": auth.control_chat_ids,
+        }),
+    );
+    serde_json::Value::Object(obj)
+}
+
+#[async_trait]
+pub trait Tool: Send + Sync {
+    fn name(&self) -> &str;
+    fn definition(&self) -> ToolDefinition;
+    async fn execute(&self, input: serde_json::Value) -> ToolResult;
+}
+
+pub fn resolve_tool_path(working_dir: &Path, path: &str) -> PathBuf {
+    let candidate = PathBuf::from(path);
+    if candidate.is_absolute() {
+        candidate
+    } else {
+        working_dir.join(candidate)
+    }
+}
+
+fn sanitize_channel_segment(channel: &str) -> String {
+    let mut out = String::with_capacity(channel.len());
+    for c in channel.chars() {
+        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "unknown".to_string()
+    } else {
+        out
+    }
+}
+
+fn chat_working_dir(base_working_dir: &Path, channel: &str, chat_id: i64) -> PathBuf {
+    let chat_segment = if chat_id < 0 {
+        format!("neg{}", chat_id.unsigned_abs())
+    } else {
+        chat_id.to_string()
+    };
+    base_working_dir
+        .join("chat")
+        .join(sanitize_channel_segment(channel))
+        .join(chat_segment)
+}
+
+pub fn resolve_tool_working_dir(
+    base_working_dir: &Path,
+    isolation: WorkingDirIsolation,
+    input: &serde_json::Value,
+) -> PathBuf {
+    let resolved = match isolation {
+        WorkingDirIsolation::Shared => base_working_dir.join("shared"),
+        WorkingDirIsolation::Chat => auth_context_from_input(input)
+            .map(|auth| {
+                chat_working_dir(base_working_dir, &auth.caller_channel, auth.caller_chat_id)
+            })
+            .unwrap_or_else(|| base_working_dir.join("shared")),
+    };
+    let _ = std::fs::create_dir_all(&resolved);
+    resolved
+}
+
+fn requires_high_risk_approval(name: &str, auth: &ToolAuthContext) -> bool {
+    tool_risk(name) == ToolRisk::High && (auth.caller_channel == "web" || auth.is_control_chat())
+}
+
+fn approval_key(auth: &ToolAuthContext, tool_name: &str) -> String {
+    format!(
+        "{}:{}:{}",
+        auth.caller_channel, auth.caller_chat_id, tool_name
+    )
+}
+
+fn pending_approvals() -> &'static Mutex<HashMap<String, Instant>> {
+    static PENDING: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    PENDING.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn require_high_risk_approval(name: &str, auth: &ToolAuthContext) -> Option<ToolResult> {
+    if !requires_high_risk_approval(name, auth) {
+        return None;
+    }
+
+    let key = approval_key(auth, name);
+    let mut pending = pending_approvals()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    if let Some(&created_at) = pending.get(&key) {
+        if created_at.elapsed().as_secs() < 120 {
+            tracing::warn!(
+                tool = name,
+                channel = auth.caller_channel.as_str(),
+                chat_id = auth.caller_chat_id,
+                elapsed_secs = created_at.elapsed().as_secs(),
+                "Auto-approved high-risk tool on retry"
+            );
+            pending.remove(&key);
+            None
+        } else {
+            pending.insert(key, Instant::now());
+            Some(
+                ToolResult::error(format!(
+                    "Approval expired for high-risk tool '{name}' (risk: {}). Re-run the same tool call to confirm.",
+                    tool_risk(name).as_str(),
+                ))
+                .with_error_type("approval_required"),
+            )
+        }
+    } else {
+        pending.insert(key, Instant::now());
+        Some(
+            ToolResult::error(format!(
+                "Approval required for high-risk tool '{name}' (risk: {}). Re-run the same tool call to confirm.",
+                tool_risk(name).as_str(),
+            ))
+            .with_error_type("approval_required"),
+        )
+    }
+}
+
+pub fn schema_object(properties: serde_json::Value, required: &[&str]) -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": properties,
+        "required": required,
+    })
+}

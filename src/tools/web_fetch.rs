@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use super::{schema_object, Tool, ToolResult};
-use crate::llm_types::ToolDefinition;
+use microclaw_core::llm_types::ToolDefinition;
 
 pub struct WebFetchTool;
 

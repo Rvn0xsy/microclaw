@@ -14,8 +14,8 @@ use crate::codex_auth::{
 use crate::config::Config;
 #[cfg(test)]
 use crate::config::WorkingDirIsolation;
-use crate::error::MicroClawError;
-use crate::llm_types::{
+use microclaw_core::error::MicroClawError;
+use microclaw_core::llm_types::{
     ContentBlock, ImageSource, Message, MessageContent, MessagesRequest, MessagesResponse,
     ResponseContentBlock, ToolDefinition, Usage,
 };

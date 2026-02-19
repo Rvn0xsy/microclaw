@@ -1,4 +1,3 @@
-pub mod delivery;
 pub mod discord;
 pub mod feishu;
 pub mod slack;
