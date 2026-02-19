@@ -17,7 +17,7 @@ Usage:
 
 Commands:
   start      Start runtime (enabled channels)
-  setup      Full-screen setup wizard
+  setup      Full-screen setup wizard (or `setup --enable-sandbox`)
   doctor     Preflight diagnostics
   hooks      Manage runtime hooks (list/info/enable/disable)
   skill      Manage ClawHub skills (search/install/list/inspect)
@@ -220,11 +220,24 @@ async fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         Some("setup") => {
-            let saved = setup::run_setup_wizard()?;
-            if saved {
-                println!("Setup saved to microclaw.config.yaml");
+            let setup_args = &args[2..];
+            if setup_args.iter().any(|a| a == "--enable-sandbox") {
+                let path = setup::enable_sandbox_in_config()?;
+                println!("Sandbox enabled in {path}");
+                if !setup_args.iter().any(|a| a == "--yes" || a == "-y")
+                    && !setup_args.iter().any(|a| a == "--quiet")
+                {
+                    println!(
+                        "Tip: run `microclaw doctor sandbox` to verify docker runtime and image readiness."
+                    );
+                }
             } else {
-                println!("Setup canceled");
+                let saved = setup::run_setup_wizard()?;
+                if saved {
+                    println!("Setup saved to microclaw.config.yaml");
+                } else {
+                    println!("Setup canceled");
+                }
             }
             return Ok(());
         }

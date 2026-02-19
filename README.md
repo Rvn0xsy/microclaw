@@ -82,6 +82,12 @@ microclaw doctor --json
 
 Checks include PATH, shell runtime, `agent-browser`, PowerShell policy (Windows), and MCP command dependencies from `<data_dir>/mcp.json`.
 
+Sandbox-only diagnostics:
+
+```sh
+microclaw doctor sandbox
+```
+
 ### Uninstall (script)
 
 macOS/Linux:
@@ -604,6 +610,7 @@ All configuration is via `microclaw.config.yaml`:
 | `working_dir` | No | `~/.microclaw/working_dir` | Default working directory for tool operations; relative paths in `bash/read_file/write_file/edit_file/glob/grep` resolve from here |
 | `working_dir_isolation` | No | `chat` | Working directory isolation mode for `bash/read_file/write_file/edit_file/glob/grep`: `shared` uses `working_dir/shared`, `chat` isolates each chat under `working_dir/chat/<channel>/<chat_id>` |
 | `sandbox.mode` | No | `off` | Container sandbox mode for bash tool execution: `off` runs on host; `all` routes bash commands into docker containers |
+| `sandbox.mount_allowlist_path` | No | unset | Optional external mount allowlist file (one allowed root path per line) |
 | `max_tokens` | No | `8192` | Max tokens per model response |
 | `max_tool_iterations` | No | `100` | Max tool-use loop iterations per message |
 | `max_document_size_mb` | No | `100` | Maximum allowed size for inbound Telegram documents; larger files are rejected with a hint message |
@@ -630,6 +637,13 @@ Use this when you want `bash` tool calls to run in Docker containers instead of 
 
 Quick config:
 
+```sh
+microclaw setup --enable-sandbox
+microclaw doctor sandbox
+```
+
+Or configure manually:
+
 ```yaml
 sandbox:
   mode: "all"
@@ -638,6 +652,8 @@ sandbox:
   container_prefix: "microclaw-sandbox"
   no_network: true
   require_runtime: false
+  # optional external allowlist file
+  # mount_allowlist_path: "~/.config/microclaw/mount-allowlist.txt"
 ```
 
 How to test:
@@ -657,6 +673,9 @@ Notes:
 - If `mode: "all"` and Docker is unavailable:
   - `require_runtime: false` -> fallback to host with warning.
   - `require_runtime: true` -> command fails fast.
+- Optional hardening:
+  - `~/.config/microclaw/mount-allowlist.txt` for sandbox mount roots.
+  - `~/.config/microclaw/path-allowlist.txt` for file tool path roots.
 
 ### Supported `llm_provider` values
 

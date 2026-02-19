@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::config::Config;
+use crate::config::SandboxMode;
 use crate::mcp::McpConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -98,14 +99,19 @@ impl DoctorReport {
 
 pub fn run_cli(args: &[String]) -> anyhow::Result<()> {
     let json_output = args.iter().any(|a| a == "--json");
+    let sandbox_only = args.iter().any(|a| a == "sandbox");
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!(
-            "Usage: microclaw doctor [--json]\n\nChecks PATH, shell/runtime dependencies, browser automation prerequisites, and MCP command dependencies."
+            "Usage: microclaw doctor [sandbox] [--json]\n\nChecks PATH, shell/runtime dependencies, browser automation prerequisites, MCP command dependencies, and sandbox readiness."
         );
         return Ok(());
     }
 
-    let report = build_report();
+    let report = if sandbox_only {
+        build_sandbox_report()
+    } else {
+        build_report()
+    };
 
     if json_output {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -141,6 +147,26 @@ fn build_report() -> DoctorReport {
     check_browser_dependency(&mut report);
     check_mcp_dependencies(&mut report);
 
+    report
+}
+
+fn build_sandbox_report() -> DoctorReport {
+    let mut report = DoctorReport::new();
+    report.push(
+        "env.platform",
+        "Platform",
+        CheckStatus::Pass,
+        format!(
+            "os={} arch={} wsl={}",
+            report.platform, report.arch, report.in_wsl
+        ),
+        None,
+    );
+    check_config(&mut report);
+    check_sandbox_config(&mut report);
+    check_docker_runtime(&mut report);
+    check_sandbox_image(&mut report);
+    check_mount_allowlist(&mut report);
     report
 }
 
@@ -428,6 +454,221 @@ fn check_mcp_dependencies(report: &mut DoctorReport) {
     }
 }
 
+fn check_sandbox_config(report: &mut DoctorReport) {
+    let config = match Config::load() {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            report.push(
+                "sandbox.config",
+                "Sandbox config",
+                CheckStatus::Warn,
+                format!("config unavailable: {err}"),
+                Some("Run `microclaw setup` first.".to_string()),
+            );
+            return;
+        }
+    };
+    let mode_label = match config.sandbox.mode {
+        SandboxMode::Off => "off",
+        SandboxMode::All => "all",
+    };
+    report.push(
+        "sandbox.mode",
+        "Sandbox mode",
+        if matches!(config.sandbox.mode, SandboxMode::All) {
+            CheckStatus::Pass
+        } else {
+            CheckStatus::Warn
+        },
+        format!(
+            "mode={} backend={:?} no_network={} require_runtime={}",
+            mode_label,
+            config.sandbox.backend,
+            config.sandbox.no_network,
+            config.sandbox.require_runtime
+        ),
+        if matches!(config.sandbox.mode, SandboxMode::Off) {
+            Some("Enable quickly: `microclaw setup --enable-sandbox`.".to_string())
+        } else {
+            None
+        },
+    );
+}
+
+fn check_docker_runtime(report: &mut DoctorReport) {
+    if !command_exists("docker") {
+        report.push(
+            "sandbox.docker_cli",
+            "Docker CLI",
+            CheckStatus::Fail,
+            "docker command not found".to_string(),
+            Some(
+                "Install Docker Desktop or docker engine and ensure `docker` is in PATH."
+                    .to_string(),
+            ),
+        );
+        return;
+    }
+    report.push(
+        "sandbox.docker_cli",
+        "Docker CLI",
+        CheckStatus::Pass,
+        "docker command found".to_string(),
+        None,
+    );
+    let output = std::process::Command::new("docker")
+        .args(["info", "--format", "{{.ServerVersion}}"])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => {
+            let version = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            report.push(
+                "sandbox.docker_runtime",
+                "Docker runtime",
+                CheckStatus::Pass,
+                format!("running (server={version})"),
+                None,
+            );
+        }
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            report.push(
+                "sandbox.docker_runtime",
+                "Docker runtime",
+                CheckStatus::Fail,
+                if err.is_empty() {
+                    "docker info failed".to_string()
+                } else {
+                    format!("docker info failed: {err}")
+                },
+                Some("Start Docker runtime and verify local permissions.".to_string()),
+            );
+        }
+        Err(err) => {
+            report.push(
+                "sandbox.docker_runtime",
+                "Docker runtime",
+                CheckStatus::Fail,
+                format!("docker info failed: {err}"),
+                Some("Start Docker runtime and verify local permissions.".to_string()),
+            );
+        }
+    }
+}
+
+fn check_sandbox_image(report: &mut DoctorReport) {
+    let config = match Config::load() {
+        Ok(cfg) => cfg,
+        Err(_) => return,
+    };
+    let image = config.sandbox.image.trim();
+    if image.is_empty() {
+        report.push(
+            "sandbox.image",
+            "Sandbox image",
+            CheckStatus::Warn,
+            "sandbox.image is empty".to_string(),
+            Some("Set sandbox.image to a valid image tag (for example: ubuntu:25.10).".to_string()),
+        );
+        return;
+    }
+    if !command_exists("docker") {
+        report.push(
+            "sandbox.image",
+            "Sandbox image",
+            CheckStatus::Warn,
+            format!("image={image} (docker unavailable, skipped image check)"),
+            Some("Install/start Docker, then run `docker pull {image}`.".to_string()),
+        );
+        return;
+    }
+    let output = std::process::Command::new("docker")
+        .args(["image", "inspect", image])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => report.push(
+            "sandbox.image",
+            "Sandbox image",
+            CheckStatus::Pass,
+            format!("{image} is available locally"),
+            None,
+        ),
+        Ok(_) => report.push(
+            "sandbox.image",
+            "Sandbox image",
+            CheckStatus::Warn,
+            format!("{image} is not present locally"),
+            Some(format!("Pull image: `docker pull {image}`")),
+        ),
+        Err(err) => report.push(
+            "sandbox.image",
+            "Sandbox image",
+            CheckStatus::Warn,
+            format!("failed to check image '{image}': {err}"),
+            Some(format!("Pull image manually: `docker pull {image}`")),
+        ),
+    }
+}
+
+fn check_mount_allowlist(report: &mut DoctorReport) {
+    let config = match Config::load() {
+        Ok(cfg) => cfg,
+        Err(_) => return,
+    };
+    let allowlist = config
+        .sandbox
+        .mount_allowlist_path
+        .map(PathBuf::from)
+        .or_else(default_mount_allowlist_path);
+    let Some(path) = allowlist else {
+        report.push(
+            "sandbox.mount_allowlist",
+            "Mount allowlist",
+            CheckStatus::Miss,
+            "no allowlist path configured".to_string(),
+            Some("Set sandbox.mount_allowlist_path to an external file with one allowed root path per line.".to_string()),
+        );
+        return;
+    };
+    if path.exists() {
+        let has_entries = std::fs::read_to_string(&path)
+            .ok()
+            .map(|s| {
+                s.lines()
+                    .map(str::trim)
+                    .any(|line| !line.is_empty() && !line.starts_with('#'))
+            })
+            .unwrap_or(false);
+        report.push(
+            "sandbox.mount_allowlist",
+            "Mount allowlist",
+            if has_entries {
+                CheckStatus::Pass
+            } else {
+                CheckStatus::Warn
+            },
+            format!("allowlist file: {}", path.display()),
+            if has_entries {
+                None
+            } else {
+                Some("Add at least one allowed root path to the allowlist file.".to_string())
+            },
+        );
+    } else {
+        report.push(
+            "sandbox.mount_allowlist",
+            "Mount allowlist",
+            CheckStatus::Miss,
+            format!("allowlist file not found: {}", path.display()),
+            Some("Create the file and list one allowed root path per line.".to_string()),
+        );
+    }
+}
+
+fn default_mount_allowlist_path() -> Option<PathBuf> {
+    user_home_dir().map(|h| h.join(".config/microclaw/mount-allowlist.txt"))
+}
+
 fn print_report(report: &DoctorReport) {
     println!("MicroClaw Doctor");
     println!(
@@ -634,6 +875,12 @@ fn classify_execution_policy(policy: &str) -> (CheckStatus, String, Option<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
+    use chrono::Utc;
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::test_support::env_lock()
+    }
 
     #[test]
     fn test_classify_execution_policy_restricted() {
@@ -655,5 +902,21 @@ mod tests {
         let p = PathBuf::from("/tmp/abc/");
         let normalized = normalize_path_for_compare(&p);
         assert!(!normalized.ends_with('/'));
+    }
+
+    #[test]
+    fn test_build_sandbox_report_has_mode_check() {
+        let _guard = env_lock();
+        let path = std::env::temp_dir().join(format!(
+            "microclaw_doctor_test_{}.yaml",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let cfg = Config::test_defaults();
+        cfg.save_yaml(path.to_string_lossy().as_ref()).unwrap();
+        std::env::set_var("MICROCLAW_CONFIG", &path);
+        let report = build_sandbox_report();
+        std::env::remove_var("MICROCLAW_CONFIG");
+        let _ = std::fs::remove_file(path);
+        assert!(report.checks.iter().any(|c| c.id == "sandbox.mode"));
     }
 }

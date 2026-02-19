@@ -1,4 +1,5 @@
 use super::*;
+use microclaw_tools::runtime::{tool_execution_policy, tool_risk};
 
 pub(super) async fn api_get_config(
     headers: HeaderMap,
@@ -28,6 +29,51 @@ pub(super) async fn api_config_self_check(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .is_some();
+    let sandbox_runtime_available = docker_runtime_available();
+    let sandbox_mode = match state.app_state.config.sandbox.mode {
+        crate::config::SandboxMode::All => "all",
+        crate::config::SandboxMode::Off => "off",
+    };
+    let execution_policy_items = [
+        "bash",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "glob",
+        "grep",
+    ]
+    .iter()
+    .map(|tool| {
+        json!({
+            "tool": tool,
+            "risk": tool_risk(tool).as_str(),
+            "policy": tool_execution_policy(tool).as_str()
+        })
+    })
+    .collect::<Vec<_>>();
+    let mount_allowlist_path = state
+        .app_state
+        .config
+        .sandbox
+        .mount_allowlist_path
+        .as_ref()
+        .map(std::path::PathBuf::from)
+        .or_else(default_mount_allowlist_path);
+    let mount_allowlist_status = mount_allowlist_path.as_ref().map(|p| {
+        let has_entries = std::fs::read_to_string(p)
+            .ok()
+            .map(|s| {
+                s.lines()
+                    .map(str::trim)
+                    .any(|line| !line.is_empty() && !line.starts_with('#'))
+            })
+            .unwrap_or(false);
+        json!({
+            "path": p,
+            "exists": p.exists(),
+            "has_entries": has_entries
+        })
+    });
 
     if state.legacy_auth_token.is_some() {
         warnings.push(ConfigWarning {
@@ -59,6 +105,41 @@ pub(super) async fn api_config_self_check(
                 "Web server host is '{}', verify network exposure and upstream protections.",
                 state.app_state.config.web_host
             ),
+        });
+    }
+    if matches!(
+        state.app_state.config.sandbox.mode,
+        crate::config::SandboxMode::Off
+    ) {
+        warnings.push(ConfigWarning {
+            code: "sandbox_disabled",
+            severity: "medium",
+            message: "Sandbox is disabled; bash tool executes on host by default.".to_string(),
+        });
+    } else if !sandbox_runtime_available {
+        warnings.push(ConfigWarning {
+            code: "sandbox_runtime_unavailable",
+            severity: if state.app_state.config.sandbox.require_runtime {
+                "high"
+            } else {
+                "medium"
+            },
+            message:
+                "Sandbox is enabled but docker runtime is unavailable; execution may fall back to host."
+                    .to_string(),
+        });
+    }
+    if mount_allowlist_status
+        .as_ref()
+        .and_then(|m| m.get("exists"))
+        .and_then(|v| v.as_bool())
+        != Some(true)
+    {
+        warnings.push(ConfigWarning {
+            code: "sandbox_mount_allowlist_missing",
+            severity: "medium",
+            message: "Sandbox mount allowlist file is missing; define explicit allowed roots."
+                .to_string(),
         });
     }
     if state.app_state.config.web_max_requests_per_window > 200 {
@@ -213,10 +294,34 @@ pub(super) async fn api_config_self_check(
     };
     Ok(Json(json!({
         "ok": true,
+        "security_posture": {
+            "sandbox_mode": sandbox_mode,
+            "sandbox_runtime_available": sandbox_runtime_available,
+            "sandbox_backend": format!("{:?}", state.app_state.config.sandbox.backend).to_lowercase(),
+            "sandbox_require_runtime": state.app_state.config.sandbox.require_runtime,
+            "execution_policies": execution_policy_items,
+            "mount_allowlist": mount_allowlist_status
+        },
         "risk_level": risk_level,
         "warning_count": warnings.len(),
         "warnings": warnings
     })))
+}
+
+fn docker_runtime_available() -> bool {
+    std::process::Command::new("docker")
+        .args(["info", "--format", "{{.ServerVersion}}"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+fn default_mount_allowlist_path() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("USERPROFILE").map(std::path::PathBuf::from))?;
+    Some(home.join(".config/microclaw/mount-allowlist.txt"))
 }
 
 pub(super) async fn api_update_config(

@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use microclaw_core::llm_types::ToolDefinition;
 use serde_json::json;
 
+use crate::sandbox::SandboxMode;
 use crate::types::WorkingDirIsolation;
 
 pub struct ToolResult {
@@ -71,6 +72,23 @@ impl ToolRisk {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolExecutionPolicy {
+    HostOnly,
+    SandboxOnly,
+    Dual,
+}
+
+impl ToolExecutionPolicy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ToolExecutionPolicy::HostOnly => "host-only",
+            ToolExecutionPolicy::SandboxOnly => "sandbox-only",
+            ToolExecutionPolicy::Dual => "dual",
+        }
+    }
+}
+
 pub fn tool_risk(name: &str) -> ToolRisk {
     match name {
         "bash" => ToolRisk::High,
@@ -86,6 +104,46 @@ pub fn tool_risk(name: &str) -> ToolRisk {
         | "structured_memory_delete"
         | "structured_memory_update" => ToolRisk::Medium,
         _ => ToolRisk::Low,
+    }
+}
+
+pub fn tool_execution_policy(name: &str) -> ToolExecutionPolicy {
+    match name {
+        "bash" => ToolExecutionPolicy::Dual,
+        "write_file" | "edit_file" => ToolExecutionPolicy::HostOnly,
+        _ => ToolExecutionPolicy::HostOnly,
+    }
+}
+
+pub fn validate_execution_policy(
+    name: &str,
+    sandbox_mode: SandboxMode,
+    sandbox_runtime_available: bool,
+) -> Result<(), String> {
+    let policy = tool_execution_policy(name);
+    match policy {
+        ToolExecutionPolicy::HostOnly => Ok(()),
+        ToolExecutionPolicy::SandboxOnly => {
+            if sandbox_mode == SandboxMode::All && sandbox_runtime_available {
+                Ok(())
+            } else {
+                Err(format!(
+                    "Tool '{name}' requires sandbox runtime (policy: {}). Enable sandbox and ensure docker runtime is available.",
+                    policy.as_str()
+                ))
+            }
+        }
+        ToolExecutionPolicy::Dual => {
+            if sandbox_mode == SandboxMode::All && !sandbox_runtime_available {
+                // Allowed by current fallback behavior, but explicit for observability.
+                tracing::warn!(
+                    tool = name,
+                    policy = policy.as_str(),
+                    "sandbox configured but runtime unavailable; falling back to host execution"
+                );
+            }
+            Ok(())
+        }
     }
 }
 
@@ -282,4 +340,28 @@ pub fn schema_object(properties: serde_json::Value, required: &[&str]) -> serde_
         "properties": properties,
         "required": required,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tool_execution_policy_levels() {
+        assert_eq!(tool_execution_policy("bash"), ToolExecutionPolicy::Dual);
+        assert_eq!(
+            tool_execution_policy("write_file"),
+            ToolExecutionPolicy::HostOnly
+        );
+        assert_eq!(
+            tool_execution_policy("read_file"),
+            ToolExecutionPolicy::HostOnly
+        );
+    }
+
+    #[test]
+    fn test_validate_execution_policy_dual_allows_fallback() {
+        let ok = validate_execution_policy("bash", SandboxMode::All, false);
+        assert!(ok.is_ok());
+    }
 }

@@ -23,6 +23,7 @@ import {
 } from '@assistant-ui/react-ui'
 import {
   Button,
+  Badge,
   Callout,
   Card,
   Dialog,
@@ -63,11 +64,33 @@ type ConfigWarning = {
   message?: string
 }
 
+type ExecutionPolicyItem = {
+  tool?: string
+  risk?: string
+  policy?: string
+}
+
+type MountAllowlistStatus = {
+  path?: string
+  exists?: boolean
+  has_entries?: boolean
+}
+
+type SecurityPosture = {
+  sandbox_mode?: 'off' | 'all' | string
+  sandbox_runtime_available?: boolean
+  sandbox_backend?: string
+  sandbox_require_runtime?: boolean
+  execution_policies?: ExecutionPolicyItem[]
+  mount_allowlist?: MountAllowlistStatus | null
+}
+
 type ConfigSelfCheck = {
   ok?: boolean
   risk_level?: 'none' | 'medium' | 'high' | string
   warning_count?: number
   warnings?: ConfigWarning[]
+  security_posture?: SecurityPosture
 }
 
 type ToolStartPayload = {
@@ -1455,6 +1478,24 @@ function App() {
                   Config self-check: risk={String(configSelfCheck.risk_level || 'none')}, warnings={Number(configSelfCheck.warning_count || 0)}.
                 </Callout.Text>
               </Callout.Root>
+            ) : null}
+            {configSelfCheck?.security_posture ? (
+              <Card className="mb-2 p-3">
+                <Text size="2" weight="bold">Security posture</Text>
+                <Text size="1" color="gray" className="mt-1 block">
+                  sandbox={String(configSelfCheck.security_posture.sandbox_mode || 'off')} | runtime={String(Boolean(configSelfCheck.security_posture.sandbox_runtime_available))} | backend={String(configSelfCheck.security_posture.sandbox_backend || 'auto')}
+                </Text>
+                <Text size="1" color="gray" className="mt-1 block">
+                  mount allowlist: {String(configSelfCheck.security_posture.mount_allowlist?.path || '(default)')} | exists={String(Boolean(configSelfCheck.security_posture.mount_allowlist?.exists))} | has_entries={String(Boolean(configSelfCheck.security_posture.mount_allowlist?.has_entries))}
+                </Text>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {(configSelfCheck.security_posture.execution_policies || []).map((p, idx) => (
+                    <Badge key={`${String(p.tool)}-${idx}`} color={p.risk === 'high' ? 'red' : p.risk === 'medium' ? 'orange' : 'gray'} variant="soft">
+                      {String(p.tool)}: {String(p.policy)}
+                    </Badge>
+                  ))}
+                </div>
+              </Card>
             ) : null}
             {configSelfCheckLoading ? (
               <Text size="1" color="gray" className="mb-2 block">Checking critical config risks...</Text>

@@ -32,9 +32,25 @@ const BLOCKED_FILES: &[&str] = &[
 /// Absolute paths that are always blocked.
 const BLOCKED_ABSOLUTE: &[&str] = &["/etc/shadow", "/etc/gshadow", "/etc/sudoers"];
 
+fn default_path_allowlist_path() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("USERPROFILE").map(std::path::PathBuf::from))?;
+    Some(home.join(".config/microclaw/path-allowlist.txt"))
+}
+
 /// Check if a path is blocked. Returns Err(message) if blocked.
 pub fn check_path(path: &str) -> Result<(), String> {
-    if is_blocked(Path::new(path)) {
+    let candidate = Path::new(path);
+    if let Err(err) = validate_symlink_safety(candidate) {
+        return Err(format!(
+            "Access denied: '{path}' symlink validation failed: {err}"
+        ));
+    }
+    if let Err(err) = validate_allowlist(candidate) {
+        return Err(format!("Access denied: {err}"));
+    }
+    if is_blocked(candidate) {
         Err(format!(
             "Access denied: '{}' is a sensitive path and cannot be accessed.",
             path
@@ -93,6 +109,83 @@ pub fn is_blocked(path: &Path) -> bool {
     }
 
     false
+}
+
+fn validate_symlink_safety(path: &Path) -> Result<(), String> {
+    let mut cur = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::RootDir => {
+                cur.push(Path::new("/"));
+            }
+            Component::Prefix(prefix) => {
+                cur.push(prefix.as_os_str());
+            }
+            Component::Normal(part) => {
+                cur.push(part);
+                if !cur.exists() {
+                    continue;
+                }
+                let meta = std::fs::symlink_metadata(&cur).map_err(|e| {
+                    format!("failed to inspect path component '{}': {e}", cur.display())
+                })?;
+                if meta.file_type().is_symlink() {
+                    if cur == Path::new("/tmp") || cur == Path::new("/var") {
+                        continue;
+                    }
+                    return Err(format!("symlink component detected at '{}'", cur.display()));
+                }
+            }
+            Component::CurDir | Component::ParentDir => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_allowlist(path: &Path) -> Result<(), String> {
+    if cfg!(test) {
+        let _ = path;
+        return Ok(());
+    }
+    let allowlist_path = std::env::var_os("MICROCLAW_PATH_ALLOWLIST")
+        .map(std::path::PathBuf::from)
+        .or_else(default_path_allowlist_path);
+    let Some(allowlist) = allowlist_path else {
+        return Ok(());
+    };
+    if !allowlist.exists() {
+        return Ok(());
+    }
+    let content = std::fs::read_to_string(&allowlist)
+        .map_err(|e| format!("failed reading allowlist '{}': {e}", allowlist.display()))?;
+    let canonical_target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut allowed_roots = Vec::new();
+    for raw in content.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let candidate = Path::new(line);
+        let canonical =
+            std::fs::canonicalize(candidate).unwrap_or_else(|_| candidate.to_path_buf());
+        allowed_roots.push(canonical);
+    }
+    if allowed_roots.is_empty() {
+        // Keep compatibility: treat empty allowlist as disabled.
+        return Ok(());
+    }
+    if allowed_roots
+        .iter()
+        .any(|root| canonical_target.starts_with(root))
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "'{}' is outside configured allowlist '{}'",
+            canonical_target.display(),
+            allowlist.display()
+        ))
+    }
 }
 
 /// Filter a list of paths, removing blocked ones. For glob results.
@@ -203,5 +296,21 @@ mod tests {
         assert_eq!(filtered.len(), 2);
         assert_eq!(filtered[0], "src/main.rs");
         assert_eq!(filtered[1], "README.md");
+    }
+
+    #[test]
+    fn test_symlink_rejected() {
+        let dir = std::env::temp_dir().join(format!("mc_pg_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("target.txt");
+        std::fs::write(&target, "ok").unwrap();
+        let link = dir.join("link.txt");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&target, &link).unwrap();
+        let err = check_path(link.to_string_lossy().as_ref()).unwrap_err();
+        assert!(err.contains("symlink"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

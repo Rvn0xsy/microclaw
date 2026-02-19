@@ -27,13 +27,16 @@ use microclaw_core::llm_types::ToolDefinition;
 use microclaw_storage::db::Database;
 pub use microclaw_tools::runtime::{
     auth_context_from_input, authorize_chat_access, resolve_tool_path, resolve_tool_working_dir,
-    schema_object, tool_risk, Tool, ToolAuthContext, ToolResult, ToolRisk,
+    schema_object, tool_execution_policy, tool_risk, validate_execution_policy, Tool,
+    ToolAuthContext, ToolResult, ToolRisk,
 };
 use microclaw_tools::runtime::{inject_auth_context, require_high_risk_approval};
-use microclaw_tools::sandbox::SandboxRouter;
+use microclaw_tools::sandbox::{SandboxMode, SandboxRouter};
 
 pub struct ToolRegistry {
     tools: Vec<Box<dyn Tool>>,
+    sandbox_mode: SandboxMode,
+    sandbox_runtime_available: bool,
     cached_definitions: OnceLock<Vec<ToolDefinition>>,
 }
 
@@ -55,10 +58,13 @@ impl ToolRegistry {
         );
         let skills_data_dir = config.skills_data_dir();
         let mut tools: Vec<Box<dyn Tool>> = vec![
-            Box::new(bash::BashTool::new_with_isolation(
-                &config.working_dir,
-                config.working_dir_isolation,
-            )),
+            Box::new(
+                bash::BashTool::new_with_isolation(
+                    &config.working_dir,
+                    config.working_dir_isolation,
+                )
+                .with_sandbox_router(sandbox_router.clone()),
+            ),
             Box::new(browser::BrowserTool::new(&config.data_dir)),
             Box::new(read_file::ReadFileTool::new_with_isolation(
                 &config.working_dir,
@@ -146,6 +152,8 @@ impl ToolRegistry {
 
         ToolRegistry {
             tools,
+            sandbox_mode: sandbox_router.mode(),
+            sandbox_runtime_available: sandbox_router.runtime_available(),
             cached_definitions: OnceLock::new(),
         }
     }
@@ -161,11 +169,15 @@ impl ToolRegistry {
             );
         }
         let skills_data_dir = config.skills_data_dir();
+        let sandbox_router = Arc::new(SandboxRouter::new(config.sandbox.clone(), &working_dir));
         let tools: Vec<Box<dyn Tool>> = vec![
-            Box::new(bash::BashTool::new_with_isolation(
-                &config.working_dir,
-                config.working_dir_isolation,
-            )),
+            Box::new(
+                bash::BashTool::new_with_isolation(
+                    &config.working_dir,
+                    config.working_dir_isolation,
+                )
+                .with_sandbox_router(sandbox_router.clone()),
+            ),
             Box::new(browser::BrowserTool::new(&config.data_dir)),
             Box::new(read_file::ReadFileTool::new_with_isolation(
                 &config.working_dir,
@@ -195,6 +207,8 @@ impl ToolRegistry {
         ];
         ToolRegistry {
             tools,
+            sandbox_mode: sandbox_router.mode(),
+            sandbox_runtime_available: sandbox_router.runtime_available(),
             cached_definitions: OnceLock::new(),
         }
     }
@@ -235,10 +249,23 @@ impl ToolRegistry {
         input: serde_json::Value,
         auth: &ToolAuthContext,
     ) -> ToolResult {
+        if let Err(msg) =
+            validate_execution_policy(name, self.sandbox_mode, self.sandbox_runtime_available)
+        {
+            return ToolResult::error(msg).with_error_type("execution_policy_blocked");
+        }
         if let Some(blocked) = require_high_risk_approval(name, auth) {
             return blocked;
         }
 
+        tracing::debug!(
+            tool = name,
+            risk = tool_risk(name).as_str(),
+            execution_policy = tool_execution_policy(name).as_str(),
+            sandbox_mode = ?self.sandbox_mode,
+            sandbox_runtime_available = self.sandbox_runtime_available,
+            "tool execution policy evaluated"
+        );
         let input = inject_auth_context(input, auth);
         self.execute(name, input).await
     }
@@ -388,6 +415,8 @@ mod tests {
     #[tokio::test]
     async fn test_high_risk_tool_requires_second_approval_on_web() {
         let registry = ToolRegistry {
+            sandbox_mode: SandboxMode::Off,
+            sandbox_runtime_available: false,
             cached_definitions: OnceLock::new(),
             tools: vec![Box::new(DummyTool {
                 tool_name: "bash".into(),
@@ -413,6 +442,8 @@ mod tests {
     #[tokio::test]
     async fn test_high_risk_tool_requires_second_approval_on_control_chat() {
         let registry = ToolRegistry {
+            sandbox_mode: SandboxMode::Off,
+            sandbox_runtime_available: false,
             cached_definitions: OnceLock::new(),
             tools: vec![Box::new(DummyTool {
                 tool_name: "bash".into(),
@@ -432,6 +463,8 @@ mod tests {
     #[tokio::test]
     async fn test_medium_risk_tool_no_second_approval() {
         let registry = ToolRegistry {
+            sandbox_mode: SandboxMode::Off,
+            sandbox_runtime_available: false,
             cached_definitions: OnceLock::new(),
             tools: vec![Box::new(DummyTool {
                 tool_name: "write_file".into(),

@@ -21,6 +21,7 @@ use crate::codex_auth::{
     codex_config_default_openai_base_url, is_openai_codex_provider, provider_allows_empty_api_key,
     resolve_openai_codex_auth,
 };
+use crate::config::{Config, SandboxBackend, SandboxMode};
 use microclaw_core::error::MicroClawError;
 use microclaw_core::text::floor_char_boundary;
 
@@ -111,15 +112,6 @@ const DYNAMIC_CHANNELS: &[DynamicChannelDef] = &[
 /// Build the setup-wizard field key from channel name + yaml key.
 fn dynamic_field_key(channel: &str, yaml_key: &str) -> String {
     format!("DYN_{}_{}", channel.to_uppercase(), yaml_key.to_uppercase())
-}
-
-fn docker_available_for_setup() -> bool {
-    std::process::Command::new("docker")
-        .args(["info", "--format", "{{.ServerVersion}}"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
 }
 
 fn default_data_dir_for_setup() -> String {
@@ -505,13 +497,7 @@ impl SetupApp {
                     value: existing
                         .get("SANDBOX_ENABLED")
                         .cloned()
-                        .unwrap_or_else(|| {
-                            if docker_available_for_setup() {
-                                "true".into()
-                            } else {
-                                "false".into()
-                            }
-                        }),
+                        .unwrap_or_else(|| "false".into()),
                     required: false,
                     secret: false,
                 },
@@ -1293,13 +1279,7 @@ impl SetupApp {
             "DATA_DIR" => default_data_dir_for_setup(),
             "TIMEZONE" => "UTC".into(),
             "WORKING_DIR" => default_working_dir_for_setup(),
-            "SANDBOX_ENABLED" => {
-                if docker_available_for_setup() {
-                    "true".into()
-                } else {
-                    "false".into()
-                }
-            }
+            "SANDBOX_ENABLED" => "false".into(),
             "REFLECTOR_ENABLED" => "true".into(),
             "REFLECTOR_INTERVAL_MINS" => "15".into(),
             "MEMORY_TOKEN_BUDGET" => "1500".into(),
@@ -2361,6 +2341,21 @@ pub fn run_setup_wizard() -> Result<bool, MicroClawError> {
     result
 }
 
+pub fn enable_sandbox_in_config() -> Result<String, MicroClawError> {
+    let Some(path) = Config::resolve_config_path()? else {
+        return Err(MicroClawError::Config(
+            "No microclaw.config.yaml found. Run `microclaw setup` first.".to_string(),
+        ));
+    };
+    let mut cfg = Config::load()?;
+    cfg.sandbox.mode = SandboxMode::All;
+    cfg.sandbox.backend = SandboxBackend::Auto;
+    cfg.sandbox.no_network = true;
+    cfg.sandbox.require_runtime = false;
+    cfg.save_yaml(&path.to_string_lossy())?;
+    Ok(path.to_string_lossy().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2423,6 +2418,35 @@ mod tests {
         assert!(backup2.is_some());
 
         let _ = fs::remove_file(&yaml_path);
+    }
+
+    #[test]
+    fn test_enable_sandbox_in_config_updates_mode() {
+        let _guard = env_lock();
+        let path = std::env::temp_dir().join(format!(
+            "microclaw_setup_enable_sandbox_{}.yaml",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::write(
+            &path,
+            r#"
+llm_provider: "anthropic"
+api_key: "k"
+model: "claude-sonnet-4-5-20250929"
+telegram_bot_token: "tok"
+bot_username: "bot"
+sandbox:
+  mode: "off"
+"#,
+        )
+        .unwrap();
+        std::env::set_var("MICROCLAW_CONFIG", &path);
+        let out = enable_sandbox_in_config().unwrap();
+        assert!(out.contains(path.to_string_lossy().as_ref()));
+        let cfg = Config::load().unwrap();
+        assert!(matches!(cfg.sandbox.mode, SandboxMode::All));
+        std::env::remove_var("MICROCLAW_CONFIG");
+        let _ = std::fs::remove_file(path);
     }
     #[test]
     fn test_save_config_yaml_preserves_discord_token_without_enabled_channels() {

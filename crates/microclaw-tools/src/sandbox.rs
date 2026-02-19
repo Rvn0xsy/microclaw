@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,6 +33,10 @@ fn default_sandbox_require_runtime() -> bool {
     false
 }
 
+fn default_sandbox_mount_allowlist_path() -> Option<String> {
+    None
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SandboxMode {
@@ -61,6 +65,8 @@ pub struct SandboxConfig {
     pub no_network: bool,
     #[serde(default = "default_sandbox_require_runtime")]
     pub require_runtime: bool,
+    #[serde(default = "default_sandbox_mount_allowlist_path")]
+    pub mount_allowlist_path: Option<String>,
     #[serde(default)]
     pub memory_limit: Option<String>,
     #[serde(default)]
@@ -78,6 +84,7 @@ impl Default for SandboxConfig {
             container_prefix: default_sandbox_container_prefix(),
             no_network: default_sandbox_no_network(),
             require_runtime: default_sandbox_require_runtime(),
+            mount_allowlist_path: default_sandbox_mount_allowlist_path(),
             memory_limit: None,
             cpu_quota: None,
             pids_limit: None,
@@ -265,7 +272,7 @@ pub struct SandboxRouter {
 
 impl SandboxRouter {
     pub fn new(config: SandboxConfig, working_dir: &Path) -> Self {
-        let mount_dir = resolve_mount_dir(working_dir);
+        let mount_dir = resolve_mount_dir(working_dir, &config);
         let backend: Arc<dyn Sandbox> = match config.backend {
             SandboxBackend::Auto | SandboxBackend::Docker => {
                 if docker_available() {
@@ -288,6 +295,10 @@ impl SandboxRouter {
 
     pub fn backend_name(&self) -> &'static str {
         self.backend.backend_name()
+    }
+
+    pub fn runtime_available(&self) -> bool {
+        self.backend.is_real()
     }
 
     pub async fn exec(
@@ -343,9 +354,20 @@ fn docker_available() -> bool {
         .is_ok_and(|s| s.success())
 }
 
-fn resolve_mount_dir(working_dir: &Path) -> PathBuf {
+fn resolve_mount_dir(working_dir: &Path, config: &SandboxConfig) -> PathBuf {
     let _ = std::fs::create_dir_all(working_dir);
-    std::fs::canonicalize(working_dir).unwrap_or_else(|_| working_dir.to_path_buf())
+    let canonical =
+        std::fs::canonicalize(working_dir).unwrap_or_else(|_| working_dir.to_path_buf());
+    if let Err(err) = validate_mount_dir(&canonical, config) {
+        tracing::warn!(
+            path = %canonical.display(),
+            error = %err,
+            "sandbox mount dir failed validation; falling back to raw working dir"
+        );
+        working_dir.to_path_buf()
+    } else {
+        canonical
+    }
 }
 
 fn sanitize_segment(input: &str) -> String {
@@ -361,6 +383,118 @@ fn sanitize_segment(input: &str) -> String {
         "default".into()
     } else {
         out
+    }
+}
+
+const MOUNT_BLOCKED_COMPONENTS: &[&str] = &[
+    ".ssh", ".gnupg", ".aws", ".azure", ".gcloud", ".kube", ".docker",
+];
+
+const MOUNT_BLOCKED_FILENAMES: &[&str] = &[
+    ".env",
+    ".env.local",
+    ".env.production",
+    ".env.development",
+    ".netrc",
+    ".npmrc",
+    "id_rsa",
+    "id_ed25519",
+    "credentials",
+    "private_key",
+];
+
+fn validate_mount_dir(path: &Path, config: &SandboxConfig) -> Result<()> {
+    if contains_symlink_component(path)? {
+        bail!("mount path contains symlink component");
+    }
+    if has_sensitive_mount_component(path) {
+        bail!("mount path contains sensitive component");
+    }
+    validate_mount_allowlist(path, config)
+}
+
+fn contains_symlink_component(path: &Path) -> Result<bool> {
+    let mut cur = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::RootDir => {
+                cur.push(Path::new("/"));
+            }
+            Component::Prefix(prefix) => cur.push(prefix.as_os_str()),
+            Component::Normal(part) => {
+                cur.push(part);
+                let meta = std::fs::symlink_metadata(&cur)
+                    .with_context(|| format!("failed to stat mount path '{}'", cur.display()))?;
+                if meta.file_type().is_symlink() {
+                    return Ok(true);
+                }
+            }
+            Component::CurDir | Component::ParentDir => {}
+        }
+    }
+    Ok(false)
+}
+
+fn has_sensitive_mount_component(path: &Path) -> bool {
+    for component in path.components() {
+        let Component::Normal(segment) = component else {
+            continue;
+        };
+        let part = segment.to_string_lossy().to_string();
+        if MOUNT_BLOCKED_COMPONENTS.contains(&part.as_str()) {
+            return true;
+        }
+        if MOUNT_BLOCKED_FILENAMES.contains(&part.as_str()) {
+            return true;
+        }
+    }
+    false
+}
+
+fn default_allowlist_path() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))?;
+    Some(home.join(".config/microclaw/mount-allowlist.txt"))
+}
+
+fn validate_mount_allowlist(path: &Path, config: &SandboxConfig) -> Result<()> {
+    let allowlist_path = config
+        .mount_allowlist_path
+        .as_ref()
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("MICROCLAW_SANDBOX_MOUNT_ALLOWLIST").map(PathBuf::from))
+        .or_else(default_allowlist_path);
+    let Some(file_path) = allowlist_path else {
+        return Ok(());
+    };
+    if !file_path.exists() {
+        return Ok(());
+    }
+    let content = std::fs::read_to_string(&file_path)
+        .with_context(|| format!("failed reading mount allowlist '{}'", file_path.display()))?;
+    let mut allowed_roots = Vec::new();
+    for raw in content.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let candidate = PathBuf::from(line);
+        let canonical = std::fs::canonicalize(&candidate).unwrap_or(candidate);
+        allowed_roots.push(canonical);
+    }
+    if allowed_roots.is_empty() {
+        // Keep compatibility: treat empty allowlist as disabled.
+        return Ok(());
+    }
+    if allowed_roots.iter().any(|root| path.starts_with(root)) {
+        Ok(())
+    } else {
+        bail!(
+            "mount path '{}' is not allowed by '{}'",
+            path.display(),
+            file_path.display()
+        )
     }
 }
 
