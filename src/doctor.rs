@@ -875,6 +875,12 @@ fn classify_execution_policy(policy: &str) -> (CheckStatus, String, Option<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
+    use chrono::Utc;
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::test_support::env_lock()
+    }
 
     #[test]
     fn test_classify_execution_policy_restricted() {
@@ -900,7 +906,17 @@ mod tests {
 
     #[test]
     fn test_build_sandbox_report_has_mode_check() {
+        let _guard = env_lock();
+        let path = std::env::temp_dir().join(format!(
+            "microclaw_doctor_test_{}.yaml",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let cfg = Config::test_defaults();
+        cfg.save_yaml(path.to_string_lossy().as_ref()).unwrap();
+        std::env::set_var("MICROCLAW_CONFIG", &path);
         let report = build_sandbox_report();
+        std::env::remove_var("MICROCLAW_CONFIG");
+        let _ = std::fs::remove_file(path);
         assert!(report.checks.iter().any(|c| c.id == "sandbox.mode"));
     }
 }
