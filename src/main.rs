@@ -20,6 +20,7 @@ Commands:
   setup      Full-screen setup wizard
   doctor     Preflight diagnostics
   hooks      Manage runtime hooks (list/info/enable/disable)
+  skill      Manage ClawHub skills (search/install/list/inspect)
   gateway    Manage service (install/start/stop/status/logs)
   version    Show version
   help       Show this help
@@ -233,7 +234,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Some("skill") => {
             let config = Config::load()?;
-            microclaw::clawhub::cli::handle_skill_cli(&args[2..], &config)?;
+            microclaw::clawhub::cli::handle_skill_cli(&args[2..], &config).await?;
             return Ok(());
         }
         Some("hooks") => {

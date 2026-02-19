@@ -504,6 +504,17 @@ async fn handle_slack_message(
         let _ = send_slack_response(bot_token, channel, &formatted).await;
         return;
     }
+    if trimmed == "/reload-skills" {
+        let reloaded = app_state.skills.reload();
+        let count = reloaded.len();
+        let _ = send_slack_response(
+            bot_token,
+            channel,
+            &format!("Reloaded {} skills from disk.", count),
+        )
+        .await;
+        return;
+    }
     if trimmed == "/archive" {
         if let Ok(Some((json, _))) =
             call_blocking(app_state.db.clone(), move |db| db.load_session(chat_id)).await

@@ -6,7 +6,6 @@ use async_trait::async_trait;
 use microclaw_clawhub::install::InstallOptions;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::runtime::Runtime;
 
 pub struct ClawHubSearchTool {
     gateway: Arc<dyn ClawHubGateway>,
@@ -36,7 +35,7 @@ impl Tool for ClawHubSearchTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "clawhub_search".to_string(),
-            description: "Search the ClawHub registry for skills matching a query.".to_string(),
+            description: "Search ClawHub registry for available skills. Use this instead of running clawdhub CLI commands - this is the built-in way to discover skills.".to_string(),
             input_schema: schema_object(
                 serde_json::json!({
                     "query": {
@@ -68,12 +67,8 @@ impl Tool for ClawHubSearchTool {
             .and_then(|v| v.as_str())
             .unwrap_or("trending");
 
-        let rt = match Runtime::new() {
-            Ok(rt) => rt,
-            Err(e) => return ToolResult::error(e.to_string()),
-        };
         let gateway = self.gateway.clone();
-        let results = rt.block_on(async move { gateway.search(query, limit.min(50), sort).await });
+        let results = gateway.search(query, limit.min(50), sort).await;
 
         match results {
             Ok(results) => {
@@ -125,9 +120,8 @@ impl Tool for ClawHubInstallTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "clawhub_install".to_string(),
-            description:
-                "Download and install a skill from ClawHub into ~/.microclaw/skills/ (or configured skills dir)."
-                    .to_string(),
+            description: "Install a skill from ClawHub into ~/.microclaw/skills/ (or configured skills dir). Use this instead of running clawdhub CLI commands - this is the built-in way to install ClawHub skills."
+                .to_string(),
             input_schema: schema_object(
                 serde_json::json!({
                     "slug": {
@@ -159,18 +153,17 @@ impl Tool for ClawHubInstallTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let rt = match Runtime::new() {
-            Ok(rt) => rt,
-            Err(e) => return ToolResult::error(e.to_string()),
-        };
         let gateway = self.gateway.clone();
-        let result = rt.block_on(async {
-            let options = InstallOptions {
-                force,
-                skip_gates: false,
-                skip_security: self.skip_security,
-            };
-            gateway
+        let options = InstallOptions {
+            force,
+            skip_gates: false,
+            skip_security: self.skip_security,
+        };
+
+        // Retry up to 3 times with brief delays for transient failures
+        let mut last_error = None;
+        for attempt in 1..=3 {
+            match gateway
                 .install(
                     slug,
                     version,
@@ -179,21 +172,27 @@ impl Tool for ClawHubInstallTool {
                     &options,
                 )
                 .await
-        });
-
-        match result {
-            Ok(install_result) => {
-                if install_result.success {
-                    let mut msg = install_result.message;
-                    if install_result.requires_restart {
+            {
+                Ok(result) => {
+                    let mut msg = result.message;
+                    if result.requires_restart {
                         msg.push_str("\nRestart MicroClaw or run /reload-skills to activate.");
                     }
-                    ToolResult::success(msg)
-                } else {
-                    ToolResult::error(install_result.message)
+                    return ToolResult::success(msg);
+                }
+                Err(e) => {
+                    last_error = Some(e);
+                    if attempt < 3 {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                    }
                 }
             }
-            Err(e) => ToolResult::error(e.to_string()),
+        }
+
+        // All retries failed - return the last error
+        match last_error {
+            Some(e) => ToolResult::error(e.to_string()),
+            None => ToolResult::error("Unexpected error during installation".into()),
         }
     }
 }

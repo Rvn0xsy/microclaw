@@ -235,6 +235,16 @@ async fn handle_message(
         return Ok(());
     }
 
+    // Handle /reload-skills command — reload skills from disk
+    if text.trim() == "/reload-skills" {
+        let reloaded = state.skills.reload();
+        let count = reloaded.len();
+        let _ = bot
+            .send_message(msg.chat.id, format!("Reloaded {} skills from disk.", count))
+            .await;
+        return Ok(());
+    }
+
     // Handle /archive command — archive current session to markdown
     if text.trim() == "/archive" {
         let external_chat_id = raw_chat_id.to_string();
@@ -416,7 +426,14 @@ async fn handle_message(
 
     // Handle voice messages
     if let Some(voice) = msg.voice() {
-        if let Some(ref openai_key) = state.config.openai_api_key {
+        // Check if voice transcription is configured
+        let can_transcribe = if state.config.voice_provider == "local" {
+            state.config.voice_transcription_command.is_some()
+        } else {
+            state.config.openai_api_key.is_some()
+        };
+
+        if can_transcribe {
             match download_telegram_file(&bot, &voice.file.id.0).await {
                 Ok(bytes) => {
                     let sender_name = msg
@@ -424,7 +441,7 @@ async fn handle_message(
                         .as_ref()
                         .map(|u| u.username.clone().unwrap_or_else(|| u.first_name.clone()))
                         .unwrap_or_else(|| "Unknown".into());
-                    match microclaw_app::transcribe::transcribe_audio(openai_key, &bytes).await {
+                    match transcribe_audio(&state.config, &bytes).await {
                         Ok(transcription) => {
                             text = format!(
                                 "[voice message from {}]: {}",
@@ -433,7 +450,7 @@ async fn handle_message(
                             );
                         }
                         Err(e) => {
-                            error!("Whisper transcription failed: {e}");
+                            error!("Voice transcription failed: {e}");
                             text = format!(
                                 "[voice message from {}]: [transcription failed: {e}]",
                                 sanitize_xml(&sender_name)
@@ -446,12 +463,13 @@ async fn handle_message(
                 }
             }
         } else {
-            let _ = bot
-                .send_message(
-                    msg.chat.id,
-                    "Voice messages not supported (no Whisper API key configured)",
-                )
-                .await;
+            let provider = &state.config.voice_provider;
+            let msg_text = if provider == "local" {
+                "Voice messages not supported (local transcription configured but voice_transcription_command not set)"
+            } else {
+                "Voice messages not supported (no Whisper API key configured)"
+            };
+            let _ = bot.send_message(msg.chat.id, msg_text).await;
             return Ok(());
         }
     }
@@ -688,6 +706,60 @@ async fn download_telegram_file(
     let mut buf = Vec::new();
     teloxide::net::Download::download_file(bot, &file.path, &mut buf).await?;
     Ok(buf)
+}
+
+/// Transcribe audio using configured provider (openai or local)
+pub async fn transcribe_audio(
+    config: &crate::config::Config,
+    audio_bytes: &[u8],
+) -> Result<String, String> {
+    let provider = &config.voice_provider;
+
+    if provider == "local" {
+        // Use local transcription command
+        let Some(ref command) = config.voice_transcription_command else {
+            return Err(
+                "Local voice transcription configured but voice_transcription_command not set"
+                    .into(),
+            );
+        };
+
+        // Write audio to a temp file
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join(format!("voice_{}.ogg", uuid::Uuid::new_v4()));
+        tokio::fs::write(&temp_file, audio_bytes)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // Replace {file} placeholder with actual path
+        let cmd = command.replace("{file}", temp_file.to_str().unwrap_or(""));
+
+        // Execute the command
+        let output = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(&cmd)
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run transcription command: {}", e))?;
+
+        // Clean up temp file
+        let _ = tokio::fs::remove_file(&temp_file).await;
+
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        } else {
+            Err(format!(
+                "Transcription command failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
+        }
+    } else {
+        // Default to OpenAI Whisper API
+        let Some(ref openai_key) = config.openai_api_key else {
+            return Err("Voice transcription requires openai_api_key".into());
+        };
+        microclaw_app::transcribe::transcribe_audio(openai_key, audio_bytes).await
+    }
 }
 
 fn base64_encode(data: &[u8]) -> String {

@@ -1,6 +1,128 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+// =============================================================================
+// API Response Types - These match the actual ClawHub API responses
+// =============================================================================
+
+/// Dedicated search API response (the one that actually filters by query)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiSearchResponse {
+    pub results: Vec<ApiSearchResult>,
+}
+
+/// Search result from dedicated search API
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiSearchResult {
+    pub score: f64,
+    pub slug: String,
+    #[serde(rename = "displayName")]
+    pub display_name: String,
+    pub summary: String,
+    pub version: String,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: i64,
+}
+
+impl From<ApiSearchResult> for SearchResult {
+    fn from(item: ApiSearchResult) -> Self {
+        Self {
+            slug: item.slug,
+            name: item.display_name,
+            description: item.summary,
+            install_count: 0, // Not available in search response
+            virustotal: None,
+        }
+    }
+}
+
+/// Search API response wrapper (list endpoint, doesn't filter by query)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchResponse {
+    pub items: Vec<SearchItem>,
+    #[serde(rename = "nextCursor")]
+    pub next_cursor: Option<String>,
+}
+
+/// Search result item from API
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchItem {
+    pub slug: String,
+    #[serde(rename = "displayName")]
+    pub display_name: String,
+    pub summary: String,
+    pub tags: HashMap<String, String>,
+    pub stats: SkillStats,
+    #[serde(rename = "createdAt")]
+    pub created_at: i64,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: i64,
+    #[serde(rename = "latestVersion")]
+    pub latest_version: Option<VersionItem>,
+}
+
+/// Skill statistics
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillStats {
+    pub comments: i32,
+    pub downloads: i32,
+    #[serde(rename = "installsAllTime")]
+    pub installs_all_time: i32,
+    #[serde(rename = "installsCurrent")]
+    pub installs_current: i32,
+    pub stars: i32,
+    pub versions: i32,
+}
+
+/// Version item from API
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VersionItem {
+    pub version: String,
+    #[serde(rename = "createdAt")]
+    pub created_at: i64,
+    pub changelog: String,
+}
+
+/// Get skill API response wrapper
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetSkillResponse {
+    pub skill: SkillItem,
+    #[serde(rename = "latestVersion")]
+    pub latest_version: VersionItem,
+    pub owner: Owner,
+    pub moderation: Option<serde_json::Value>,
+}
+
+/// Skill item from get skill API
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillItem {
+    pub slug: String,
+    #[serde(rename = "displayName")]
+    pub display_name: String,
+    pub summary: String,
+    pub tags: HashMap<String, String>,
+    pub stats: SkillStats,
+    #[serde(rename = "createdAt")]
+    pub created_at: i64,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: i64,
+}
+
+/// Owner information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Owner {
+    pub handle: String,
+    #[serde(rename = "userId")]
+    pub user_id: String,
+    #[serde(rename = "displayName")]
+    pub display_name: String,
+    pub image: String,
+}
+
+// =============================================================================
+// Internal Types - These are what the rest of the app uses
+// =============================================================================
+
 /// Lockfile format for tracking ClawHub-installed skills
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LockFile {
@@ -84,7 +206,7 @@ pub struct Requires {
     pub any_bins: Vec<String>,
 }
 
-/// Search result item
+/// Search result item (internal representation)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResult {
     pub slug: String,
@@ -94,6 +216,34 @@ pub struct SearchResult {
     pub install_count: i32,
     #[serde(default)]
     pub virustotal: Option<VirusTotal>,
+}
+
+impl From<SearchItem> for SearchResult {
+    fn from(item: SearchItem) -> Self {
+        Self {
+            slug: item.slug,
+            name: item.display_name,
+            description: item.summary,
+            install_count: item.stats.installs_current,
+            virustotal: None, // Not available in search response
+        }
+    }
+}
+
+impl From<GetSkillResponse> for SkillMeta {
+    fn from(resp: GetSkillResponse) -> Self {
+        Self {
+            slug: resp.skill.slug,
+            name: resp.skill.display_name,
+            description: resp.skill.summary,
+            versions: vec![SkillVersion {
+                version: resp.latest_version.version,
+                latest: true,
+            }],
+            virustotal: None, // Not available in this response
+            metadata: SkillMetadata::default(),
+        }
+    }
 }
 
 #[cfg(test)]

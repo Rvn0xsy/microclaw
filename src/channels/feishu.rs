@@ -1316,6 +1316,19 @@ async fn handle_feishu_message(
             .await;
         return;
     }
+    if trimmed == "/reload-skills" {
+        let reloaded = app_state.skills.reload();
+        let count = reloaded.len();
+        let _ = send_feishu_response(
+            &http_client,
+            base_url,
+            &token,
+            external_chat_id,
+            &format!("Reloaded {} skills from disk.", count),
+        )
+        .await;
+        return;
+    }
     if trimmed == "/archive" {
         if let Ok(Some((json, _))) =
             call_blocking(app_state.db.clone(), move |db| db.load_session(chat_id)).await

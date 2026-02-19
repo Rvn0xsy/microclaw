@@ -255,7 +255,7 @@ impl Tool for SyncSkillsTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "sync_skills".into(),
-            description: "Sync a skill from a GitHub repository into local ~/.microclaw/skills (or configured skills dir). Accepts: skill name, owner/repo/skill path, or full GitHub URL. Auto-detects the source repo from the path — no need to set source_repo separately for most skills.".into(),
+            description: "Sync a skill from a GitHub repository into local ~/.microclaw/skills (or configured skills dir). Use ONLY for skills from GitHub repos (owner/repo format or full GitHub URL). For ClawHub skills, use clawhub_install instead. Auto-detects the source repo from the path.".into(),
             input_schema: schema_object(
                 json!({
                     "skill_name": {

@@ -28,7 +28,7 @@ impl Tool for ActivateSkillTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "activate_skill".into(),
-            description: "Activate an agent skill to load its full instructions. Use this when you see a relevant skill in the available skills list and need its detailed instructions to complete a task. Skills are filtered by platform/dependencies before they are listed.".into(),
+            description: "Activate an agent skill to load its full instructions. IMPORTANT: You must CALL this tool (not write it as text) to activate a skill. Use this when you see a relevant skill in the available skills list and need its detailed instructions to complete a task. Skills are filtered by platform/dependencies before they are listed.".into(),
             input_schema: schema_object(
                 json!({
                     "skill_name": {

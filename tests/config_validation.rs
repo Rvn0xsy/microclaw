@@ -51,6 +51,8 @@ fn minimal_config() -> Config {
         reflector_interval_mins: 15,
         soul_path: None,
         clawhub: microclaw::config::ClawHubConfig::default(),
+        voice_provider: "openai".into(),
+        voice_transcription_command: None,
         channels: std::collections::HashMap::new(),
     }
 }
@@ -147,7 +149,7 @@ fn test_data_dir_paths() {
     let skills = std::path::PathBuf::from(config.skills_data_dir());
 
     assert!(runtime.ends_with(std::path::Path::new("microclaw.data").join("runtime")));
-    assert!(skills.ends_with(std::path::Path::new("microclaw.data").join("skills")));
+    assert!(skills.ends_with(std::path::Path::new(".microclaw").join("skills")));
 }
 
 #[test]

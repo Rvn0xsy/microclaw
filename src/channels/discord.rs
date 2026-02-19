@@ -249,6 +249,17 @@ impl EventHandler for Handler {
             return;
         }
 
+        // Handle /reload-skills command
+        if text.trim() == "/reload-skills" {
+            let reloaded = self.app_state.skills.reload();
+            let count = reloaded.len();
+            let _ = msg
+                .channel_id
+                .say(&ctx.http, format!("Reloaded {} skills from disk.", count))
+                .await;
+            return;
+        }
+
         // Handle /archive command
         if text.trim() == "/archive" {
             if let Ok(Some((json, _))) = call_blocking(self.app_state.db.clone(), move |db| {
