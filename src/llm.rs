@@ -459,6 +459,7 @@ fn process_openai_stream_event(
     data: &str,
     text_tx: Option<&UnboundedSender<String>>,
     text: &mut String,
+    reasoning_text: &mut String,
     stop_reason: &mut Option<String>,
     usage: &mut Option<Usage>,
     tool_calls: &mut std::collections::BTreeMap<usize, StreamToolUseBlock>,
@@ -493,6 +494,12 @@ fn process_openai_stream_event(
             if let Some(tx) = text_tx {
                 let _ = tx.send(piece.to_string());
             }
+        }
+    }
+
+    if let Some(piece) = delta.get("reasoning_content").and_then(|t| t.as_str()) {
+        if !piece.is_empty() {
+            reasoning_text.push_str(piece);
         }
     }
 
@@ -684,6 +691,8 @@ pub struct OpenAiProvider {
     model: String,
     max_tokens: u32,
     is_openai_codex: bool,
+    is_deepseek_reasoner: bool,
+    is_deepseek_chat_thinking: bool,
     prefer_max_completion_tokens: bool,
     chat_url: String,
     responses_url: String,
@@ -708,6 +717,12 @@ fn resolve_openai_compat_base(provider: &str, configured_base: &str) -> String {
 impl OpenAiProvider {
     pub fn new(config: &Config) -> Self {
         let is_openai_codex = is_openai_codex_provider(&config.llm_provider);
+        let is_deepseek_provider = config.llm_provider.eq_ignore_ascii_case("deepseek");
+        let is_deepseek_reasoner =
+            is_deepseek_provider && config.model.eq_ignore_ascii_case("deepseek-reasoner");
+        let is_deepseek_chat_thinking = is_deepseek_provider
+            && config.model.eq_ignore_ascii_case("deepseek-chat")
+            && config.show_thinking;
         let configured_base = config.llm_base_url.as_deref().unwrap_or("");
         let base = resolve_openai_compat_base(&config.llm_provider, configured_base);
 
@@ -731,10 +746,21 @@ impl OpenAiProvider {
             model: config.model.clone(),
             max_tokens: config.max_tokens,
             is_openai_codex,
+            is_deepseek_reasoner,
+            is_deepseek_chat_thinking,
             prefer_max_completion_tokens: config.llm_provider.eq_ignore_ascii_case("openai"),
             chat_url: format!("{}/chat/completions", base.trim_end_matches('/')),
             responses_url: format!("{}/responses", base.trim_end_matches('/')),
         }
+    }
+}
+
+fn maybe_enable_deepseek_thinking(body: &mut serde_json::Value, enabled: bool) {
+    if !enabled {
+        return;
+    }
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("thinking".to_string(), json!({"type": "enabled"}));
     }
 }
 
@@ -755,6 +781,7 @@ struct OaiChoice {
 #[derive(Debug, Deserialize)]
 struct OaiMessage {
     content: Option<String>,
+    reasoning_content: Option<String>,
     tool_calls: Option<Vec<OaiToolCall>>,
 }
 
@@ -886,7 +913,13 @@ impl LlmProvider for OpenAiProvider {
             return self.send_codex_message(system, messages, tools).await;
         }
 
-        let oai_messages = translate_messages_to_oai(system, &messages);
+        let include_deepseek_reasoning =
+            self.is_deepseek_reasoner || self.is_deepseek_chat_thinking;
+        let oai_messages = if include_deepseek_reasoning {
+            translate_messages_to_oai_with_reasoning(system, &messages, true)
+        } else {
+            translate_messages_to_oai(system, &messages)
+        };
 
         let mut body = json!({
             "model": self.model,
@@ -897,6 +930,7 @@ impl LlmProvider for OpenAiProvider {
             self.max_tokens,
             self.prefer_max_completion_tokens,
         );
+        maybe_enable_deepseek_thinking(&mut body, self.is_deepseek_chat_thinking);
 
         if let Some(ref tool_defs) = tools {
             if !tool_defs.is_empty() {
@@ -983,7 +1017,13 @@ impl LlmProvider for OpenAiProvider {
             return Ok(response);
         }
 
-        let oai_messages = translate_messages_to_oai(system, &messages);
+        let include_deepseek_reasoning =
+            self.is_deepseek_reasoner || self.is_deepseek_chat_thinking;
+        let oai_messages = if include_deepseek_reasoning {
+            translate_messages_to_oai_with_reasoning(system, &messages, true)
+        } else {
+            translate_messages_to_oai(system, &messages)
+        };
 
         let mut body = json!({
             "model": self.model,
@@ -995,6 +1035,7 @@ impl LlmProvider for OpenAiProvider {
             self.max_tokens,
             self.prefer_max_completion_tokens,
         );
+        maybe_enable_deepseek_thinking(&mut body, self.is_deepseek_chat_thinking);
 
         if let Some(ref tool_defs) = tools {
             if !tool_defs.is_empty() {
@@ -1035,6 +1076,7 @@ impl LlmProvider for OpenAiProvider {
         let mut byte_stream = response.bytes_stream();
         let mut sse = SseEventParser::default();
         let mut text = String::new();
+        let mut reasoning_text = String::new();
         let mut stop_reason: Option<String> = None;
         let mut usage: Option<Usage> = None;
         let mut tool_calls: std::collections::BTreeMap<usize, StreamToolUseBlock> =
@@ -1053,6 +1095,7 @@ impl LlmProvider for OpenAiProvider {
                     &data,
                     text_tx,
                     &mut text,
+                    &mut reasoning_text,
                     &mut stop_reason,
                     &mut usage,
                     &mut tool_calls,
@@ -1067,6 +1110,7 @@ impl LlmProvider for OpenAiProvider {
                 &data,
                 text_tx,
                 &mut text,
+                &mut reasoning_text,
                 &mut stop_reason,
                 &mut usage,
                 &mut tool_calls,
@@ -1076,6 +1120,10 @@ impl LlmProvider for OpenAiProvider {
         let mut content = Vec::new();
         if !text.is_empty() {
             content.push(ResponseContentBlock::Text { text });
+        } else if !reasoning_text.is_empty() && !tool_calls.is_empty() {
+            content.push(ResponseContentBlock::Text {
+                text: reasoning_text,
+            });
         }
         for (_index, tool) in tool_calls {
             content.push(ResponseContentBlock::ToolUse {
@@ -1223,6 +1271,14 @@ fn parse_openai_codex_response_payload(text: &str) -> Result<OaiResponsesRespons
 // ---------------------------------------------------------------------------
 
 fn translate_messages_to_oai(system: &str, messages: &[Message]) -> Vec<serde_json::Value> {
+    translate_messages_to_oai_with_reasoning(system, messages, false)
+}
+
+fn translate_messages_to_oai_with_reasoning(
+    system: &str,
+    messages: &[Message],
+    include_reasoning_for_tool_calls: bool,
+) -> Vec<serde_json::Value> {
     // Collect all tool_use IDs present in assistant messages so we can
     // skip orphaned tool_results (e.g. after session compaction).
     let known_tool_ids: std::collections::HashSet<&str> = messages
@@ -1280,7 +1336,10 @@ fn translate_messages_to_oai(system: &str, messages: &[Message]) -> Vec<serde_js
                         .collect();
 
                     let mut m = json!({"role": "assistant"});
-                    if !text.is_empty() || tool_calls.is_empty() {
+                    if include_reasoning_for_tool_calls && !tool_calls.is_empty() {
+                        m["reasoning_content"] = json!(text);
+                        m["content"] = serde_json::Value::Null;
+                    } else if !text.is_empty() || tool_calls.is_empty() {
                         m["content"] = json!(text);
                     }
                     if !tool_calls.is_empty() {
@@ -1607,14 +1666,22 @@ fn translate_oai_response(oai: OaiResponse) -> MessagesResponse {
     };
 
     let mut content = Vec::new();
+    let mut has_visible_text = false;
+    let OaiMessage {
+        content: message_content,
+        reasoning_content,
+        tool_calls,
+    } = choice.message;
 
-    if let Some(text) = choice.message.content {
+    if let Some(text) = message_content {
         if !text.is_empty() {
+            has_visible_text = true;
             content.push(ResponseContentBlock::Text { text });
         }
     }
 
-    if let Some(tool_calls) = choice.message.tool_calls {
+    let has_tool_calls = tool_calls.is_some();
+    if let Some(tool_calls) = tool_calls {
         for tc in tool_calls {
             let input: serde_json::Value =
                 serde_json::from_str(&tc.function.arguments).unwrap_or_default();
@@ -1623,6 +1690,14 @@ fn translate_oai_response(oai: OaiResponse) -> MessagesResponse {
                 name: tc.function.name,
                 input,
             });
+        }
+    }
+
+    if has_tool_calls && !has_visible_text {
+        if let Some(reasoning) = reasoning_content {
+            if !reasoning.is_empty() {
+                content.insert(0, ResponseContentBlock::Text { text: reasoning });
+            }
         }
     }
 
@@ -1726,6 +1801,31 @@ mod tests {
         assert_eq!(tc.len(), 1);
         assert_eq!(tc[0]["id"], "t1");
         assert_eq!(tc[0]["function"]["name"], "bash");
+    }
+
+    #[test]
+    fn test_translate_messages_assistant_tool_use_deepseek_reasoning() {
+        let msgs = vec![Message {
+            role: "assistant".into(),
+            content: MessageContent::Blocks(vec![
+                ContentBlock::Text {
+                    text: "reasoning".into(),
+                },
+                ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "bash".into(),
+                    input: json!({"command": "ls"}),
+                },
+            ]),
+        }];
+        let out = translate_messages_to_oai_with_reasoning("", &msgs, true);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["role"], "assistant");
+        assert_eq!(out[0]["reasoning_content"], "reasoning");
+        assert!(out[0]["content"].is_null());
+        let tc = out[0]["tool_calls"].as_array().unwrap();
+        assert_eq!(tc.len(), 1);
+        assert_eq!(tc[0]["id"], "t1");
     }
 
     #[test]
@@ -1869,6 +1969,7 @@ mod tests {
             choices: vec![OaiChoice {
                 message: OaiMessage {
                     content: Some("Hello!".into()),
+                    reasoning_content: None,
                     tool_calls: None,
                 },
                 finish_reason: Some("stop".into()),
@@ -1896,6 +1997,7 @@ mod tests {
             choices: vec![OaiChoice {
                 message: OaiMessage {
                     content: None,
+                    reasoning_content: None,
                     tool_calls: Some(vec![OaiToolCall {
                         id: "call_1".into(),
                         function: OaiFunction {
@@ -1940,6 +2042,7 @@ mod tests {
             choices: vec![OaiChoice {
                 message: OaiMessage {
                     content: Some("partial".into()),
+                    reasoning_content: None,
                     tool_calls: None,
                 },
                 finish_reason: Some("length".into()),
@@ -1956,6 +2059,7 @@ mod tests {
             choices: vec![OaiChoice {
                 message: OaiMessage {
                     content: Some("thinking...".into()),
+                    reasoning_content: None,
                     tool_calls: Some(vec![OaiToolCall {
                         id: "c1".into(),
                         function: OaiFunction {
@@ -1981,6 +2085,37 @@ mod tests {
     }
 
     #[test]
+    fn test_translate_oai_response_reasoning_content_and_tool_calls() {
+        let oai = OaiResponse {
+            choices: vec![OaiChoice {
+                message: OaiMessage {
+                    content: None,
+                    reasoning_content: Some("plan".into()),
+                    tool_calls: Some(vec![OaiToolCall {
+                        id: "c1".into(),
+                        function: OaiFunction {
+                            name: "bash".into(),
+                            arguments: r#"{"command":"ls"}"#.into(),
+                        },
+                    }]),
+                },
+                finish_reason: Some("tool_calls".into()),
+            }],
+            usage: None,
+        };
+        let resp = translate_oai_response(oai);
+        assert_eq!(resp.content.len(), 2);
+        match &resp.content[0] {
+            ResponseContentBlock::Text { text } => assert_eq!(text, "plan"),
+            _ => panic!("Expected Text"),
+        }
+        match &resp.content[1] {
+            ResponseContentBlock::ToolUse { name, .. } => assert_eq!(name, "bash"),
+            _ => panic!("Expected ToolUse"),
+        }
+    }
+
+    #[test]
     fn test_normalize_stop_reason_stream_variants() {
         assert_eq!(
             normalize_stop_reason(Some("tool_calls".into())).as_deref(),
@@ -1994,6 +2129,34 @@ mod tests {
             normalize_stop_reason(Some("stop".into())).as_deref(),
             Some("end_turn")
         );
+    }
+
+    #[test]
+    fn test_process_openai_stream_event_collects_reasoning_content() {
+        let data = r#"{"choices":[{"delta":{"reasoning_content":"think","tool_calls":[{"index":0,"id":"c1","function":{"name":"bash","arguments":"{\"command\":\"ls\"}"}}]},"finish_reason":null}],"usage":null}"#;
+        let mut text = String::new();
+        let mut reasoning_text = String::new();
+        let mut stop_reason = None;
+        let mut usage = None;
+        let mut tool_calls = std::collections::BTreeMap::new();
+
+        process_openai_stream_event(
+            data,
+            None,
+            &mut text,
+            &mut reasoning_text,
+            &mut stop_reason,
+            &mut usage,
+            &mut tool_calls,
+        );
+
+        assert!(text.is_empty());
+        assert_eq!(reasoning_text, "think");
+        assert_eq!(stop_reason, None);
+        let call = tool_calls.get(&0).unwrap();
+        assert_eq!(call.id, "c1");
+        assert_eq!(call.name, "bash");
+        assert_eq!(call.input_json, r#"{"command":"ls"}"#);
     }
 
     #[test]
@@ -2012,6 +2175,37 @@ mod tests {
         assert_eq!(body.get("max_tokens"), None);
         assert_eq!(body["max_completion_tokens"], 128);
         assert!(!switch_to_max_completion_tokens(&mut body));
+    }
+
+    #[test]
+    fn test_maybe_enable_deepseek_thinking_enabled() {
+        let mut body = json!({"model":"deepseek-chat","messages":[]});
+        maybe_enable_deepseek_thinking(&mut body, true);
+        assert_eq!(body["thinking"]["type"], "enabled");
+    }
+
+    #[test]
+    fn test_maybe_enable_deepseek_thinking_disabled() {
+        let mut body = json!({"model":"deepseek-chat","messages":[]});
+        maybe_enable_deepseek_thinking(&mut body, false);
+        assert!(body.get("thinking").is_none());
+    }
+
+    #[test]
+    fn test_openai_provider_deepseek_chat_thinking_flag() {
+        let mut config = Config::test_defaults();
+        config.llm_provider = "deepseek".into();
+        config.model = "deepseek-chat".into();
+        config.show_thinking = true;
+        config.data_dir = "/tmp".into();
+        config.working_dir = "/tmp".into();
+        config.working_dir_isolation = WorkingDirIsolation::Shared;
+        config.web_enabled = false;
+        config.web_port = 3900;
+
+        let provider = OpenAiProvider::new(&config);
+        assert!(provider.is_deepseek_chat_thinking);
+        assert!(!provider.is_deepseek_reasoner);
     }
 
     #[test]
