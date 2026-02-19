@@ -289,6 +289,15 @@ impl SandboxRouter {
         }
     }
 
+    #[cfg(test)]
+    fn with_backend_for_tests(config: SandboxConfig, backend: Arc<dyn Sandbox>) -> Self {
+        Self {
+            config,
+            backend,
+            warned_missing_runtime: AtomicBool::new(false),
+        }
+    }
+
     pub fn mode(&self) -> SandboxMode {
         self.config.mode
     }
@@ -501,6 +510,7 @@ fn validate_mount_allowlist(path: &Path, config: &SandboxConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn test_sanitize_segment() {
@@ -512,5 +522,43 @@ mod tests {
         let router = SandboxRouter::new(SandboxConfig::default(), Path::new("./tmp"));
         let name = router.backend_name();
         assert!(name == "docker" || name == "none");
+    }
+
+    #[tokio::test]
+    async fn test_router_falls_back_to_host_when_runtime_missing_and_not_required() {
+        let cfg = SandboxConfig {
+            mode: SandboxMode::All,
+            backend: SandboxBackend::Auto,
+            require_runtime: false,
+            ..SandboxConfig::default()
+        };
+        let router = SandboxRouter::with_backend_for_tests(cfg, Arc::new(NoSandbox));
+        let opts = SandboxExecOptions {
+            timeout: Duration::from_secs(2),
+            working_dir: None,
+        };
+        let out = router.exec("chat-1", "printf microclaw-smoke", &opts).await;
+        let out = out.expect("expected host fallback execution");
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(out.stdout, "microclaw-smoke");
+    }
+
+    #[tokio::test]
+    async fn test_router_fails_closed_when_runtime_required_and_missing() {
+        let cfg = SandboxConfig {
+            mode: SandboxMode::All,
+            backend: SandboxBackend::Auto,
+            require_runtime: true,
+            ..SandboxConfig::default()
+        };
+        let router = SandboxRouter::with_backend_for_tests(cfg, Arc::new(NoSandbox));
+        let opts = SandboxExecOptions {
+            timeout: Duration::from_secs(2),
+            working_dir: None,
+        };
+        let err = router.exec("chat-1", "echo hi", &opts).await.unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("sandbox is enabled but no docker runtime is available"));
     }
 }

@@ -192,6 +192,33 @@ fn test_scheduled_task_lifecycle() {
     cleanup(&dir);
 }
 
+/// Scheduled tasks are persisted and still queryable after DB reopen (restart simulation).
+#[test]
+fn test_scheduled_task_persists_across_db_reopen() {
+    let (db, dir) = test_db();
+    let id = db
+        .create_scheduled_task(
+            100,
+            "restart-safe",
+            "cron",
+            "0 */5 * * * *",
+            "2099-01-01T00:05:00Z",
+        )
+        .unwrap();
+    assert_eq!(db.get_tasks_for_chat(100).unwrap().len(), 1);
+    drop(db);
+
+    let reopened = Database::new(dir.to_str().unwrap()).unwrap();
+    let task = reopened.get_task_by_id(id).unwrap().unwrap();
+    assert_eq!(task.chat_id, 100);
+    assert_eq!(task.prompt, "restart-safe");
+    assert_eq!(task.status, "active");
+    assert_eq!(task.schedule_type, "cron");
+    assert_eq!(task.next_run, "2099-01-01T00:05:00Z");
+
+    cleanup(&dir);
+}
+
 /// Task run logs: create → retrieve → ordering → limit.
 #[test]
 fn test_task_run_log_lifecycle() {
