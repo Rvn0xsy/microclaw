@@ -272,7 +272,7 @@ impl ToolRegistry {
             );
         }
         let skills_data_dir = config.skills_data_dir();
-        let tools: Vec<Box<dyn Tool>> = vec![
+        let mut tools: Vec<Box<dyn Tool>> = vec![
             Box::new(bash::BashTool::new_with_isolation(
                 &config.working_dir,
                 config.working_dir_isolation,
@@ -351,6 +351,13 @@ impl ToolRegistry {
                 db.clone(),
             )),
         ];
+
+        // Add ClawHub tools if enabled
+        if config.clawhub_agent_tools_enabled {
+            tools.push(Box::new(crate::clawhub::tools::ClawHubSearchTool::new(config)));
+            tools.push(Box::new(crate::clawhub::tools::ClawHubInstallTool::new(config)));
+        }
+
         ToolRegistry {
             tools,
             cached_definitions: OnceLock::new(),
@@ -368,7 +375,7 @@ impl ToolRegistry {
             );
         }
         let skills_data_dir = config.skills_data_dir();
-        let tools: Vec<Box<dyn Tool>> = vec![
+        let mut tools: Vec<Box<dyn Tool>> = vec![
             Box::new(bash::BashTool::new_with_isolation(
                 &config.working_dir,
                 config.working_dir_isolation,

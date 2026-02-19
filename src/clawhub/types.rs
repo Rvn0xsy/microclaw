@@ -80,8 +80,8 @@ pub struct Requires {
     pub bins: Vec<String>,
     #[serde(default)]
     pub env: Vec<String>,
-    #[serde(default)]
-    pub anyBins: Vec<String>,
+    #[serde(default, rename = "anyBins")]
+    pub any_bins: Vec<String>,
 }
 
 /// Search result item

@@ -196,6 +196,11 @@ async fn main() -> anyhow::Result<()> {
             doctor::run_cli(&args[2..])?;
             return Ok(());
         }
+        Some("skill") => {
+            let config = Config::load()?;
+            microclaw::clawhub::cli::handle_skill_cli(&args[2..], &config)?;
+            return Ok(());
+        }
         Some("reembed") => {
             return reembed_memories().await;
         }
