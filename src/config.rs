@@ -52,11 +52,13 @@ fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
 }
+
 fn default_data_root() -> PathBuf {
     home_dir()
         .map(|h| h.join(".microclaw"))
         .unwrap_or_else(|| PathBuf::from(".microclaw"))
 }
+
 fn default_working_dir() -> String {
     default_data_root()
         .join("working_dir")
@@ -123,6 +125,9 @@ fn default_soul_path() -> Option<String> {
 }
 fn default_clawhub_registry() -> String {
     "https://clawhub.ai".into()
+}
+fn default_voice_provider() -> String {
+    "openai".into()
 }
 fn default_true() -> bool {
     true
@@ -272,6 +277,15 @@ pub struct Config {
     #[serde(flatten)]
     pub clawhub: ClawHubConfig,
 
+    // --- Voice / Speech-to-text ---
+    /// Voice transcription provider: "openai" uses OpenAI Whisper API, "local" uses voice_transcription_command
+    #[serde(default = "default_voice_provider", rename = "voice_provider")]
+    pub voice_provider: String,
+    /// Command template for local voice transcription. Use {file} as placeholder for audio file path.
+    /// Example: "whisper-mlx --file {file}" or "/usr/local/bin/whisper {file}"
+    #[serde(default, rename = "voice_transcription_command")]
+    pub voice_transcription_command: Option<String>,
+
     // --- Channel registry (new dynamic config) ---
     /// Per-channel configuration. Keys are channel names (e.g. "telegram", "discord", "slack", "web").
     /// Each value is channel-specific config deserialized by the adapter.
@@ -338,6 +352,8 @@ impl Config {
             reflector_interval_mins: 15,
             soul_path: None,
             clawhub: ClawHubConfig::default(),
+            voice_provider: "openai".into(),
+            voice_transcription_command: None,
             channels: HashMap::new(),
         }
     }
@@ -355,15 +371,23 @@ impl Config {
             .to_string()
     }
 
-    /// Skills directory. Uses `skills_dir` when configured,
-    /// otherwise defaults to `<data_dir>/skills`.
+    /// Skills directory. Priority: MICROCLAW_SKILLS_DIR env var > skills_dir config > <data_dir>/skills
     pub fn skills_data_dir(&self) -> String {
+        // 1. Check env var first
+        if let Ok(explicit_dir) = std::env::var("MICROCLAW_SKILLS_DIR") {
+            let trimmed = explicit_dir.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+        // 2. Check config file
         if let Some(configured) = &self.skills_dir {
             let trimmed = configured.trim();
             if !trimmed.is_empty() {
                 return trimmed.to_string();
             }
         }
+        // 3. Default to <data_dir>/skills
         self.data_root_dir()
             .join("skills")
             .to_string_lossy()
@@ -724,6 +748,31 @@ mod tests {
         let config: Config = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.clawhub.registry, "https://clawhub.ai");
         assert!(config.clawhub.agent_tools_enabled);
+    }
+
+    #[test]
+    fn test_voice_config_defaults() {
+        let yaml = "telegram_bot_token: tok\nbot_username: bot\napi_key: key\n";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.voice_provider, "openai");
+        assert!(config.voice_transcription_command.is_none());
+    }
+
+    #[test]
+    fn test_voice_config_local_provider() {
+        let yaml = r#"
+telegram_bot_token: tok
+bot_username: bot
+api_key: key
+voice_provider: "local"
+voice_transcription_command: "whisper-mlx --file {file}"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.voice_provider, "local");
+        assert_eq!(
+            config.voice_transcription_command,
+            Some("whisper-mlx --file {file}".into())
+        );
     }
 
     pub fn test_config() -> Config {

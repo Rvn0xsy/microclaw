@@ -48,7 +48,7 @@ impl Tool for BashTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "bash".into(),
-            description: "Execute a bash command and return the output. Use for running shell commands, scripts, or system operations.".into(),
+            description: "Execute a bash command and return the output. IMPORTANT: You must CALL this tool (not write it as text) to run a command. Use for running shell commands, scripts, or system operations.".into(),
             input_schema: schema_object(
                 json!({
                     "command": {
