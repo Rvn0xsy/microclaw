@@ -12,6 +12,7 @@ MicroClaw integrates with ClawHub to search and install skill packs.
 
 - Skills directory: `~/.microclaw/skills` (or `$MICROCLAW_HOME/skills`)
 - Lockfile: `~/.microclaw/clawhub.lock.json` (or `$MICROCLAW_HOME/clawhub.lock.json`)
+- Optional config override: `skills_dir` in `microclaw.config.yaml`
 
 Compatibility behavior:
 - If legacy `<data_dir>/skills` already exists, runtime keeps using it until migrated.

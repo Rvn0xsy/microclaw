@@ -17,6 +17,7 @@ fn minimal_config() -> Config {
         max_document_size_mb: 100,
         memory_token_budget: 1500,
         data_dir: "./microclaw.data".into(),
+        skills_dir: None,
         working_dir: "./tmp".into(),
         working_dir_isolation: WorkingDirIsolation::Chat,
         sandbox: microclaw::config::SandboxConfig::default(),

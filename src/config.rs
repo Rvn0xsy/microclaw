@@ -202,6 +202,8 @@ pub struct Config {
     // --- Paths & environment ---
     #[serde(default = "default_data_dir")]
     pub data_dir: String,
+    #[serde(default)]
+    pub skills_dir: Option<String>,
     #[serde(default = "default_working_dir")]
     pub working_dir: String,
     #[serde(default = "default_working_dir_isolation")]
@@ -306,6 +308,7 @@ impl Config {
             max_document_size_mb: 100,
             memory_token_budget: 1500,
             data_dir: "./microclaw.data".into(),
+            skills_dir: None,
             working_dir: "./tmp".into(),
             working_dir_isolation: WorkingDirIsolation::Chat,
             sandbox: SandboxConfig::default(),
@@ -361,6 +364,12 @@ impl Config {
     pub fn skills_data_dir(&self) -> String {
         if let Ok(explicit_dir) = std::env::var("MICROCLAW_SKILLS_DIR") {
             let trimmed = explicit_dir.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+        if let Some(configured) = &self.skills_dir {
+            let trimmed = configured.trim();
             if !trimmed.is_empty() {
                 return trimmed.to_string();
             }
@@ -485,6 +494,14 @@ impl Config {
             if url.trim().is_empty() {
                 self.llm_base_url = None;
             }
+        }
+        if let Some(dir) = &self.skills_dir {
+            let trimmed = dir.trim().to_string();
+            self.skills_dir = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            };
         }
         if self.working_dir.trim().is_empty() {
             self.working_dir = default_working_dir();
@@ -911,6 +928,14 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(legacy_root);
         let _ = std::fs::remove_dir_all(custom_home);
+    }
+
+    #[test]
+    fn test_skills_dir_uses_config_override() {
+        let mut config = test_config();
+        config.skills_dir = Some("./microclaw.data/skills".to_string());
+        let skills = std::path::PathBuf::from(config.skills_data_dir());
+        assert!(skills.ends_with(std::path::Path::new("microclaw.data").join("skills")));
     }
 
     #[test]
