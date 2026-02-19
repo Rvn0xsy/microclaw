@@ -32,7 +32,10 @@ Main orchestration files in `src/`:
 - `hooks.rs`: hooks discovery/runtime/CLI (`hooks list/info/enable/disable`)
 - `llm.rs`: provider implementations + stream handling + format translation
 - `otlp.rs`: OTLP metrics exporter (HTTP/protobuf)
-- `web.rs`: Web API routes, stream APIs, config endpoints
+- `web.rs`: Web API router, shared web state, stream APIs, config endpoints
+- `web/auth.rs`: auth handlers (session login/logout, password, API key lifecycle)
+- `web/sessions.rs`: session/history/reset/delete/fork/tree handlers
+- `web/metrics.rs`: metrics snapshot/history handlers
 - `scheduler.rs`: scheduled-task runner + memory reflector loop
 - `skills.rs`: skill discovery/activation
 - `mcp.rs`: MCP server/tool integration
@@ -116,7 +119,7 @@ Surfaces:
 - chat send/send_stream + SSE stream replay
 - auth APIs (`/api/auth/*`) with session cookie + API key scopes
 - sessions/history/reset/delete/fork/tree
-- config read/update
+- config read/update + self-check (`/api/config/self_check`)
 - audit query (`/api/audit`)
 - metrics APIs (`/api/metrics`, `/api/metrics/summary`, `/api/metrics/history`)
 - usage text report (`/api/usage`)
@@ -139,6 +142,12 @@ Hook runtime supports:
 - operations runbook: `docs/operations/runbook.md`
 - upgrade guide: `docs/releases/upgrade-guide.md`
 - regression/stability reports: `docs/reports/*.md`
+
+OTLP exporter supports bounded queue + retry backoff tuning:
+- `otlp_queue_capacity`
+- `otlp_retry_max_attempts`
+- `otlp_retry_base_ms`
+- `otlp_retry_max_ms`
 
 ## Build and test
 

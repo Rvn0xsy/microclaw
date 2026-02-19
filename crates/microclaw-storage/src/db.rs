@@ -177,6 +177,9 @@ pub struct AuditLogRecord {
     pub created_at: String,
 }
 
+pub type SessionMetaRow = (String, String, Option<String>, Option<i64>);
+pub type SessionTreeRow = (i64, Option<String>, Option<i64>, String);
+
 const SCHEMA_VERSION_CURRENT: i64 = 8;
 
 #[derive(Debug, Clone)]
@@ -460,7 +463,10 @@ fn apply_schema_migrations(conn: &Connection) -> Result<(), MicroClawError> {
     }
     if version < 6 {
         if !table_has_column(conn, "sessions", "parent_session_key")? {
-            conn.execute("ALTER TABLE sessions ADD COLUMN parent_session_key TEXT", [])?;
+            conn.execute(
+                "ALTER TABLE sessions ADD COLUMN parent_session_key TEXT",
+                [],
+            )?;
         }
         if !table_has_column(conn, "sessions", "fork_point")? {
             conn.execute("ALTER TABLE sessions ADD COLUMN fork_point INTEGER", [])?;
@@ -495,7 +501,10 @@ fn apply_schema_migrations(conn: &Connection) -> Result<(), MicroClawError> {
             conn.execute("ALTER TABLE api_keys ADD COLUMN expires_at TEXT", [])?;
         }
         if !table_has_column(conn, "api_keys", "rotated_from_key_id")? {
-            conn.execute("ALTER TABLE api_keys ADD COLUMN rotated_from_key_id INTEGER", [])?;
+            conn.execute(
+                "ALTER TABLE api_keys ADD COLUMN rotated_from_key_id INTEGER",
+                [],
+            )?;
         }
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS audit_logs (
@@ -1334,7 +1343,7 @@ impl Database {
     pub fn load_session_meta(
         &self,
         chat_id: i64,
-    ) -> Result<Option<(String, String, Option<String>, Option<i64>)>, MicroClawError> {
+    ) -> Result<Option<SessionMetaRow>, MicroClawError> {
         let conn = self.lock_conn();
         let result = conn.query_row(
             "SELECT messages_json, updated_at, parent_session_key, fork_point
@@ -1356,10 +1365,7 @@ impl Database {
         }
     }
 
-    pub fn list_session_meta(
-        &self,
-        limit: usize,
-    ) -> Result<Vec<(i64, Option<String>, Option<i64>, String)>, MicroClawError> {
+    pub fn list_session_meta(&self, limit: usize) -> Result<Vec<SessionTreeRow>, MicroClawError> {
         let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT chat_id, parent_session_key, fork_point, updated_at
@@ -1619,9 +1625,8 @@ impl Database {
             "UPDATE api_keys SET last_used_at = ?2 WHERE id = ?1",
             params![key_id, now],
         );
-        let mut stmt = conn.prepare(
-            "SELECT scope FROM api_key_scopes WHERE api_key_id = ?1 ORDER BY scope ASC",
-        )?;
+        let mut stmt = conn
+            .prepare("SELECT scope FROM api_key_scopes WHERE api_key_id = ?1 ORDER BY scope ASC")?;
         let scopes = stmt
             .query_map(params![key_id], |r| r.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1705,7 +1710,10 @@ impl Database {
 
     // --- Metrics history ---
 
-    pub fn upsert_metrics_history(&self, point: &MetricsHistoryPoint) -> Result<(), MicroClawError> {
+    pub fn upsert_metrics_history(
+        &self,
+        point: &MetricsHistoryPoint,
+    ) -> Result<(), MicroClawError> {
         let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO metrics_history(
@@ -1766,7 +1774,10 @@ impl Database {
         Ok(rows)
     }
 
-    pub fn cleanup_metrics_history_before(&self, before_ts_ms: i64) -> Result<usize, MicroClawError> {
+    pub fn cleanup_metrics_history_before(
+        &self,
+        before_ts_ms: i64,
+    ) -> Result<usize, MicroClawError> {
         let conn = self.lock_conn();
         let n = conn.execute(
             "DELETE FROM metrics_history WHERE timestamp_ms < ?1",
@@ -4236,17 +4247,17 @@ mod tests {
     #[test]
     fn test_api_key_expiry_and_rotation_and_audit_logs() {
         let (db, dir) = test_db();
-        let scopes = vec!["operator.read".to_string(), "operator.approvals".to_string()];
+        let scopes = vec![
+            "operator.read".to_string(),
+            "operator.approvals".to_string(),
+        ];
         let key_id = db
             .create_api_key(
                 "k1",
                 "hash-k1",
                 "prefix-k1",
                 &scopes,
-                Some(
-                    &(chrono::Utc::now() + chrono::Duration::days(1))
-                        .to_rfc3339(),
-                ),
+                Some(&(chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339()),
                 None,
             )
             .unwrap();
@@ -4259,10 +4270,7 @@ mod tests {
                 "hash-k2",
                 "prefix-k2",
                 &scopes,
-                Some(
-                    &(chrono::Utc::now() - chrono::Duration::days(1))
-                        .to_rfc3339(),
-                ),
+                Some(&(chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339()),
                 Some(key_id),
             )
             .unwrap();

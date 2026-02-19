@@ -52,6 +52,18 @@ channels:
     otlp_endpoint: "http://127.0.0.1:4318/v1/metrics"
     service_name: "microclaw"
     otlp_export_interval_seconds: 15
+    otlp_queue_capacity: 256
+    otlp_retry_max_attempts: 3
+    otlp_retry_base_ms: 500
+    otlp_retry_max_ms: 8000
     otlp_headers:
       Authorization: "Bearer <token>"
 ```
+
+Retry/backoff behavior:
+
+- exporter uses bounded async queue (`otlp_queue_capacity`)
+- when queue is full, latest snapshot enqueue fails and is dropped with warning log
+- each queued snapshot retries with exponential backoff
+- delay progression: `otlp_retry_base_ms` -> doubled per retry -> capped by `otlp_retry_max_ms`
+- max retry rounds: `otlp_retry_max_attempts`

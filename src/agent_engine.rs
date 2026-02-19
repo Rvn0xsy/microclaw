@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{info, warn};
 
-use crate::hooks::HookOutcome;
 use crate::embedding::EmbeddingProvider;
+use crate::hooks::HookOutcome;
 use crate::runtime::AppState;
 use crate::tools::ToolAuthContext;
 use microclaw_core::llm_types::{
@@ -704,7 +704,8 @@ pub(crate) async fn process_with_agent_impl(
                                     if let Some(v) = patch.get("content").and_then(|v| v.as_str()) {
                                         result.content = v.to_string();
                                     }
-                                    if let Some(v) = patch.get("is_error").and_then(|v| v.as_bool()) {
+                                    if let Some(v) = patch.get("is_error").and_then(|v| v.as_bool())
+                                    {
                                         result.is_error = v;
                                     }
                                     if let Some(v) = patch

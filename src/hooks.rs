@@ -84,12 +84,8 @@ struct HookResponse {
 
 #[derive(Debug, Clone)]
 pub enum HookOutcome {
-    Allow {
-        patches: Vec<serde_json::Value>,
-    },
-    Block {
-        reason: String,
-    },
+    Allow { patches: Vec<serde_json::Value> },
+    Block { reason: String },
 }
 
 #[derive(Clone)]
@@ -208,10 +204,7 @@ impl HookManager {
                 events: h.events.iter().map(|e| e.as_str().to_string()).collect(),
                 command: h.command.clone(),
                 timeout_ms: h.timeout_ms,
-                enabled: state
-                    .get(&h.name)
-                    .copied()
-                    .unwrap_or(h.enabled_by_default),
+                enabled: state.get(&h.name).copied().unwrap_or(h.enabled_by_default),
                 path: h.dir.join("HOOK.md").to_string_lossy().to_string(),
             })
             .collect::<Vec<_>>();
@@ -237,13 +230,11 @@ impl HookManager {
         Ok(())
     }
 
-    pub async fn run(
-        &self,
-        event: HookEvent,
-        payload: serde_json::Value,
-    ) -> Result<HookOutcome> {
+    pub async fn run(&self, event: HookEvent, payload: serde_json::Value) -> Result<HookOutcome> {
         if !self.enabled {
-            return Ok(HookOutcome::Allow { patches: Vec::new() });
+            return Ok(HookOutcome::Allow {
+                patches: Vec::new(),
+            });
         }
         let hooks = self.hooks.read().await.clone();
         let states = self.state_overrides.read().await.clone();
@@ -252,11 +243,18 @@ impl HookManager {
             .into_iter()
             .filter(|h| h.events.contains(&event))
             .collect::<Vec<_>>();
-        matched.sort_by(|a, b| a.priority.cmp(&b.priority).then_with(|| a.name.cmp(&b.name)));
+        matched.sort_by(|a, b| {
+            a.priority
+                .cmp(&b.priority)
+                .then_with(|| a.name.cmp(&b.name))
+        });
 
         let mut patches = Vec::new();
         for hook in matched {
-            let enabled = states.get(&hook.name).copied().unwrap_or(hook.enabled_by_default);
+            let enabled = states
+                .get(&hook.name)
+                .copied()
+                .unwrap_or(hook.enabled_by_default);
             if !enabled {
                 continue;
             }
@@ -273,13 +271,8 @@ impl HookManager {
                 Err(e) => {
                     warn!("hook '{}' failed: {}", hook.name, e);
                     let detail = e.to_string();
-                    self.log_hook_audit(
-                        &hook.name,
-                        event.as_str(),
-                        "error",
-                        Some(&detail),
-                    )
-                    .await;
+                    self.log_hook_audit(&hook.name, event.as_str(), "error", Some(&detail))
+                        .await;
                     continue;
                 }
             };
@@ -322,15 +315,8 @@ impl HookManager {
         let status = status.to_string();
         let detail = detail.map(str::to_string);
         let _ = call_blocking(db, move |d| {
-            d.log_audit_event(
-                "hook",
-                &actor,
-                &action,
-                None,
-                &status,
-                detail.as_deref(),
-            )
-            .map(|_| ())
+            d.log_audit_event("hook", &actor, &action, None, &status, detail.as_deref())
+                .map(|_| ())
         })
         .await;
     }
@@ -487,7 +473,11 @@ fn hooks_runtime_settings(config: &Config) -> (bool, usize, usize) {
             max_output = n as usize;
         }
     }
-    (enabled, max_input.clamp(1024, 4 * 1024 * 1024), max_output.clamp(512, 2 * 1024 * 1024))
+    (
+        enabled,
+        max_input.clamp(1024, 4 * 1024 * 1024),
+        max_output.clamp(512, 2 * 1024 * 1024),
+    )
 }
 
 fn write_state_file(path: &Path, state: &HashMap<String, bool>) -> Result<()> {
@@ -561,10 +551,12 @@ fn parse_hook_md(hook_md_path: &Path, dir: &Path) -> Option<HookDef> {
     if events.is_empty() {
         return None;
     }
-    let name = fm
-        .name
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| dir.file_name().unwrap_or_default().to_string_lossy().to_string());
+    let name = fm.name.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| {
+        dir.file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string()
+    });
     Some(HookDef {
         name,
         description: fm.description.unwrap_or_default(),
@@ -693,7 +685,8 @@ fi
         )
         .unwrap();
 
-        let manager = HookManager::from_test_paths(hooks_dir, root.join("runtime/hooks_state.json"));
+        let manager =
+            HookManager::from_test_paths(hooks_dir, root.join("runtime/hooks_state.json"));
         let first = manager
             .run(
                 HookEvent::BeforeToolCall,

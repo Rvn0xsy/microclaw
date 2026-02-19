@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use argon2::Argon2;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -10,8 +12,6 @@ use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use include_dir::{include_dir, Dir};
-use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
-use argon2::Argon2;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -31,6 +31,10 @@ use microclaw_channels::channel::{
 use microclaw_channels::channel_adapter::{ChannelAdapter, ChannelRegistry};
 use microclaw_storage::db::{call_blocking, ChatSummary, MetricsHistoryPoint, StoredMessage};
 use microclaw_storage::usage::build_usage_report;
+
+mod auth;
+mod metrics;
+mod sessions;
 
 static WEB_ASSETS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/web/dist");
 
@@ -97,7 +101,9 @@ impl AuthIdentity {
             AuthScope::Admin => "operator.admin",
             AuthScope::Approvals => "operator.approvals",
         };
-        self.scopes.iter().any(|s| s == "operator.admin" || s == want)
+        self.scopes
+            .iter()
+            .any(|s| s == "operator.admin" || s == want)
     }
 }
 
@@ -458,7 +464,7 @@ async fn persist_metrics_snapshot(state: &WebState) -> Result<(), (StatusCode, S
                 active_sessions,
             };
             tokio::spawn(async move {
-                if let Err(e) = exporter.export_metrics(metric_snapshot).await {
+                if let Err(e) = exporter.enqueue_metrics(metric_snapshot) {
                     tracing::warn!("otlp export failed: {}", e);
                 }
             });
@@ -557,16 +563,14 @@ fn parse_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
 }
 
 fn session_cookie_header(session_id: &str, expires_at: &str) -> String {
-    let mut header = format!(
-        "mc_session={session_id}; Path=/; HttpOnly; SameSite=Strict; Expires={expires_at}"
-    );
+    let mut header =
+        format!("mc_session={session_id}; Path=/; HttpOnly; SameSite=Strict; Expires={expires_at}");
     header.push_str("; Secure");
     header
 }
 
 fn csrf_cookie_header(csrf_token: &str, expires_at: &str) -> String {
-    let mut header =
-        format!("mc_csrf={csrf_token}; Path=/; SameSite=Strict; Expires={expires_at}");
+    let mut header = format!("mc_csrf={csrf_token}; Path=/; SameSite=Strict; Expires={expires_at}");
     header.push_str("; Secure");
     header
 }
@@ -667,10 +671,11 @@ async fn require_scope(
         }
 
         let key_hash = sha256_hex(&provided);
-        if let Some((key_id, scopes)) =
-            call_blocking(state.app_state.db.clone(), move |db| db.validate_api_key_hash(&key_hash))
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        if let Some((key_id, scopes)) = call_blocking(state.app_state.db.clone(), move |db| {
+            db.validate_api_key_hash(&key_hash)
+        })
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         {
             let id = AuthIdentity {
                 scopes,
@@ -698,7 +703,10 @@ async fn require_scope(
                     .and_then(|v| v.to_str().ok())
                     .map(|s| s.to_string());
                 if cookie_csrf.is_none() || header_csrf.is_none() || cookie_csrf != header_csrf {
-                    return Err((StatusCode::FORBIDDEN, "missing or invalid csrf token".into()));
+                    return Err((
+                        StatusCode::FORBIDDEN,
+                        "missing or invalid csrf token".into(),
+                    ));
                 }
             }
             let id = AuthIdentity {
@@ -884,6 +892,13 @@ struct AuditQuery {
     limit: Option<usize>,
 }
 
+#[derive(Debug, Serialize)]
+struct ConfigWarning {
+    code: &'static str,
+    severity: &'static str,
+    message: String,
+}
+
 /// Convert a serde_json::Value to a serde_yaml::Value for channel config merging.
 fn json_to_yaml_value(v: &serde_json::Value) -> serde_yaml::Value {
     match v {
@@ -987,320 +1002,6 @@ async fn api_health(
     })))
 }
 
-async fn api_auth_status(
-    headers: HeaderMap,
-    State(state): State<WebState>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    metrics_http_inc(&state).await;
-    let has_password = call_blocking(state.app_state.db.clone(), |db| db.get_auth_password_hash())
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .is_some();
-    let authenticated = require_scope(&state, &headers, AuthScope::Read).await.is_ok();
-    Ok(Json(json!({
-        "ok": true,
-        "authenticated": authenticated,
-        "has_password": has_password
-    })))
-}
-
-async fn api_auth_set_password(
-    headers: HeaderMap,
-    State(state): State<WebState>,
-    Json(body): Json<SetPasswordRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    metrics_http_inc(&state).await;
-    let identity = require_scope(&state, &headers, AuthScope::Admin).await?;
-    let password = body.password.trim();
-    if password.len() < 8 {
-        return Err((StatusCode::BAD_REQUEST, "password must be at least 8 chars".into()));
-    }
-    let hash = make_password_hash(password);
-    call_blocking(state.app_state.db.clone(), move |db| {
-        db.upsert_auth_password_hash(&hash)
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    audit_log(
-        &state,
-        "operator",
-        &identity.actor,
-        "auth.set_password",
-        None,
-        "ok",
-        None,
-    )
-    .await;
-    Ok(Json(json!({"ok": true})))
-}
-
-async fn api_auth_login(
-    headers: HeaderMap,
-    State(state): State<WebState>,
-    Json(body): Json<LoginRequest>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
-    metrics_http_inc(&state).await;
-    let client_key = client_key_from_headers(&headers);
-    let allowed = state
-        .auth_hub
-        .allow_login_attempt(&client_key, 5, Duration::from_secs(60))
-        .await;
-    if !allowed {
-        return Err((StatusCode::TOO_MANY_REQUESTS, "too many login attempts".into()));
-    }
-
-    let maybe_hash = call_blocking(state.app_state.db.clone(), |db| db.get_auth_password_hash())
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let Some(hash) = maybe_hash else {
-        return Err((StatusCode::BAD_REQUEST, "password is not configured".into()));
-    };
-    if !verify_password_hash(&hash, &body.password) {
-        return Err((StatusCode::UNAUTHORIZED, "invalid credentials".into()));
-    }
-    if hash.starts_with("v1$") {
-        let upgraded = make_password_hash(&body.password);
-        if !upgraded.is_empty() {
-            let _ = call_blocking(state.app_state.db.clone(), move |db| {
-                db.upsert_auth_password_hash(&upgraded)
-            })
-            .await;
-        }
-    }
-
-    let session_id = uuid::Uuid::new_v4().to_string();
-    let remember_days = body.remember_days.unwrap_or(30).clamp(1, 90);
-    let expires_at = (chrono::Utc::now() + chrono::Duration::days(remember_days)).to_rfc3339();
-    let expires_http = chrono::DateTime::parse_from_rfc3339(&expires_at)
-        .map(|dt| dt.with_timezone(&chrono::Utc).format("%a, %d %b %Y %H:%M:%S GMT").to_string())
-        .unwrap_or_else(|_| "Tue, 19 Jan 2038 03:14:07 GMT".to_string());
-
-    let label = body.label.clone();
-    let expires_clone = expires_at.clone();
-    let session_clone = session_id.clone();
-    call_blocking(state.app_state.db.clone(), move |db| {
-        db.create_auth_session(&session_clone, label.as_deref(), &expires_clone)
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    let csrf_token = uuid::Uuid::new_v4().to_string();
-    let cookie = session_cookie_header(&session_id, &expires_http);
-    let csrf_cookie = csrf_cookie_header(&csrf_token, &expires_http);
-    audit_log(
-        &state,
-        "operator",
-        "login",
-        "auth.login",
-        None,
-        "ok",
-        None,
-    )
-    .await;
-    Ok((
-        StatusCode::OK,
-        [("set-cookie", cookie), ("set-cookie", csrf_cookie)],
-        Json(json!({
-            "ok": true,
-            "expires_at": expires_at,
-            "csrf_token": csrf_token,
-            "session_id": session_id
-        })),
-    ))
-}
-
-async fn api_auth_logout(
-    headers: HeaderMap,
-    State(state): State<WebState>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
-    metrics_http_inc(&state).await;
-    if let Some(session_id) = parse_cookie(&headers, "mc_session") {
-        let _ = call_blocking(state.app_state.db.clone(), move |db| {
-            db.revoke_auth_session(&session_id)
-        })
-        .await;
-    }
-    Ok((
-        StatusCode::OK,
-        [
-            ("set-cookie", clear_session_cookie_header()),
-            ("set-cookie", clear_csrf_cookie_header()),
-        ],
-        Json(json!({"ok": true})),
-    ))
-}
-
-async fn api_auth_api_keys(
-    headers: HeaderMap,
-    State(state): State<WebState>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    metrics_http_inc(&state).await;
-    require_scope(&state, &headers, AuthScope::Admin).await?;
-    let keys = call_blocking(state.app_state.db.clone(), |db| db.list_api_keys())
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let keys_json = keys
-        .into_iter()
-        .map(|k| {
-            json!({
-                "id": k.id,
-                "label": k.label,
-                "prefix": k.prefix,
-                "created_at": k.created_at,
-                "revoked_at": k.revoked_at,
-                "expires_at": k.expires_at,
-                "last_used_at": k.last_used_at,
-                "rotated_from_key_id": k.rotated_from_key_id,
-                "scopes": k.scopes
-            })
-        })
-        .collect::<Vec<_>>();
-    Ok(Json(json!({"ok": true, "keys": keys_json})))
-}
-
-async fn api_auth_create_api_key(
-    headers: HeaderMap,
-    State(state): State<WebState>,
-    Json(body): Json<CreateApiKeyRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    metrics_http_inc(&state).await;
-    let identity = require_scope(&state, &headers, AuthScope::Admin).await?;
-    let label = body.label.trim().to_string();
-    if label.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "label is required".into()));
-    }
-    if body.scopes.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "at least one scope is required".into()));
-    }
-    let raw_key = format!("mk_{}", uuid::Uuid::new_v4().simple());
-    let prefix = raw_key.chars().take(10).collect::<String>();
-    let hash = sha256_hex(&raw_key);
-    let scopes = body
-        .scopes
-        .into_iter()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>();
-    if scopes.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "at least one scope is required".into()));
-    }
-    let expires_at = body
-        .expires_days
-        .map(|d| d.clamp(1, 3650))
-        .map(|d| (chrono::Utc::now() + chrono::Duration::days(d)).to_rfc3339());
-    let prefix_for_save = prefix.clone();
-    let scopes_for_save = scopes.clone();
-    let expires_for_save = expires_at.clone();
-    call_blocking(state.app_state.db.clone(), move |db| {
-        db.create_api_key(
-            &label,
-            &hash,
-            &prefix_for_save,
-            &scopes_for_save,
-            expires_for_save.as_deref(),
-            None,
-        )
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    audit_log(
-        &state,
-        "operator",
-        &identity.actor,
-        "auth.api_key.create",
-        Some(&prefix),
-        "ok",
-        None,
-    )
-    .await;
-    Ok(Json(json!({"ok": true, "api_key": raw_key, "prefix": prefix, "scopes": scopes, "expires_at": expires_at})))
-}
-
-async fn api_auth_revoke_api_key(
-    headers: HeaderMap,
-    State(state): State<WebState>,
-    Path(key_id): Path<i64>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    metrics_http_inc(&state).await;
-    let identity = require_scope(&state, &headers, AuthScope::Approvals).await?;
-    let revoked = call_blocking(state.app_state.db.clone(), move |db| db.revoke_api_key(key_id))
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    audit_log(
-        &state,
-        "operator",
-        &identity.actor,
-        "auth.api_key.revoke",
-        Some(&key_id.to_string()),
-        if revoked { "ok" } else { "miss" },
-        None,
-    )
-    .await;
-    Ok(Json(json!({"ok": true, "revoked": revoked})))
-}
-
-async fn api_auth_rotate_api_key(
-    headers: HeaderMap,
-    State(state): State<WebState>,
-    Path(key_id): Path<i64>,
-    Json(body): Json<RotateApiKeyRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    metrics_http_inc(&state).await;
-    let identity = require_scope(&state, &headers, AuthScope::Approvals).await?;
-    let keys = call_blocking(state.app_state.db.clone(), |db| db.list_api_keys())
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let Some(old) = keys.into_iter().find(|k| k.id == key_id) else {
-        return Err((StatusCode::NOT_FOUND, "api key not found".into()));
-    };
-    let scopes = body.scopes.unwrap_or(old.scopes);
-    if scopes.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "at least one scope is required".into()));
-    }
-    let label = body.label.unwrap_or_else(|| format!("{} (rotated)", old.label));
-    let raw_key = format!("mk_{}", uuid::Uuid::new_v4().simple());
-    let prefix = raw_key.chars().take(10).collect::<String>();
-    let hash = sha256_hex(&raw_key);
-    let expires_at = body
-        .expires_days
-        .map(|d| d.clamp(1, 3650))
-        .map(|d| (chrono::Utc::now() + chrono::Duration::days(d)).to_rfc3339());
-    let scopes_for_save = scopes.clone();
-    let expires_for_save = expires_at.clone();
-    let prefix_for_save = prefix.clone();
-    call_blocking(state.app_state.db.clone(), move |db| {
-        let new_id = db.create_api_key(
-            &label,
-            &hash,
-            &prefix_for_save,
-            &scopes_for_save,
-            expires_for_save.as_deref(),
-            Some(key_id),
-        )?;
-        let _ = db.rotate_api_key_revoke_old(key_id)?;
-        Ok(new_id)
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    audit_log(
-        &state,
-        "operator",
-        &identity.actor,
-        "auth.api_key.rotate",
-        Some(&key_id.to_string()),
-        "ok",
-        Some(&prefix),
-    )
-    .await;
-    Ok(Json(json!({
-        "ok": true,
-        "api_key": raw_key,
-        "prefix": prefix,
-        "scopes": scopes,
-        "expires_at": expires_at
-    })))
-}
-
 async fn api_get_config(
     headers: HeaderMap,
     State(state): State<WebState>,
@@ -1314,6 +1015,209 @@ async fn api_get_config(
         "path": path,
         "config": redact_config(&state.app_state.config),
         "requires_restart": true
+    })))
+}
+
+async fn api_config_self_check(
+    headers: HeaderMap,
+    State(state): State<WebState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    metrics_http_inc(&state).await;
+    require_scope(&state, &headers, AuthScope::Admin).await?;
+
+    let mut warnings = Vec::<ConfigWarning>::new();
+    let has_password = call_blocking(state.app_state.db.clone(), |db| db.get_auth_password_hash())
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .is_some();
+
+    if state.legacy_auth_token.is_some() {
+        warnings.push(ConfigWarning {
+            code: "legacy_auth_token_enabled",
+            severity: "medium",
+            message: "Legacy auth token is enabled. Prefer session cookie + scoped API keys."
+                .to_string(),
+        });
+    }
+    if !has_password {
+        warnings.push(ConfigWarning {
+            code: "auth_password_not_configured",
+            severity: if state.legacy_auth_token.is_none() {
+                "high"
+            } else {
+                "medium"
+            },
+            message: "Operator password is not configured.".to_string(),
+        });
+    }
+    if !matches!(
+        state.app_state.config.web_host.as_str(),
+        "127.0.0.1" | "localhost" | "::1"
+    ) {
+        warnings.push(ConfigWarning {
+            code: "web_host_not_loopback",
+            severity: "medium",
+            message: format!(
+                "Web server host is '{}', verify network exposure and upstream protections.",
+                state.app_state.config.web_host
+            ),
+        });
+    }
+    if state.app_state.config.web_max_requests_per_window > 200 {
+        warnings.push(ConfigWarning {
+            code: "web_rate_limit_too_high",
+            severity: "medium",
+            message: format!(
+                "web_max_requests_per_window is {}, which is higher than typical safe defaults.",
+                state.app_state.config.web_max_requests_per_window
+            ),
+        });
+    }
+    if state.app_state.config.web_max_inflight_per_session > 10 {
+        warnings.push(ConfigWarning {
+            code: "web_inflight_limit_too_high",
+            severity: "medium",
+            message: format!(
+                "web_max_inflight_per_session is {}, which may amplify overload impact.",
+                state.app_state.config.web_max_inflight_per_session
+            ),
+        });
+    }
+    if state.app_state.config.web_rate_window_seconds <= 2
+        && state.app_state.config.web_max_requests_per_window >= 20
+    {
+        warnings.push(ConfigWarning {
+            code: "web_rate_window_too_small_for_limit",
+            severity: "medium",
+            message: format!(
+                "web_rate_window_seconds={} with web_max_requests_per_window={} can allow burst spikes.",
+                state.app_state.config.web_rate_window_seconds,
+                state.app_state.config.web_max_requests_per_window
+            ),
+        });
+    }
+    if state.app_state.config.web_session_idle_ttl_seconds < 30 {
+        warnings.push(ConfigWarning {
+            code: "web_session_idle_ttl_too_low",
+            severity: "medium",
+            message: format!(
+                "web_session_idle_ttl_seconds={} may cause frequent session lock churn.",
+                state.app_state.config.web_session_idle_ttl_seconds
+            ),
+        });
+    }
+
+    if let Some(hooks) = state
+        .app_state
+        .config
+        .channels
+        .get("hooks")
+        .and_then(|v| v.as_mapping())
+    {
+        let enabled = hooks
+            .get(serde_yaml::Value::String("enabled".to_string()))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        if enabled {
+            let max_input_bytes = hooks
+                .get(serde_yaml::Value::String("max_input_bytes".to_string()))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(128 * 1024);
+            let max_output_bytes = hooks
+                .get(serde_yaml::Value::String("max_output_bytes".to_string()))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(64 * 1024);
+            if max_input_bytes > 2 * 1024 * 1024 {
+                warnings.push(ConfigWarning {
+                    code: "hooks_max_input_bytes_too_high",
+                    severity: "medium",
+                    message: format!(
+                        "hooks.max_input_bytes={} may increase memory pressure.",
+                        max_input_bytes
+                    ),
+                });
+            }
+            if max_output_bytes > 1024 * 1024 {
+                warnings.push(ConfigWarning {
+                    code: "hooks_max_output_bytes_too_high",
+                    severity: "medium",
+                    message: format!(
+                        "hooks.max_output_bytes={} may increase output handling risk.",
+                        max_output_bytes
+                    ),
+                });
+            }
+        }
+    }
+
+    if let Some(obs) = state
+        .app_state
+        .config
+        .channels
+        .get("observability")
+        .and_then(|v| v.as_mapping())
+    {
+        let otlp_enabled = obs
+            .get(serde_yaml::Value::String("otlp_enabled".to_string()))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if otlp_enabled {
+            let endpoint = obs
+                .get(serde_yaml::Value::String("otlp_endpoint".to_string()))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .unwrap_or("");
+            if endpoint.is_empty() {
+                warnings.push(ConfigWarning {
+                    code: "otlp_enabled_without_endpoint",
+                    severity: "high",
+                    message: "OTLP export is enabled but otlp_endpoint is missing.".to_string(),
+                });
+            }
+            let queue_capacity = obs
+                .get(serde_yaml::Value::String("otlp_queue_capacity".to_string()))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(256);
+            if queue_capacity < 16 {
+                warnings.push(ConfigWarning {
+                    code: "otlp_queue_capacity_low",
+                    severity: "medium",
+                    message: format!(
+                        "otlp_queue_capacity={} may drop snapshots during burst traffic.",
+                        queue_capacity
+                    ),
+                });
+            }
+            let retry_attempts = obs
+                .get(serde_yaml::Value::String(
+                    "otlp_retry_max_attempts".to_string(),
+                ))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(3);
+            if retry_attempts <= 1 {
+                warnings.push(ConfigWarning {
+                    code: "otlp_retry_attempts_too_low",
+                    severity: "medium",
+                    message:
+                        "otlp_retry_max_attempts <= 1 may drop data during short network blips."
+                            .to_string(),
+                });
+            }
+        }
+    }
+
+    let risk_level = if warnings.iter().any(|w| w.severity == "high") {
+        "high"
+    } else if warnings.iter().any(|w| w.severity == "medium") {
+        "medium"
+    } else {
+        "none"
+    };
+    Ok(Json(json!({
+        "ok": true,
+        "risk_level": risk_level,
+        "warning_count": warnings.len(),
+        "warnings": warnings
     })))
 }
 
@@ -1535,66 +1439,6 @@ async fn resolve_chat_id_for_session_key(
     })
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
-}
-
-async fn api_sessions(
-    headers: HeaderMap,
-    State(state): State<WebState>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    metrics_http_inc(&state).await;
-    require_scope(&state, &headers, AuthScope::Read).await?;
-
-    let chats = call_blocking(state.app_state.db.clone(), |db| db.get_recent_chats(400))
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    let sessions = chats
-        .into_iter()
-        .map(|c| map_chat_to_session(&state.app_state.channel_registry, c))
-        .collect::<Vec<_>>();
-    Ok(Json(json!({ "ok": true, "sessions": sessions })))
-}
-
-async fn api_history(
-    headers: HeaderMap,
-    State(state): State<WebState>,
-    Query(query): Query<HistoryQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    metrics_http_inc(&state).await;
-    require_scope(&state, &headers, AuthScope::Read).await?;
-
-    let session_key = normalize_session_key(query.session_key.as_deref());
-    let chat_id = resolve_chat_id_for_session_key(&state, &session_key).await?;
-
-    let mut messages = call_blocking(state.app_state.db.clone(), move |db| {
-        db.get_all_messages(chat_id)
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    if let Some(limit) = query.limit {
-        if messages.len() > limit {
-            messages = messages[messages.len() - limit..].to_vec();
-        }
-    }
-
-    let items: Vec<HistoryItem> = messages
-        .into_iter()
-        .map(|m| HistoryItem {
-            id: m.id,
-            sender_name: m.sender_name,
-            content: m.content,
-            is_from_bot: m.is_from_bot,
-            timestamp: m.timestamp,
-        })
-        .collect();
-
-    Ok(Json(json!({
-        "ok": true,
-        "session_key": session_key,
-        "chat_id": chat_id,
-        "messages": items,
-    })))
 }
 
 async fn api_usage(
@@ -2221,297 +2065,6 @@ async fn send_and_store_response_with_events(
     })))
 }
 
-async fn api_reset(
-    headers: HeaderMap,
-    State(state): State<WebState>,
-    Json(body): Json<ResetRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    metrics_http_inc(&state).await;
-    let identity = require_scope(&state, &headers, AuthScope::Approvals).await?;
-
-    let session_key = normalize_session_key(body.session_key.as_deref());
-    let chat_id = resolve_chat_id_for_session_key(&state, &session_key).await?;
-
-    let is_web = get_chat_routing(
-        &state.app_state.channel_registry,
-        state.app_state.db.clone(),
-        chat_id,
-    )
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
-    .map(|r| r.channel_name == "web")
-    .unwrap_or(false);
-
-    let deleted = if is_web {
-        let deleted = call_blocking(state.app_state.db.clone(), move |db| {
-            db.delete_chat_data(chat_id)
-        })
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-        // Keep the web session entry in the session list after clearing context.
-        let session_key_for_chat = session_key.clone();
-        call_blocking(state.app_state.db.clone(), move |db| {
-            db.upsert_chat(chat_id, Some(&session_key_for_chat), "web")
-        })
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-        deleted
-    } else {
-        call_blocking(state.app_state.db.clone(), move |db| {
-            db.delete_session(chat_id)
-        })
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    };
-
-    audit_log(
-        &state,
-        "operator",
-        &identity.actor,
-        "session.reset",
-        Some(&session_key),
-        if deleted { "ok" } else { "miss" },
-        None,
-    )
-    .await;
-    Ok(Json(json!({ "ok": true, "deleted": deleted })))
-}
-
-async fn api_delete_session(
-    headers: HeaderMap,
-    State(state): State<WebState>,
-    Json(body): Json<ResetRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    metrics_http_inc(&state).await;
-    let identity = require_scope(&state, &headers, AuthScope::Approvals).await?;
-
-    let session_key = normalize_session_key(body.session_key.as_deref());
-    let chat_id = resolve_chat_id_for_session_key(&state, &session_key).await?;
-
-    let deleted = call_blocking(state.app_state.db.clone(), move |db| {
-        db.delete_chat_data(chat_id)
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    audit_log(
-        &state,
-        "operator",
-        &identity.actor,
-        "session.delete",
-        Some(&session_key),
-        if deleted { "ok" } else { "miss" },
-        None,
-    )
-    .await;
-    Ok(Json(json!({ "ok": true, "deleted": deleted })))
-}
-
-async fn api_sessions_fork(
-    headers: HeaderMap,
-    State(state): State<WebState>,
-    Json(body): Json<ForkSessionRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    metrics_http_inc(&state).await;
-    let identity = require_scope(&state, &headers, AuthScope::Approvals).await?;
-
-    let source_session_key = normalize_session_key(Some(&body.source_session_key));
-    let target_session_key = body.target_session_key.map(|v| normalize_session_key(Some(&v))).unwrap_or_else(|| {
-        let short = uuid::Uuid::new_v4().simple().to_string();
-        format!("{source_session_key}-fork-{}", &short[..8])
-    });
-    if source_session_key == target_session_key {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "target_session_key must differ from source_session_key".into(),
-        ));
-    }
-
-    let source_chat_id = resolve_chat_id_for_session_key(&state, &source_session_key).await?;
-    let source_messages = call_blocking(state.app_state.db.clone(), move |db| {
-        db.get_all_messages(source_chat_id)
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    let fork_point = body
-        .fork_point
-        .unwrap_or(source_messages.len())
-        .min(source_messages.len());
-    let fork_messages = source_messages[..fork_point].to_vec();
-    let target_session_key_for_create = target_session_key.clone();
-    let target_chat_id = call_blocking(state.app_state.db.clone(), move |db| {
-        db.resolve_or_create_chat_id(
-            "web",
-            &target_session_key_for_create,
-            Some(&target_session_key_for_create),
-            "web",
-        )
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    let target_chat_id_for_delete = target_chat_id;
-    call_blocking(state.app_state.db.clone(), move |db| {
-        db.delete_chat_data(target_chat_id_for_delete)?;
-        Ok(())
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    let target_session_key_for_upsert = target_session_key.clone();
-    call_blocking(state.app_state.db.clone(), move |db| {
-        db.upsert_chat(target_chat_id, Some(&target_session_key_for_upsert), "web")
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    for msg in fork_messages {
-        let copied = StoredMessage {
-            id: uuid::Uuid::new_v4().to_string(),
-            chat_id: target_chat_id,
-            sender_name: msg.sender_name,
-            content: msg.content,
-            is_from_bot: msg.is_from_bot,
-            timestamp: chrono::Utc::now().to_rfc3339(),
-        };
-        call_blocking(state.app_state.db.clone(), move |db| db.store_message(&copied))
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    }
-
-    let source_session_key_for_save = source_session_key.clone();
-    call_blocking(state.app_state.db.clone(), move |db| {
-        db.save_session_with_meta(
-            target_chat_id,
-            "[]",
-            Some(&source_session_key_for_save),
-            Some(fork_point as i64),
-        )
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    audit_log(
-        &state,
-        "operator",
-        &identity.actor,
-        "session.fork",
-        Some(&target_session_key),
-        "ok",
-        Some(&source_session_key),
-    )
-    .await;
-    Ok(Json(json!({
-        "ok": true,
-        "source_session_key": source_session_key,
-        "source_chat_id": source_chat_id,
-        "target_session_key": target_session_key,
-        "target_chat_id": target_chat_id,
-        "fork_point": fork_point
-    })))
-}
-
-async fn api_metrics(
-    headers: HeaderMap,
-    State(state): State<WebState>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    metrics_http_inc(&state).await;
-    require_scope(&state, &headers, AuthScope::Read).await?;
-    persist_metrics_snapshot(&state).await?;
-
-    let snapshot = state.metrics.lock().await.clone();
-    let active_sessions = state.request_hub.sessions.lock().await.len() as i64;
-    Ok(Json(json!({
-        "ok": true,
-        "metrics": {
-            "http_requests": snapshot.http_requests,
-            "llm_completions": snapshot.llm_completions,
-            "llm_input_tokens": snapshot.llm_input_tokens,
-            "llm_output_tokens": snapshot.llm_output_tokens,
-            "tool_executions": snapshot.tool_executions,
-            "mcp_calls": snapshot.mcp_calls,
-            "active_sessions": active_sessions
-        }
-    })))
-}
-
-async fn api_metrics_summary(
-    headers: HeaderMap,
-    State(state): State<WebState>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    api_metrics(headers, State(state)).await
-}
-
-async fn api_metrics_history(
-    headers: HeaderMap,
-    State(state): State<WebState>,
-    Query(query): Query<MetricsHistoryQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    metrics_http_inc(&state).await;
-    require_scope(&state, &headers, AuthScope::Read).await?;
-    persist_metrics_snapshot(&state).await?;
-
-    let minutes = query.minutes.unwrap_or(24 * 60).clamp(1, 24 * 60 * 30);
-    let limit = query.limit.unwrap_or(2000).clamp(1, 20000);
-    let since = (chrono::Utc::now() - chrono::Duration::minutes(minutes)).timestamp_millis();
-    let rows = call_blocking(state.app_state.db.clone(), move |db| {
-        db.get_metrics_history(since, limit)
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(json!({
-        "ok": true,
-        "minutes": minutes,
-        "points": rows.into_iter().map(|r| json!({
-            "timestamp_ms": r.timestamp_ms,
-            "llm_completions": r.llm_completions,
-            "llm_input_tokens": r.llm_input_tokens,
-            "llm_output_tokens": r.llm_output_tokens,
-            "http_requests": r.http_requests,
-            "tool_executions": r.tool_executions,
-            "mcp_calls": r.mcp_calls,
-            "active_sessions": r.active_sessions
-        })).collect::<Vec<_>>()
-    })))
-}
-
-async fn api_sessions_tree(
-    headers: HeaderMap,
-    State(state): State<WebState>,
-    Query(query): Query<SessionTreeQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    metrics_http_inc(&state).await;
-    require_scope(&state, &headers, AuthScope::Read).await?;
-    let limit = query.limit.unwrap_or(1000).clamp(1, 5000);
-    let rows = call_blocking(state.app_state.db.clone(), move |db| {
-        db.list_session_meta(limit)
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    let mut out = Vec::new();
-    for (chat_id, parent_session_key, fork_point, updated_at) in rows {
-        let session_key = call_blocking(state.app_state.db.clone(), move |db| {
-            db.get_chat_external_id(chat_id)
-        })
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .unwrap_or_else(|| format!("chat:{chat_id}"));
-
-        out.push(json!({
-            "chat_id": chat_id,
-            "session_key": session_key,
-            "parent_session_key": parent_session_key,
-            "fork_point": fork_point,
-            "updated_at": updated_at
-        }));
-    }
-    Ok(Json(json!({"ok": true, "nodes": out})))
-}
-
 async fn api_audit_logs(
     headers: HeaderMap,
     State(state): State<WebState>,
@@ -2618,33 +2171,40 @@ fn build_router(web_state: WebState) -> Router {
         .route("/icon.png", get(icon_file))
         .route("/favicon.ico", get(favicon_file))
         .route("/api/health", get(api_health))
-        .route("/api/auth/status", get(api_auth_status))
-        .route("/api/auth/password", post(api_auth_set_password))
-        .route("/api/auth/login", post(api_auth_login))
-        .route("/api/auth/logout", post(api_auth_logout))
+        .route("/api/auth/status", get(auth::api_auth_status))
+        .route("/api/auth/password", post(auth::api_auth_set_password))
+        .route("/api/auth/login", post(auth::api_auth_login))
+        .route("/api/auth/logout", post(auth::api_auth_logout))
         .route(
             "/api/auth/api_keys",
-            get(api_auth_api_keys).post(api_auth_create_api_key),
+            get(auth::api_auth_api_keys).post(auth::api_auth_create_api_key),
         )
-        .route("/api/auth/api_keys/:id", axum::routing::delete(api_auth_revoke_api_key))
-        .route("/api/auth/api_keys/:id/rotate", post(api_auth_rotate_api_key))
+        .route(
+            "/api/auth/api_keys/:id",
+            axum::routing::delete(auth::api_auth_revoke_api_key),
+        )
+        .route(
+            "/api/auth/api_keys/:id/rotate",
+            post(auth::api_auth_rotate_api_key),
+        )
         .route("/api/config", get(api_get_config).put(api_update_config))
-        .route("/api/sessions", get(api_sessions))
-        .route("/api/sessions/tree", get(api_sessions_tree))
-        .route("/api/sessions/fork", post(api_sessions_fork))
+        .route("/api/config/self_check", get(api_config_self_check))
+        .route("/api/sessions", get(sessions::api_sessions))
+        .route("/api/sessions/tree", get(sessions::api_sessions_tree))
+        .route("/api/sessions/fork", post(sessions::api_sessions_fork))
         .route("/api/audit", get(api_audit_logs))
-        .route("/api/history", get(api_history))
+        .route("/api/history", get(sessions::api_history))
         .route("/api/usage", get(api_usage))
         .route("/api/memory_observability", get(api_memory_observability))
-        .route("/api/metrics", get(api_metrics))
-        .route("/api/metrics/summary", get(api_metrics_summary))
-        .route("/api/metrics/history", get(api_metrics_history))
+        .route("/api/metrics", get(metrics::api_metrics))
+        .route("/api/metrics/summary", get(metrics::api_metrics_summary))
+        .route("/api/metrics/history", get(metrics::api_metrics_history))
         .route("/api/send", post(api_send))
         .route("/api/send_stream", post(api_send_stream))
         .route("/api/stream", get(api_stream))
         .route("/api/run_status", get(api_run_status))
-        .route("/api/reset", post(api_reset))
-        .route("/api/delete_session", post(api_delete_session))
+        .route("/api/reset", post(sessions::api_reset))
+        .route("/api/delete_session", post(sessions::api_delete_session))
         .with_state(web_state)
 }
 
@@ -2781,8 +2341,8 @@ mod tests {
         }
     }
 
-    fn test_state(llm: Box<dyn LlmProvider>) -> Arc<AppState> {
-        let mut cfg = Config {
+    fn test_config_template() -> Config {
+        Config {
             telegram_bot_token: "tok".into(),
             bot_username: "bot".into(),
             llm_provider: "anthropic".into(),
@@ -2828,7 +2388,10 @@ mod tests {
             reflector_interval_mins: 15,
             soul_path: None,
             channels: std::collections::HashMap::new(),
-        };
+        }
+    }
+
+    fn test_state_with_config(llm: Box<dyn LlmProvider>, mut cfg: Config) -> Arc<AppState> {
         let dir = std::env::temp_dir().join(format!("microclaw_webtest_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         cfg.data_dir = dir.to_string_lossy().to_string();
@@ -2853,12 +2416,15 @@ mod tests {
         Arc::new(state)
     }
 
-    fn test_web_state(
-        llm: Box<dyn LlmProvider>,
+    fn test_state(llm: Box<dyn LlmProvider>) -> Arc<AppState> {
+        test_state_with_config(llm, test_config_template())
+    }
+
+    fn test_web_state_from_app_state(
+        state: Arc<AppState>,
         auth_token: Option<String>,
         limits: WebLimits,
     ) -> WebState {
-        let state = test_state(llm);
         WebState {
             app_state: state,
             legacy_auth_token: auth_token,
@@ -2872,6 +2438,14 @@ mod tests {
             otlp_export_interval: Duration::from_secs(1),
             limits,
         }
+    }
+
+    fn test_web_state(
+        llm: Box<dyn LlmProvider>,
+        auth_token: Option<String>,
+        limits: WebLimits,
+    ) -> WebState {
+        test_web_state_from_app_state(test_state(llm), auth_token, limits)
     }
 
     #[tokio::test]
@@ -3379,12 +2953,14 @@ mod tests {
             .await
             .unwrap();
         let metrics_json: serde_json::Value = serde_json::from_slice(&metrics_body).unwrap();
-        assert!(metrics_json
-            .get("metrics")
-            .and_then(|m| m.get("http_requests"))
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0)
-            > 0);
+        assert!(
+            metrics_json
+                .get("metrics")
+                .and_then(|m| m.get("http_requests"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0)
+                > 0
+        );
 
         let history_req = Request::builder()
             .method("GET")
@@ -3402,7 +2978,72 @@ mod tests {
             .and_then(|v| v.as_array())
             .map(|v| !v.is_empty())
             .unwrap_or(false));
+    }
 
+    #[tokio::test]
+    async fn test_config_self_check_returns_warnings() {
+        let web_state = test_web_state(Box::new(DummyLlm), None, WebLimits::default());
+        let app = build_router(web_state);
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/config/self_check")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json.get("ok").and_then(|v| v.as_bool()), Some(true));
+        assert!(
+            json.get("warning_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                >= 1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_config_self_check_detects_otlp_missing_endpoint() {
+        let mut cfg = test_config_template();
+        cfg.channels.insert(
+            "observability".to_string(),
+            serde_yaml::to_value(serde_json::json!({
+                "otlp_enabled": true,
+                "otlp_retry_max_attempts": 1
+            }))
+            .unwrap(),
+        );
+        let state = test_state_with_config(Box::new(DummyLlm), cfg);
+        let web_state = test_web_state_from_app_state(state, None, WebLimits::default());
+        let app = build_router(web_state);
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/config/self_check")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let warnings = json
+            .get("warnings")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let has_missing_endpoint = warnings.iter().any(|w| {
+            w.get("code").and_then(|v| v.as_str()) == Some("otlp_enabled_without_endpoint")
+        });
+        let has_low_retry = warnings
+            .iter()
+            .any(|w| w.get("code").and_then(|v| v.as_str()) == Some("otlp_retry_attempts_too_low"));
+        assert!(has_missing_endpoint);
+        assert!(has_low_retry);
     }
 
     #[tokio::test]
