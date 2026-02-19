@@ -79,6 +79,12 @@ microclaw doctor --json
 
 会检查：PATH、shell 运行时、`agent-browser`、Windows PowerShell 执行策略、以及 `<data_dir>/mcp.json` 里的 MCP 命令依赖。
 
+仅沙箱诊断：
+
+```sh
+microclaw doctor sandbox
+```
+
 ### 卸载（脚本）
 
 macOS/Linux：
@@ -507,6 +513,7 @@ microclaw gateway uninstall
 | `working_dir` | 否 | `~/.microclaw/working_dir` | 工具默认工作目录；`bash/read_file/write_file/edit_file/glob/grep` 的相对路径都以此为基准 |
 | `working_dir_isolation` | 否 | `chat` | 工具工作目录隔离模式：`shared` 使用 `working_dir/shared`，`chat` 使用 `working_dir/chat/<channel>/<chat_id>` |
 | `sandbox.mode` | 否 | `off` | `bash` 工具的容器沙箱模式：`off` 在宿主执行；`all` 通过 docker 容器执行 |
+| `sandbox.mount_allowlist_path` | 否 | 未设置 | 可选外部挂载白名单文件（每行一个允许根路径） |
 | `max_tokens` | 否 | `8192` | 每次模型回复的最大 token |
 | `max_tool_iterations` | 否 | `100` | 每条消息的最大工具循环次数 |
 | `max_document_size_mb` | 否 | `100` | Telegram 入站文档允许的最大大小（MB）；超过会拒绝并提示 |
@@ -533,6 +540,13 @@ microclaw gateway uninstall
 
 快速配置：
 
+```sh
+microclaw setup --enable-sandbox
+microclaw doctor sandbox
+```
+
+或手工配置：
+
 ```yaml
 sandbox:
   mode: "all"
@@ -541,6 +555,8 @@ sandbox:
   container_prefix: "microclaw-sandbox"
   no_network: true
   require_runtime: false
+  # 可选外部白名单文件
+  # mount_allowlist_path: "~/.config/microclaw/mount-allowlist.txt"
 ```
 
 测试步骤：
@@ -560,6 +576,9 @@ microclaw start
 - `mode: "all"` 但 Docker 不可用时：
   - `require_runtime: false`：降级宿主执行并告警。
   - `require_runtime: true`：直接报错，不降级。
+- 可选加固：
+  - `~/.config/microclaw/mount-allowlist.txt`：沙箱挂载路径白名单。
+  - `~/.config/microclaw/path-allowlist.txt`：文件工具路径白名单。
 
 ### 支持的 `llm_provider` 值
 
