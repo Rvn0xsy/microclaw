@@ -4,8 +4,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::info;
 
+use crate::memory_backend::MemoryBackend;
 use microclaw_core::llm_types::ToolDefinition;
-use microclaw_storage::db::{call_blocking, Database};
+use microclaw_storage::db::Database;
 use microclaw_storage::memory_quality;
 
 use super::{auth_context_from_input, authorize_chat_access, schema_object, Tool, ToolResult};
@@ -87,14 +88,15 @@ impl Tool for ReadMemoryTool {
 
 pub struct WriteMemoryTool {
     groups_dir: PathBuf,
-    db: Arc<Database>,
+    memory_backend: Arc<MemoryBackend>,
 }
 
 impl WriteMemoryTool {
-    pub fn new(data_dir: &str, db: Arc<Database>) -> Self {
+    pub fn new(data_dir: &str, db: Arc<Database>, memory_backend: Arc<MemoryBackend>) -> Self {
+        let _ = db;
         WriteMemoryTool {
             groups_dir: PathBuf::from(data_dir).join("groups"),
-            db,
+            memory_backend,
         }
     }
 }
@@ -185,17 +187,16 @@ impl Tool for WriteMemoryTool {
                     {
                         if memory_quality::memory_quality_ok(&normalized) {
                             let chat_id = memory_chat_id;
-                            let _ = call_blocking(self.db.clone(), move |db| {
-                                db.insert_memory_with_metadata(
+                            let _ = self
+                                .memory_backend
+                                .insert_memory_with_metadata(
                                     chat_id,
                                     &normalized,
                                     "KNOWLEDGE",
                                     "write_memory_tool",
                                     0.85,
                                 )
-                                .map(|_| ())
-                            })
-                            .await;
+                                .await;
                         }
                     }
                 }
@@ -225,6 +226,10 @@ mod tests {
         Arc::new(Database::new(runtime.to_str().unwrap()).unwrap())
     }
 
+    fn test_backend(db: Arc<Database>) -> Arc<MemoryBackend> {
+        Arc::new(MemoryBackend::local_only(db))
+    }
+
     #[tokio::test]
     async fn test_read_memory_global_not_exists() {
         let dir = test_dir();
@@ -239,7 +244,8 @@ mod tests {
     async fn test_write_and_read_memory_global() {
         let dir = test_dir();
         let db = test_db(&dir);
-        let write_tool = WriteMemoryTool::new(dir.to_str().unwrap(), db.clone());
+        let write_tool =
+            WriteMemoryTool::new(dir.to_str().unwrap(), db.clone(), test_backend(db.clone()));
         let read_tool = ReadMemoryTool::new(dir.to_str().unwrap());
 
         let result = write_tool
@@ -262,7 +268,8 @@ mod tests {
     async fn test_write_and_read_memory_chat() {
         let dir = test_dir();
         let db = test_db(&dir);
-        let write_tool = WriteMemoryTool::new(dir.to_str().unwrap(), db.clone());
+        let write_tool =
+            WriteMemoryTool::new(dir.to_str().unwrap(), db.clone(), test_backend(db.clone()));
         let read_tool = ReadMemoryTool::new(dir.to_str().unwrap());
 
         let result = write_tool
@@ -296,7 +303,7 @@ mod tests {
     async fn test_write_memory_missing_scope() {
         let dir = test_dir();
         let db = test_db(&dir);
-        let tool = WriteMemoryTool::new(dir.to_str().unwrap(), db);
+        let tool = WriteMemoryTool::new(dir.to_str().unwrap(), db.clone(), test_backend(db));
         let result = tool.execute(json!({"content": "data"})).await;
         assert!(result.is_error);
         assert!(result.content.contains("Missing 'scope'"));
@@ -317,7 +324,7 @@ mod tests {
     async fn test_read_memory_empty_file() {
         let dir = test_dir();
         let db = test_db(&dir);
-        let write_tool = WriteMemoryTool::new(dir.to_str().unwrap(), db);
+        let write_tool = WriteMemoryTool::new(dir.to_str().unwrap(), db.clone(), test_backend(db));
         let read_tool = ReadMemoryTool::new(dir.to_str().unwrap());
 
         write_tool
@@ -335,7 +342,7 @@ mod tests {
     async fn test_write_memory_global_denied_for_non_control_chat() {
         let dir = test_dir();
         let db = test_db(&dir);
-        let tool = WriteMemoryTool::new(dir.to_str().unwrap(), db);
+        let tool = WriteMemoryTool::new(dir.to_str().unwrap(), db.clone(), test_backend(db));
         let result = tool
             .execute(json!({
                 "scope": "global",
@@ -355,7 +362,7 @@ mod tests {
     async fn test_write_memory_global_allowed_for_control_chat() {
         let dir = test_dir();
         let db = test_db(&dir);
-        let tool = WriteMemoryTool::new(dir.to_str().unwrap(), db);
+        let tool = WriteMemoryTool::new(dir.to_str().unwrap(), db.clone(), test_backend(db));
         let result = tool
             .execute(json!({
                 "scope": "global",
@@ -395,7 +402,7 @@ mod tests {
     async fn test_read_memory_chat_allowed_for_control_chat_cross_chat() {
         let dir = test_dir();
         let db = test_db(&dir);
-        let write_tool = WriteMemoryTool::new(dir.to_str().unwrap(), db);
+        let write_tool = WriteMemoryTool::new(dir.to_str().unwrap(), db.clone(), test_backend(db));
         let read_tool = ReadMemoryTool::new(dir.to_str().unwrap());
         write_tool
             .execute(json!({"scope": "chat", "chat_id": 200, "content": "chat200"}))

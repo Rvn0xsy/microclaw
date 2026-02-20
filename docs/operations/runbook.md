@@ -140,3 +140,48 @@ Behavior:
 - after cooldown, requests are attempted again automatically.
 - requests are fail-fast when queue wait budget is exceeded.
 - per-server rate limit enforces a fixed 60s window budget.
+
+## Memory MCP Backend (Optional)
+
+If any configured MCP server exposes both `memory_query` and `memory_upsert`, MicroClaw enables MCP-first structured-memory operations:
+
+- prompt-time structured-memory reads/searches
+- explicit `remember ...` fast path writes
+- reflector insert/update/supersede/touch flows
+- structured memory tool operations (`structured_memory_search/update/delete`)
+
+Fallback policy:
+
+- on MCP call failure, timeout, or invalid/unknown response shape, MicroClaw falls back to built-in SQLite memory automatically
+- fallback is per operation (best-effort), so one MCP failure does not disable memory for the whole runtime
+
+Operational checks:
+
+- confirm startup logs include `Memory MCP backend enabled via server '<name>'`
+- verify server tool list includes exact names `memory_query` and `memory_upsert`
+- if semantic retrieval quality drops while MCP is enabled, note that local `sqlite-vec` KNN ranking is skipped for MCP-backed rows
+
+Minimal `mcp.json` example (memory MCP server + local filesystem):
+
+```json
+{
+  "defaultProtocolVersion": "2025-11-05",
+  "mcpServers": {
+    "filesystem": {
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]
+    },
+    "memory": {
+      "transport": "streamable_http",
+      "endpoint": "http://127.0.0.1:8090/mcp",
+      "headers": {
+        "Authorization": "Bearer REPLACE_ME"
+      },
+      "request_timeout_secs": 60
+    }
+  }
+}
+```
+
+The `memory` server must expose MCP tools named exactly `memory_query` and `memory_upsert`.

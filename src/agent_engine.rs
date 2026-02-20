@@ -184,10 +184,10 @@ async fn maybe_handle_explicit_memory_command(
         ));
     }
 
-    let existing = call_blocking(state.db.clone(), move |db| {
-        db.get_all_memories_for_chat(Some(chat_id))
-    })
-    .await?;
+    let existing = state
+        .memory_backend
+        .get_all_memories_for_chat(Some(chat_id))
+        .await?;
     let explicit_topic = memory_quality::memory_topic_key(&explicit_content);
     if let Some(dup) = existing.iter().find(|m| {
         !m.is_archived
@@ -196,17 +196,16 @@ async fn maybe_handle_explicit_memory_command(
     }) {
         let memory_id = dup.id;
         let content_for_update = explicit_content.clone();
-        let _ = call_blocking(state.db.clone(), move |db| {
-            db.update_memory_with_metadata(
+        let _ = state
+            .memory_backend
+            .update_memory_with_metadata(
                 memory_id,
                 &content_for_update,
                 "KNOWLEDGE",
                 0.95,
                 "explicit",
             )
-            .map(|_| ())
-        })
-        .await;
+            .await;
         return Ok(Some(format!(
             "Noted. Updated memory #{memory_id}: {explicit_content}"
         )));
@@ -220,8 +219,9 @@ async fn maybe_handle_explicit_memory_command(
     }) {
         let from_id = conflict.id;
         let new_content = explicit_content.clone();
-        let superseded_id = call_blocking(state.db.clone(), move |db| {
-            db.supersede_memory(
+        let superseded_id = state
+            .memory_backend
+            .supersede_memory(
                 from_id,
                 &new_content,
                 "KNOWLEDGE",
@@ -229,24 +229,23 @@ async fn maybe_handle_explicit_memory_command(
                 0.95,
                 Some("explicit_topic_conflict"),
             )
-        })
-        .await?;
+            .await?;
         return Ok(Some(format!(
             "Noted. Superseded memory #{from_id} with #{superseded_id}: {explicit_content}"
         )));
     }
 
     let content_for_insert = explicit_content.clone();
-    let inserted_id = call_blocking(state.db.clone(), move |db| {
-        db.insert_memory_with_metadata(
+    let inserted_id = state
+        .memory_backend
+        .insert_memory_with_metadata(
             Some(chat_id),
             &content_for_insert,
             "KNOWLEDGE",
             "explicit",
             0.95,
         )
-    })
-    .await?;
+        .await?;
 
     #[cfg(feature = "sqlite-vec")]
     {
@@ -353,6 +352,7 @@ pub(crate) async fn process_with_agent_impl(
     // Build system prompt
     let file_memory = state.memory.build_memory_context(chat_id);
     let db_memory = build_db_memory_context(
+        &state.memory_backend,
         &state.db,
         &state.embedding,
         chat_id,
@@ -913,17 +913,14 @@ fn score_relevance_with_cache(
 }
 
 pub(crate) async fn build_db_memory_context(
+    memory_backend: &std::sync::Arc<crate::memory_backend::MemoryBackend>,
     db: &std::sync::Arc<Database>,
     embedding: &Option<std::sync::Arc<dyn EmbeddingProvider>>,
     chat_id: i64,
     query: &str,
     token_budget: usize,
 ) -> String {
-    let memories = match call_blocking(db.clone(), move |db| {
-        db.get_memories_for_context(chat_id, 100)
-    })
-    .await
-    {
+    let memories = match memory_backend.get_memories_for_context(chat_id, 100).await {
         Ok(m) => m,
         Err(_) => return String::new(),
     };
@@ -941,7 +938,9 @@ pub(crate) async fn build_db_memory_context(
     #[cfg(feature = "sqlite-vec")]
     {
         if let Some(provider) = embedding {
-            if !query.trim().is_empty() {
+            if memory_backend.prefers_mcp() {
+                // memory backend is external; local sqlite-vec cannot rank remote rows reliably.
+            } else if !query.trim().is_empty() {
                 if let Ok(query_vec) = provider.embed(query).await {
                     let knn_result = call_blocking(db.clone(), move |db| {
                         db.knn_memories(chat_id, &query_vec, 20)
@@ -1593,6 +1592,7 @@ mod tests {
         cfg.working_dir_isolation = WorkingDirIsolation::Shared;
         cfg.web_port = 3900;
         let db = Arc::new(Database::new(runtime_dir.to_str().unwrap()).unwrap());
+        let memory_backend = Arc::new(crate::memory_backend::MemoryBackend::local_only(db.clone()));
         let mut registry = ChannelRegistry::new();
         registry.register(Arc::new(WebAdapter));
         let channel_registry = Arc::new(registry);
@@ -1605,7 +1605,8 @@ mod tests {
             hooks: Arc::new(crate::hooks::HookManager::from_config(&cfg)),
             llm,
             embedding: None,
-            tools: ToolRegistry::new(&cfg, channel_registry, db),
+            memory_backend: memory_backend.clone(),
+            tools: ToolRegistry::new(&cfg, channel_registry, db, memory_backend),
         })
     }
 
@@ -1631,7 +1632,8 @@ mod tests {
         db.insert_memory(Some(100), "short memory three", "EVENT")
             .unwrap();
 
-        let context = build_db_memory_context(&db, &None, 100, "short", 20).await;
+        let memory_backend = Arc::new(crate::memory_backend::MemoryBackend::local_only(db.clone()));
+        let context = build_db_memory_context(&memory_backend, &db, &None, 100, "short", 20).await;
         assert!(context.contains("<structured_memories>"));
         assert!(context.contains("(+"));
         assert!(context.contains("memories omitted"));
@@ -1648,7 +1650,9 @@ mod tests {
         db.insert_memory(Some(100), "user likes coffee", "PROFILE")
             .unwrap();
 
-        let context = build_db_memory_context(&db, &None, 100, "likes", 10_000).await;
+        let memory_backend = Arc::new(crate::memory_backend::MemoryBackend::local_only(db.clone()));
+        let context =
+            build_db_memory_context(&memory_backend, &db, &None, 100, "likes", 10_000).await;
         assert!(context.contains("user likes rust"));
         assert!(context.contains("user likes coffee"));
         assert!(!context.contains("memories omitted"));
@@ -1664,7 +1668,9 @@ mod tests {
         db.insert_memory(Some(100), "User prefers Rust and tea", "PROFILE")
             .unwrap();
 
-        let context = build_db_memory_context(&db, &None, 100, "喜欢 咖啡", 10_000).await;
+        let memory_backend = Arc::new(crate::memory_backend::MemoryBackend::local_only(db.clone()));
+        let context =
+            build_db_memory_context(&memory_backend, &db, &None, 100, "喜欢 咖啡", 10_000).await;
         let first_line = context
             .lines()
             .find(|line| line.starts_with('['))
@@ -1736,8 +1742,15 @@ mod tests {
 
             // Restart simulation: new AppState reading the same runtime data.
             let restarted = test_state_with_base_dir(&base_dir);
-            let recalled =
-                build_db_memory_context(&restarted.db, &None, chat_id, "database port", 1500).await;
+            let recalled = build_db_memory_context(
+                &restarted.memory_backend,
+                &restarted.db,
+                &None,
+                chat_id,
+                "database port",
+                1500,
+            )
+            .await;
             assert!(
                 recalled.contains("production database port is 5433"),
                 "expected memory recall after restart, got: {recalled}"

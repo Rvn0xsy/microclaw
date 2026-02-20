@@ -227,6 +227,10 @@ MicroClaw also keeps structured memory rows in SQLite (`memories` table):
 - Low-quality/noisy memories are filtered by quality gates before insertion
 - Memory lifecycle is managed with confidence + soft-archive fields (instead of hard delete)
 
+Optional memory MCP backend:
+- If MCP config includes a server exposing both `memory_query` and `memory_upsert`, structured-memory operations prefer that MCP server.
+- If MCP is not configured, unavailable, or returns invalid payloads, MicroClaw automatically falls back to built-in SQLite memory behavior.
+
 When built with `--features sqlite-vec` and embedding config is set, structured-memory retrieval and dedup use semantic KNN. Otherwise, it falls back to keyword relevance + Jaccard dedup.
 
 `/usage` now includes a **Memory Observability** section (and Web UI panel) showing:

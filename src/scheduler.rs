@@ -384,10 +384,10 @@ async fn reflect_for_chat(state: &Arc<AppState>, chat_id: i64) {
         .join("\n");
 
     // 4. Load existing memories (needed for dedup and to pass to LLM for merge)
-    let existing = match call_blocking(state.db.clone(), move |db| {
-        db.get_all_memories_for_chat(Some(chat_id))
-    })
-    .await
+    let existing = match state
+        .memory_backend
+        .get_all_memories_for_chat(Some(chat_id))
+        .await
     {
         Ok(m) => m,
         Err(_) => return,
@@ -573,11 +573,11 @@ async fn reflect_for_chat(state: &Arc<AppState>, chat_id: i64) {
                 let content = content.to_string();
                 let category = category.to_string();
                 let db_content = content.clone();
-                if call_blocking(state.db.clone(), move |db| {
-                    db.update_memory_with_metadata(sid, &db_content, &category, 0.78, "reflector")
-                })
-                .await
-                .is_ok()
+                if state
+                    .memory_backend
+                    .update_memory_with_metadata(sid, &db_content, &category, 0.78, "reflector")
+                    .await
+                    .is_ok()
                 {
                     updated += 1;
                     #[cfg(feature = "sqlite-vec")]
@@ -598,8 +598,9 @@ async fn reflect_for_chat(state: &Arc<AppState>, chat_id: i64) {
                 {
                     let new_content = content.to_string();
                     let new_category = category.to_string();
-                    if let Ok(new_id) = call_blocking(state.db.clone(), move |db| {
-                        db.supersede_memory(
+                    if let Ok(new_id) = state
+                        .memory_backend
+                        .supersede_memory(
                             prev_id,
                             &new_content,
                             &new_category,
@@ -607,8 +608,7 @@ async fn reflect_for_chat(state: &Arc<AppState>, chat_id: i64) {
                             0.74,
                             Some("topic_conflict"),
                         )
-                    })
-                    .await
+                        .await
                     {
                         updated += 1;
                         #[cfg(feature = "sqlite-vec")]
@@ -662,27 +662,27 @@ async fn reflect_for_chat(state: &Arc<AppState>, chat_id: i64) {
                 if should_merge_duplicate(existing_mem, &content, &category) {
                     let update_content = content.to_string();
                     let update_category = category.to_string();
-                    if call_blocking(state.db.clone(), move |db| {
-                        db.update_memory_with_metadata(
+                    if state
+                        .memory_backend
+                        .update_memory_with_metadata(
                             dup_id,
                             &update_content,
                             &update_category,
                             0.70,
                             "reflector",
                         )
-                    })
-                    .await
-                    .is_ok()
+                        .await
+                        .is_ok()
                     {
                         updated += 1;
                     } else {
                         skipped += 1;
                     }
                 } else {
-                    let _ = call_blocking(state.db.clone(), move |db| {
-                        db.touch_memory_last_seen(dup_id, Some(0.55)).map(|_| ())
-                    })
-                    .await;
+                    let _ = state
+                        .memory_backend
+                        .touch_memory_last_seen(dup_id, Some(0.55))
+                        .await;
                     skipped += 1;
                 }
             } else {
@@ -694,11 +694,11 @@ async fn reflect_for_chat(state: &Arc<AppState>, chat_id: i64) {
         let content = content.to_string();
         let db_content = content.clone();
         let category = category.to_string();
-        let inserted_id = call_blocking(state.db.clone(), move |db| {
-            db.insert_memory_with_metadata(Some(chat_id), &db_content, &category, "reflector", 0.68)
-        })
-        .await
-        .ok();
+        let inserted_id = state
+            .memory_backend
+            .insert_memory_with_metadata(Some(chat_id), &db_content, &category, "reflector", 0.68)
+            .await
+            .ok();
         if let Some(memory_id) = inserted_id {
             inserted += 1;
             #[cfg(feature = "sqlite-vec")]

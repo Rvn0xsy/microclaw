@@ -3,20 +3,22 @@ use serde_json::json;
 use std::sync::Arc;
 use tracing::info;
 
+use crate::memory_backend::MemoryBackend;
 use microclaw_core::llm_types::ToolDefinition;
-use microclaw_storage::db::{call_blocking, Database};
+use microclaw_storage::db::Database;
 
 use super::{auth_context_from_input, authorize_chat_access, schema_object, Tool, ToolResult};
 
 // ── Search ────────────────────────────────────────────────────────────────────
 
 pub struct StructuredMemorySearchTool {
-    db: Arc<Database>,
+    memory_backend: Arc<MemoryBackend>,
 }
 
 impl StructuredMemorySearchTool {
-    pub fn new(db: Arc<Database>) -> Self {
-        Self { db }
+    pub fn new(db: Arc<Database>, memory_backend: Arc<MemoryBackend>) -> Self {
+        let _ = db;
+        Self { memory_backend }
     }
 }
 
@@ -73,10 +75,10 @@ impl Tool for StructuredMemorySearchTool {
             "structured_memory_search: query={query:?} chat_id={chat_id} limit={limit} include_archived={include_archived}"
         );
 
-        match call_blocking(self.db.clone(), move |db| {
-            db.search_memories_with_options(chat_id, &query, limit, include_archived, true)
-        })
-        .await
+        match self
+            .memory_backend
+            .search_memories_with_options(chat_id, &query, limit, include_archived, true)
+            .await
         {
             Ok(memories) if memories.is_empty() => {
                 ToolResult::success("No memories found matching that query.".into())
@@ -103,12 +105,13 @@ impl Tool for StructuredMemorySearchTool {
 // ── Delete ────────────────────────────────────────────────────────────────────
 
 pub struct StructuredMemoryDeleteTool {
-    db: Arc<Database>,
+    memory_backend: Arc<MemoryBackend>,
 }
 
 impl StructuredMemoryDeleteTool {
-    pub fn new(db: Arc<Database>) -> Self {
-        Self { db }
+    pub fn new(db: Arc<Database>, memory_backend: Arc<MemoryBackend>) -> Self {
+        let _ = db;
+        Self { memory_backend }
     }
 }
 
@@ -141,7 +144,7 @@ impl Tool for StructuredMemoryDeleteTool {
         };
 
         // Load memory first to check ownership
-        let mem = match call_blocking(self.db.clone(), move |db| db.get_memory_by_id(id)).await {
+        let mem = match self.memory_backend.get_memory_by_id(id).await {
             Ok(Some(m)) => m,
             Ok(None) => return ToolResult::error(format!("Memory id={id} not found")),
             Err(e) => return ToolResult::error(format!("DB error: {e}")),
@@ -169,7 +172,7 @@ impl Tool for StructuredMemoryDeleteTool {
 
         info!("structured_memory_delete: id={id}");
 
-        match call_blocking(self.db.clone(), move |db| db.archive_memory(id)).await {
+        match self.memory_backend.archive_memory(id).await {
             Ok(true) => ToolResult::success(format!("Memory id={id} archived.")),
             Ok(false) => ToolResult::error(format!("Memory id={id} not found")),
             Err(e) => ToolResult::error(format!("Delete failed: {e}")),
@@ -180,12 +183,13 @@ impl Tool for StructuredMemoryDeleteTool {
 // ── Update ────────────────────────────────────────────────────────────────────
 
 pub struct StructuredMemoryUpdateTool {
-    db: Arc<Database>,
+    memory_backend: Arc<MemoryBackend>,
 }
 
 impl StructuredMemoryUpdateTool {
-    pub fn new(db: Arc<Database>) -> Self {
-        Self { db }
+    pub fn new(db: Arc<Database>, memory_backend: Arc<MemoryBackend>) -> Self {
+        let _ = db;
+        Self { memory_backend }
     }
 }
 
@@ -234,7 +238,7 @@ impl Tool for StructuredMemoryUpdateTool {
         }
 
         // Load memory first to check ownership and get current category
-        let mem = match call_blocking(self.db.clone(), move |db| db.get_memory_by_id(id)).await {
+        let mem = match self.memory_backend.get_memory_by_id(id).await {
             Ok(Some(m)) => m,
             Ok(None) => return ToolResult::error(format!("Memory id={id} not found")),
             Err(e) => return ToolResult::error(format!("DB error: {e}")),
@@ -274,10 +278,10 @@ impl Tool for StructuredMemoryUpdateTool {
 
         info!("structured_memory_update: id={id}");
 
-        match call_blocking(self.db.clone(), move |db| {
-            db.update_memory_content(id, &content, &category)
-        })
-        .await
+        match self
+            .memory_backend
+            .update_memory_content(id, &content, &category)
+            .await
         {
             Ok(true) => ToolResult::success(format!("Memory id={id} updated.")),
             Ok(false) => ToolResult::error(format!("Memory id={id} not found")),
@@ -297,6 +301,10 @@ mod tests {
         Arc::new(Database::new(dir.to_str().unwrap()).unwrap())
     }
 
+    fn test_backend(db: Arc<Database>) -> Arc<MemoryBackend> {
+        Arc::new(MemoryBackend::local_only(db))
+    }
+
     #[tokio::test]
     async fn test_search_returns_results() {
         let db = test_db();
@@ -304,7 +312,7 @@ mod tests {
             .unwrap();
         db.insert_memory(Some(100), "User likes coffee", "PROFILE")
             .unwrap();
-        let tool = StructuredMemorySearchTool::new(db);
+        let tool = StructuredMemorySearchTool::new(db.clone(), test_backend(db));
         let result = tool
             .execute(json!({
                 "query": "rust",
@@ -319,7 +327,7 @@ mod tests {
     #[tokio::test]
     async fn test_search_empty_query_errors() {
         let db = test_db();
-        let tool = StructuredMemorySearchTool::new(db);
+        let tool = StructuredMemorySearchTool::new(db.clone(), test_backend(db));
         let result = tool.execute(json!({"query": "  "})).await;
         assert!(result.is_error);
     }
@@ -328,7 +336,7 @@ mod tests {
     async fn test_delete_own_chat_memory() {
         let db = test_db();
         let id = db.insert_memory(Some(100), "to delete", "EVENT").unwrap();
-        let tool = StructuredMemoryDeleteTool::new(db.clone());
+        let tool = StructuredMemoryDeleteTool::new(db.clone(), test_backend(db.clone()));
         let result = tool
             .execute(json!({
                 "id": id,
@@ -344,7 +352,7 @@ mod tests {
     async fn test_delete_other_chat_denied() {
         let db = test_db();
         let id = db.insert_memory(Some(200), "other chat", "EVENT").unwrap();
-        let tool = StructuredMemoryDeleteTool::new(db);
+        let tool = StructuredMemoryDeleteTool::new(db.clone(), test_backend(db));
         let result = tool
             .execute(json!({
                 "id": id,
@@ -361,7 +369,7 @@ mod tests {
         let id = db
             .insert_memory(Some(100), "User lives in Tokyo", "PROFILE")
             .unwrap();
-        let tool = StructuredMemoryUpdateTool::new(db.clone());
+        let tool = StructuredMemoryUpdateTool::new(db.clone(), test_backend(db.clone()));
         let result = tool
             .execute(json!({
                 "id": id,
@@ -378,7 +386,7 @@ mod tests {
     async fn test_update_content_too_long() {
         let db = test_db();
         let id = db.insert_memory(Some(100), "short", "EVENT").unwrap();
-        let tool = StructuredMemoryUpdateTool::new(db);
+        let tool = StructuredMemoryUpdateTool::new(db.clone(), test_backend(db));
         let long = "x".repeat(301);
         let result = tool
             .execute(json!({

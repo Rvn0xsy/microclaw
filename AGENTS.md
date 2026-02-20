@@ -178,3 +178,7 @@ Docs drift guard (CI + local):
 ```sh
 node scripts/generate_docs_artifacts.mjs --check
 ```
+
+## Collaboration conventions
+
+- For the separate `website` repository (`microclaw.github.io`), do not open a PR by default; commit/push directly unless explicitly requested otherwise.

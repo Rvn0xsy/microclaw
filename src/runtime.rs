@@ -17,6 +17,7 @@ use crate::embedding::EmbeddingProvider;
 use crate::hooks::HookManager;
 use crate::llm::LlmProvider;
 use crate::memory::MemoryManager;
+use crate::memory_backend::MemoryBackend;
 use crate::skills::SkillManager;
 use crate::tools::ToolRegistry;
 use crate::web::WebAdapter;
@@ -32,6 +33,7 @@ pub struct AppState {
     pub hooks: Arc<HookManager>,
     pub llm: Box<dyn LlmProvider>,
     pub embedding: Option<Arc<dyn EmbeddingProvider>>,
+    pub memory_backend: Arc<MemoryBackend>,
     pub tools: ToolRegistry,
 }
 
@@ -118,7 +120,16 @@ pub async fn run(
 
     let channel_registry = Arc::new(registry);
 
-    let mut tools = ToolRegistry::new(&config, channel_registry.clone(), db.clone());
+    let memory_backend = Arc::new(MemoryBackend::new(
+        db.clone(),
+        crate::memory_backend::MemoryMcpClient::discover(&mcp_manager),
+    ));
+    let mut tools = ToolRegistry::new(
+        &config,
+        channel_registry.clone(),
+        db.clone(),
+        memory_backend.clone(),
+    );
 
     for (server, tool_info) in mcp_manager.all_tools() {
         tools.add_tool(Box::new(crate::tools::mcp::McpTool::new(server, tool_info)));
@@ -135,6 +146,7 @@ pub async fn run(
         hooks,
         llm,
         embedding,
+        memory_backend,
         tools,
     });
 

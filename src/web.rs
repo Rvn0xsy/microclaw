@@ -1551,6 +1551,7 @@ mod tests {
         let runtime_dir = cfg.runtime_data_dir();
         std::fs::create_dir_all(&runtime_dir).unwrap();
         let db = Arc::new(Database::new(&runtime_dir).unwrap());
+        let memory_backend = Arc::new(crate::memory_backend::MemoryBackend::local_only(db.clone()));
         let mut registry = ChannelRegistry::new();
         registry.register(Arc::new(WebAdapter));
         let channel_registry = Arc::new(registry);
@@ -1563,7 +1564,8 @@ mod tests {
             hooks: Arc::new(crate::hooks::HookManager::for_tests()),
             llm,
             embedding: None,
-            tools: ToolRegistry::new(&cfg, channel_registry, db),
+            memory_backend: memory_backend.clone(),
+            tools: ToolRegistry::new(&cfg, channel_registry, db, memory_backend),
         };
         Arc::new(state)
     }

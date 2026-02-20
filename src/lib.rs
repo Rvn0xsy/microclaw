@@ -9,6 +9,7 @@ pub mod gateway;
 pub mod hooks;
 pub mod llm;
 pub mod mcp;
+pub mod memory_backend;
 pub mod otlp;
 pub mod runtime;
 pub mod scheduler;

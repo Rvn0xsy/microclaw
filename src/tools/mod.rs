@@ -22,6 +22,7 @@ use std::sync::{Arc, OnceLock};
 use std::{path::PathBuf, time::Instant};
 
 use crate::config::Config;
+use crate::memory_backend::MemoryBackend;
 use microclaw_channels::channel_adapter::ChannelRegistry;
 use microclaw_core::llm_types::ToolDefinition;
 use microclaw_storage::db::Database;
@@ -41,7 +42,12 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
-    pub fn new(config: &Config, channel_registry: Arc<ChannelRegistry>, db: Arc<Database>) -> Self {
+    pub fn new(
+        config: &Config,
+        channel_registry: Arc<ChannelRegistry>,
+        db: Arc<Database>,
+        memory_backend: Arc<MemoryBackend>,
+    ) -> Self {
         let working_dir = PathBuf::from(&config.working_dir);
         if let Err(e) = std::fs::create_dir_all(&working_dir) {
             tracing::warn!(
@@ -91,7 +97,11 @@ impl ToolRegistry {
                 config.working_dir_isolation,
             )),
             Box::new(memory::ReadMemoryTool::new(&config.data_dir)),
-            Box::new(memory::WriteMemoryTool::new(&config.data_dir, db.clone())),
+            Box::new(memory::WriteMemoryTool::new(
+                &config.data_dir,
+                db.clone(),
+                memory_backend.clone(),
+            )),
             Box::new(web_fetch::WebFetchTool::new(
                 config.tool_timeout_secs("web_fetch", 15),
             )),
@@ -152,12 +162,15 @@ impl ToolRegistry {
             Box::new(todo::TodoWriteTool::new(&config.data_dir)),
             Box::new(structured_memory::StructuredMemorySearchTool::new(
                 db.clone(),
+                memory_backend.clone(),
             )),
             Box::new(structured_memory::StructuredMemoryDeleteTool::new(
                 db.clone(),
+                memory_backend.clone(),
             )),
             Box::new(structured_memory::StructuredMemoryUpdateTool::new(
                 db.clone(),
+                memory_backend.clone(),
             )),
         ];
 
@@ -191,6 +204,7 @@ impl ToolRegistry {
         }
         let skills_data_dir = config.skills_data_dir();
         let sandbox_router = Arc::new(SandboxRouter::new(config.sandbox.clone(), &working_dir));
+        let memory_backend = Arc::new(MemoryBackend::local_only(db.clone()));
         let tools: Vec<Box<dyn Tool>> = vec![
             Box::new(
                 bash::BashTool::new_with_isolation(
@@ -232,7 +246,10 @@ impl ToolRegistry {
                 config.tool_timeout_secs("web_search", 15),
             )),
             Box::new(activate_skill::ActivateSkillTool::new(&skills_data_dir)),
-            Box::new(structured_memory::StructuredMemorySearchTool::new(db)),
+            Box::new(structured_memory::StructuredMemorySearchTool::new(
+                db,
+                memory_backend,
+            )),
         ];
         ToolRegistry {
             tools,
