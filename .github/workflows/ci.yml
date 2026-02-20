@@ -42,10 +42,22 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
 
+  stability-smoke:
+    name: Stability Smoke
+    runs-on: ubuntu-latest
+    needs: [rust-checks]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/ci/stability_smoke.sh
+
   build:
     name: Build (Release)
     runs-on: ubuntu-latest
-    needs: [web, rust-checks]
+    needs: [web, rust-checks, stability-smoke]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

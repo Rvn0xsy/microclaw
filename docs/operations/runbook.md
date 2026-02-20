@@ -35,3 +35,13 @@ If a hook times out or crashes, runtime skips the hook and continues.
 - If points are missing under burst traffic, raise `otlp_queue_capacity` and review retry settings.
 
 If history is empty, generate traffic first and re-check.
+
+## Stability Gate
+
+- Run stability smoke suite locally: `scripts/ci/stability_smoke.sh`
+- CI gate: `Stability Smoke` job in `.github/workflows/ci.yml`
+- Scope:
+  - cross-chat permissions
+  - scheduler restart persistence
+  - sandbox fallback and require-runtime fail-closed behavior
+  - web inflight and rate-limit regression
