@@ -3,7 +3,7 @@
 ## Endpoints
 
 - `GET /api/metrics`: current counters/gauges snapshot.
-- `GET /api/metrics/summary`: SLO-oriented summary contract.
+- `GET /api/metrics/summary`: SLO-oriented summary contract plus derived reliability summary.
 - `GET /api/metrics/history?minutes=1440&limit=2000`: persisted timeline from SQLite.
 
 ## Fields
@@ -74,6 +74,10 @@ channels:
 
 - Traffic last 24h: `/api/metrics/history?minutes=1440`
 - High-load short window: `/api/metrics/history?minutes=60&limit=3600`
+
+`/api/metrics/summary` derived fields:
+- `summary.mcp_rejections_total`
+- `summary.mcp_rejection_ratio`
 
 ## OTLP Exporter
 

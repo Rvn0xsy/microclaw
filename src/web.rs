@@ -2118,6 +2118,28 @@ mod tests {
             .and_then(|v| v.as_i64())
             .is_some());
 
+        let summary_req = Request::builder()
+            .method("GET")
+            .uri("/api/metrics/summary")
+            .body(Body::empty())
+            .unwrap();
+        let summary_resp = app.clone().oneshot(summary_req).await.unwrap();
+        assert_eq!(summary_resp.status(), StatusCode::OK);
+        let summary_body = axum::body::to_bytes(summary_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let summary_json: serde_json::Value = serde_json::from_slice(&summary_body).unwrap();
+        assert!(summary_json
+            .get("summary")
+            .and_then(|m| m.get("mcp_rejections_total"))
+            .and_then(|v| v.as_i64())
+            .is_some());
+        assert!(summary_json
+            .get("summary")
+            .and_then(|m| m.get("mcp_rejection_ratio"))
+            .and_then(|v| v.as_f64())
+            .is_some());
+
         let history_req = Request::builder()
             .method("GET")
             .uri("/api/metrics/history?minutes=60")

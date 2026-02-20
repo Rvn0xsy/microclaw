@@ -68,6 +68,14 @@ pub(super) async fn api_metrics_summary(
     } else {
         1.0
     };
+    let mcp_rejections_total = snapshot.mcp_rate_limited_rejections
+        + snapshot.mcp_bulkhead_rejections
+        + snapshot.mcp_circuit_open_rejections;
+    let mcp_rejection_ratio = if snapshot.mcp_calls > 0 {
+        mcp_rejections_total as f64 / snapshot.mcp_calls as f64
+    } else {
+        0.0
+    };
 
     Ok(Json(json!({
         "ok": true,
@@ -113,7 +121,14 @@ pub(super) async fn api_metrics_summary(
             "tool_error": snapshot.tool_error,
             "tool_policy_blocks": snapshot.tool_policy_blocks,
             "mcp_calls": snapshot.mcp_calls,
+            "mcp_rate_limited_rejections": snapshot.mcp_rate_limited_rejections,
+            "mcp_bulkhead_rejections": snapshot.mcp_bulkhead_rejections,
+            "mcp_circuit_open_rejections": snapshot.mcp_circuit_open_rejections,
             "active_sessions": active_sessions
+        },
+        "summary": {
+            "mcp_rejections_total": mcp_rejections_total,
+            "mcp_rejection_ratio": mcp_rejection_ratio
         }
     })))
 }
