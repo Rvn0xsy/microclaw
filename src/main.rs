@@ -31,7 +31,7 @@ Quick Start:
   3) microclaw start
 
 Channel requirement:
-  Enable at least one channel: Telegram / Discord / Web UI.
+  Enable at least one channel: Telegram / Discord / Slack / Feishu / Web UI.
 
 More:
   https://microclaw.ai"#
