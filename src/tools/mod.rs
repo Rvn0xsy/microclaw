@@ -101,7 +101,12 @@ impl ToolRegistry {
             Box::new(send_message::SendMessageTool::new(
                 channel_registry.clone(),
                 db.clone(),
-                config.bot_username.clone(),
+                if config.bot_username.trim().is_empty() {
+                    "bot".to_string()
+                } else {
+                    config.bot_username.clone()
+                },
+                config.bot_username_overrides(),
             )),
             Box::new(schedule::ScheduleTaskTool::new(
                 channel_registry.clone(),

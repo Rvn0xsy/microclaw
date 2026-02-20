@@ -1442,7 +1442,7 @@ async fn handle_feishu_message(
                 let bot_msg = StoredMessage {
                     id: uuid::Uuid::new_v4().to_string(),
                     chat_id,
-                    sender_name: app_state.config.bot_username.clone(),
+                    sender_name: app_state.config.bot_username_for_channel("feishu"),
                     content: response,
                     is_from_bot: true,
                     timestamp: chrono::Utc::now().to_rfc3339(),
@@ -1464,7 +1464,7 @@ async fn handle_feishu_message(
                 let bot_msg = StoredMessage {
                     id: uuid::Uuid::new_v4().to_string(),
                     chat_id,
-                    sender_name: app_state.config.bot_username.clone(),
+                    sender_name: app_state.config.bot_username_for_channel("feishu"),
                     content: fallback.to_string(),
                     is_from_bot: true,
                     timestamp: chrono::Utc::now().to_rfc3339(),

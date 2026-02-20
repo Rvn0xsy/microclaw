@@ -408,7 +408,7 @@ impl EventHandler for Handler {
                     let bot_msg = StoredMessage {
                         id: uuid::Uuid::new_v4().to_string(),
                         chat_id: channel_id,
-                        sender_name: self.app_state.config.bot_username.clone(),
+                        sender_name: self.app_state.config.bot_username_for_channel("discord"),
                         content: response,
                         is_from_bot: true,
                         timestamp: chrono::Utc::now().to_rfc3339(),
@@ -424,7 +424,7 @@ impl EventHandler for Handler {
                     let bot_msg = StoredMessage {
                         id: uuid::Uuid::new_v4().to_string(),
                         chat_id: channel_id,
-                        sender_name: self.app_state.config.bot_username.clone(),
+                        sender_name: self.app_state.config.bot_username_for_channel("discord"),
                         content: fallback,
                         is_from_bot: true,
                         timestamp: chrono::Utc::now().to_rfc3339(),

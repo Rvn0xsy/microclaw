@@ -593,7 +593,7 @@ async fn handle_message(
     let should_respond = match runtime_chat_type {
         "private" => true,
         _ => {
-            let bot_mention = format!("@{}", state.config.bot_username);
+            let bot_mention = format!("@{}", state.config.bot_username_for_channel("telegram"));
             text.contains(&bot_mention)
         }
     };
@@ -655,7 +655,7 @@ async fn handle_message(
                 let bot_msg = StoredMessage {
                     id: uuid::Uuid::new_v4().to_string(),
                     chat_id,
-                    sender_name: state.config.bot_username.clone(),
+                    sender_name: state.config.bot_username_for_channel("telegram"),
                     content: response,
                     is_from_bot: true,
                     timestamp: chrono::Utc::now().to_rfc3339(),
@@ -674,7 +674,7 @@ async fn handle_message(
                 let bot_msg = StoredMessage {
                     id: uuid::Uuid::new_v4().to_string(),
                     chat_id,
-                    sender_name: state.config.bot_username.clone(),
+                    sender_name: state.config.bot_username_for_channel("telegram"),
                     content: fallback,
                     is_from_bot: true,
                     timestamp: chrono::Utc::now().to_rfc3339(),

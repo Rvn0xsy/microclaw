@@ -223,6 +223,7 @@ const DYNAMIC_CHANNELS: DynChannelDef[] = [
     fields: [
       { yamlKey: 'bot_token', label: 'slack_bot_token', placeholder: 'xoxb-...', description: 'Bot User OAuth Token (xoxb-) for sending messages. Leave blank to keep current secret unchanged.', secret: true },
       { yamlKey: 'app_token', label: 'slack_app_token', placeholder: 'xapp-...', description: 'App-level token (xapp-) for Socket Mode connection. Leave blank to keep current secret unchanged.', secret: true },
+      { yamlKey: 'bot_username', label: 'slack_bot_username', placeholder: 'slack_bot_name', description: 'Optional Slack-specific bot username override.', secret: false },
     ],
   },
   {
@@ -241,6 +242,7 @@ const DYNAMIC_CHANNELS: DynChannelDef[] = [
       { yamlKey: 'app_id', label: 'feishu_app_id', placeholder: 'cli_xxx', description: 'App ID from Feishu Open Platform credentials.', secret: false },
       { yamlKey: 'app_secret', label: 'feishu_app_secret', placeholder: 'xxx', description: 'App Secret from Feishu Open Platform. Leave blank to keep current secret unchanged.', secret: true },
       { yamlKey: 'domain', label: 'feishu_domain', placeholder: 'feishu', description: 'Use "feishu" for China, "lark" for international, or a custom base URL.', secret: false },
+      { yamlKey: 'bot_username', label: 'feishu_bot_username', placeholder: 'feishu_bot_name', description: 'Optional Feishu-specific bot username override.', secret: false },
     ],
   },
 ]
@@ -1061,10 +1063,13 @@ function App() {
       api_key: '',
       telegram_bot_token: '',
       bot_username: String(data.config?.bot_username || ''),
+      telegram_bot_username: String(((data.config?.channels as Record<string, Record<string, unknown>> | undefined)?.telegram?.bot_username) || ''),
       discord_bot_token: '',
+      discord_bot_username: String(((data.config?.channels as Record<string, Record<string, unknown>> | undefined)?.discord?.bot_username) || ''),
       discord_allowed_channels_csv: Array.isArray(data.config?.discord_allowed_channels)
         ? (data.config?.discord_allowed_channels as number[]).join(',')
         : '',
+      web_bot_username: String(((data.config?.channels as Record<string, Record<string, unknown>> | undefined)?.web?.bot_username) || ''),
       working_dir_isolation: normalizeWorkingDirIsolation(
         data.config?.working_dir_isolation || DEFAULT_CONFIG_VALUES.working_dir_isolation,
       ),
@@ -1159,11 +1164,20 @@ function App() {
         case 'bot_username':
           next.bot_username = ''
           break
+        case 'telegram_bot_username':
+          next.telegram_bot_username = ''
+          break
         case 'discord_bot_token':
           next.discord_bot_token = ''
           break
+        case 'discord_bot_username':
+          next.discord_bot_username = ''
+          break
         case 'discord_allowed_channels_csv':
           next.discord_allowed_channels_csv = ''
+          break
+        case 'web_bot_username':
+          next.web_bot_username = ''
           break
         case 'working_dir_isolation':
           next.working_dir_isolation = DEFAULT_CONFIG_VALUES.working_dir_isolation
@@ -1242,7 +1256,10 @@ function App() {
         llm_provider: String(configDraft.llm_provider || ''),
         model: String(configDraft.model || ''),
         bot_username: String(configDraft.bot_username || '').trim(),
+        telegram_bot_username: String(configDraft.telegram_bot_username || '').trim() || null,
         discord_allowed_channels: parseDiscordChannelCsv(String(configDraft.discord_allowed_channels_csv || '')),
+        discord_bot_username: String(configDraft.discord_bot_username || '').trim() || null,
+        web_bot_username: String(configDraft.web_bot_username || '').trim() || null,
         working_dir_isolation: normalizeWorkingDirIsolation(
           configDraft.working_dir_isolation || DEFAULT_CONFIG_VALUES.working_dir_isolation,
         ),
@@ -1537,6 +1554,14 @@ function App() {
                         <Text size="1" color="gray" className="mt-2 block">working_dir_isolation: chat = isolated workspace per chat; shared = one shared workspace.</Text>
                         <Text size="1" color="gray" className="mt-1 block">max_tokens / max_tool_iterations / max_document_size_mb / memory_token_budget control response budget and tool loop safety.</Text>
                         <div className="mt-4 space-y-3">
+                          <ConfigFieldCard label="bot_username" description={<>Global default bot username. Channel-specific <code>channels.&lt;name&gt;.bot_username</code> overrides this.</>}>
+                            <TextField.Root
+                              className="mt-2"
+                              value={String(configDraft.bot_username || '')}
+                              onChange={(e) => setConfigField('bot_username', e.target.value)}
+                              placeholder="bot"
+                            />
+                          </ConfigFieldCard>
                           <ConfigFieldCard label="working_dir_isolation" description={<>Use <code>chat</code> for per-chat isolation, or <code>shared</code> for one shared workspace.</>}>
                             <select
                               className="mt-2 w-full rounded-md border border-[color:var(--mc-border-soft)] bg-transparent px-3 py-2 text-base text-[color:inherit] outline-none focus:border-[color:var(--mc-accent)]"
@@ -1749,7 +1774,7 @@ function App() {
                             <>Open Telegram and chat with <code>@BotFather</code>.</>,
                             <>Run <code>/newbot</code>, set name and username (must end with <code>bot</code>).</>,
                             <>Copy the bot token and paste below.</>,
-                            <>Set <code>bot_username</code> without <code>@</code>.</>,
+                            <>Optional: set <code>telegram_bot_username</code> without <code>@</code> to override global <code>bot_username</code>.</>,
                             <>In groups, mention the bot to trigger replies.</>,
                           ]}
                         />
@@ -1765,11 +1790,11 @@ function App() {
                               placeholder="123456789:AA..."
                             />
                           </ConfigFieldCard>
-                          <ConfigFieldCard label="bot_username" description={<>Telegram bot username without <code>@</code>, used for group mention trigger.</>}>
+                          <ConfigFieldCard label="telegram_bot_username" description={<>Optional Telegram-specific username override without <code>@</code>, used for group mention trigger.</>}>
                             <TextField.Root
                               className="mt-2"
-                              value={String(configDraft.bot_username || '')}
-                              onChange={(e) => setConfigField('bot_username', e.target.value)}
+                              value={String(configDraft.telegram_bot_username || '')}
+                              onChange={(e) => setConfigField('telegram_bot_username', e.target.value)}
                               placeholder="my_microclaw_bot"
                             />
                           </ConfigFieldCard>
@@ -1807,6 +1832,14 @@ function App() {
                               value={String(configDraft.discord_allowed_channels_csv || '')}
                               onChange={(e) => setConfigField('discord_allowed_channels_csv', e.target.value)}
                               placeholder="1234567890, 9876543210"
+                            />
+                          </ConfigFieldCard>
+                          <ConfigFieldCard label="discord_bot_username" description={<>Optional Discord-specific bot username override.</>}>
+                            <TextField.Root
+                              className="mt-2"
+                              value={String(configDraft.discord_bot_username || '')}
+                              onChange={(e) => setConfigField('discord_bot_username', e.target.value)}
+                              placeholder="discord_bot_name"
                             />
                           </ConfigFieldCard>
                         </div>
@@ -1866,6 +1899,14 @@ function App() {
                               value={String(configDraft.web_port || DEFAULT_CONFIG_VALUES.web_port)}
                               onChange={(e) => setConfigField('web_port', e.target.value)}
                               placeholder="10961"
+                            />
+                          </ConfigFieldCard>
+                          <ConfigFieldCard label="web_bot_username" description={<>Optional Web-specific bot username override.</>}>
+                            <TextField.Root
+                              className="mt-2"
+                              value={String(configDraft.web_bot_username || '')}
+                              onChange={(e) => setConfigField('web_bot_username', e.target.value)}
+                              placeholder="web_bot_name"
                             />
                           </ConfigFieldCard>
                         </div>

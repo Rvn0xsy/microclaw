@@ -67,10 +67,11 @@ async fn run_due_tasks(state: &Arc<AppState>) {
         {
             Ok(response) => {
                 if !response.is_empty() {
+                    let bot_username = state.config.bot_username_for_channel(&routing.channel_name);
                     let _ = deliver_and_store_bot_message(
                         &state.channel_registry,
                         state.db.clone(),
-                        &state.config.bot_username,
+                        &bot_username,
                         task.chat_id,
                         &response,
                     )
@@ -86,10 +87,11 @@ async fn run_due_tasks(state: &Arc<AppState>) {
             Err(e) => {
                 error!("Scheduler: task #{} failed: {e}", task.id);
                 let err_text = format!("Scheduled task #{} failed: {e}", task.id);
+                let bot_username = state.config.bot_username_for_channel(&routing.channel_name);
                 let _ = deliver_and_store_bot_message(
                     &state.channel_registry,
                     state.db.clone(),
-                    &state.config.bot_username,
+                    &bot_username,
                     task.chat_id,
                     &err_text,
                 )

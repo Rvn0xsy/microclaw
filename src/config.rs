@@ -315,6 +315,39 @@ pub struct Config {
 }
 
 impl Config {
+    pub fn bot_username_for_channel(&self, channel: &str) -> String {
+        let channel_override = self
+            .channels
+            .get(channel)
+            .and_then(|v| v.get("bot_username"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+        if let Some(v) = channel_override {
+            return v.to_string();
+        }
+
+        let global = self.bot_username.trim();
+        if !global.is_empty() {
+            global.to_string()
+        } else {
+            default_bot_username()
+        }
+    }
+
+    pub fn bot_username_overrides(&self) -> HashMap<String, String> {
+        self.channels
+            .iter()
+            .filter_map(|(channel, cfg)| {
+                cfg.get("bot_username")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .map(|v| (channel.clone(), v.to_string()))
+            })
+            .collect()
+    }
+
     #[cfg(test)]
     pub(crate) fn test_defaults() -> Self {
         Self {

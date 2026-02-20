@@ -669,8 +669,13 @@ struct UpdateConfigRequest {
 
     telegram_bot_token: Option<String>,
     bot_username: Option<String>,
+    telegram_bot_username: Option<String>,
     discord_bot_token: Option<String>,
     discord_allowed_channels: Option<Vec<u64>>,
+    discord_bot_username: Option<String>,
+    slack_bot_username: Option<String>,
+    feishu_bot_username: Option<String>,
+    web_bot_username: Option<String>,
 
     /// Generic per-channel config updates. Keys are channel names (e.g. "slack", "feishu").
     /// Values are objects with channel-specific fields. Non-empty string values are merged
@@ -1219,10 +1224,11 @@ async fn send_and_store_response_with_events(
         m.llm_output_tokens += (after.output_tokens - before.output_tokens).max(0);
     }
 
+    let bot_username = state.app_state.config.bot_username_for_channel("web");
     deliver_and_store_bot_message(
         &state.app_state.channel_registry,
         state.app_state.db.clone(),
-        &state.app_state.config.bot_username,
+        &bot_username,
         chat_id,
         &response,
     )

@@ -16,23 +16,42 @@ use microclaw_storage::db::{call_blocking, Database, StoredMessage};
 pub struct SendMessageTool {
     registry: Arc<ChannelRegistry>,
     db: Arc<Database>,
-    bot_username: String,
+    default_bot_username: String,
+    channel_bot_usernames: std::collections::HashMap<String, String>,
 }
 
 impl SendMessageTool {
-    pub fn new(registry: Arc<ChannelRegistry>, db: Arc<Database>, bot_username: String) -> Self {
+    pub fn new(
+        registry: Arc<ChannelRegistry>,
+        db: Arc<Database>,
+        default_bot_username: String,
+        channel_bot_usernames: std::collections::HashMap<String, String>,
+    ) -> Self {
         SendMessageTool {
             registry,
             db,
-            bot_username,
+            default_bot_username,
+            channel_bot_usernames,
         }
     }
 
-    async fn store_bot_message(&self, chat_id: i64, content: String) -> Result<(), String> {
+    fn bot_username_for_channel(&self, channel_name: &str) -> String {
+        self.channel_bot_usernames
+            .get(channel_name)
+            .cloned()
+            .unwrap_or_else(|| self.default_bot_username.clone())
+    }
+
+    async fn store_bot_message(
+        &self,
+        chat_id: i64,
+        sender_name: String,
+        content: String,
+    ) -> Result<(), String> {
         let msg = StoredMessage {
             id: uuid::Uuid::new_v4().to_string(),
             chat_id,
-            sender_name: self.bot_username.clone(),
+            sender_name,
             content,
             is_from_bot: true,
             timestamp: chrono::Utc::now().to_rfc3339(),
@@ -186,7 +205,8 @@ impl Tool for SendMessageTool {
                         chat_id,
                         file_path.display()
                     );
-                    if let Err(e) = self.store_bot_message(chat_id, content).await {
+                    let sender_name = self.bot_username_for_channel(&routing.channel_name);
+                    if let Err(e) = self.store_bot_message(chat_id, sender_name, content).await {
                         warn!(
                             "send_message store_bot_message failed: chat_id={}, error={}",
                             chat_id, e
@@ -206,10 +226,15 @@ impl Tool for SendMessageTool {
                 }
             }
         } else {
+            let sender_name =
+                match get_required_chat_routing(&self.registry, self.db.clone(), chat_id).await {
+                    Ok(routing) => self.bot_username_for_channel(&routing.channel_name),
+                    Err(_) => self.default_bot_username.clone(),
+                };
             match deliver_and_store_bot_message(
                 &self.registry,
                 self.db.clone(),
-                &self.bot_username,
+                &sender_name,
                 chat_id,
                 &text,
             )
@@ -257,7 +282,12 @@ mod tests {
     #[tokio::test]
     async fn test_send_message_permission_denied_before_network() {
         let (db, dir) = test_db();
-        let tool = SendMessageTool::new(test_registry(), db, "bot".into());
+        let tool = SendMessageTool::new(
+            test_registry(),
+            db,
+            "bot".into(),
+            std::collections::HashMap::new(),
+        );
         let result = tool
             .execute(json!({
                 "chat_id": 200,
@@ -278,7 +308,12 @@ mod tests {
         let (db, dir) = test_db();
         db.upsert_chat(999, Some("web-main"), "web").unwrap();
 
-        let tool = SendMessageTool::new(test_registry(), db.clone(), "bot".into());
+        let tool = SendMessageTool::new(
+            test_registry(),
+            db.clone(),
+            "bot".into(),
+            std::collections::HashMap::new(),
+        );
         let result = tool
             .execute(json!({
                 "chat_id": 999,
@@ -321,7 +356,8 @@ mod tests {
         registry.register(Arc::new(tg_adapter));
         let registry = Arc::new(registry);
 
-        let tool = SendMessageTool::new(registry, db, "bot".into());
+        let tool =
+            SendMessageTool::new(registry, db, "bot".into(), std::collections::HashMap::new());
         let result = tool
             .execute(json!({
                 "chat_id": 200,
@@ -342,7 +378,12 @@ mod tests {
     #[tokio::test]
     async fn test_send_message_requires_text_or_attachment() {
         let (db, dir) = test_db();
-        let tool = SendMessageTool::new(test_registry(), db, "bot".into());
+        let tool = SendMessageTool::new(
+            test_registry(),
+            db,
+            "bot".into(),
+            std::collections::HashMap::new(),
+        );
         let result = tool
             .execute(json!({
                 "chat_id": 999,
@@ -364,7 +405,12 @@ mod tests {
         let attachment = dir.join("sample.txt");
         std::fs::write(&attachment, "hello").unwrap();
 
-        let tool = SendMessageTool::new(test_registry(), db, "bot".into());
+        let tool = SendMessageTool::new(
+            test_registry(),
+            db,
+            "bot".into(),
+            std::collections::HashMap::new(),
+        );
         let result = tool
             .execute(json!({
                 "chat_id": 999,

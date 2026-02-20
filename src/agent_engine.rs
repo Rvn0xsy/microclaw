@@ -293,7 +293,7 @@ pub(crate) async fn process_with_agent_impl(
 
         if session_messages.is_empty() {
             // Corrupted session, fall back to DB history
-            load_messages_from_db(state, chat_id, context.chat_type).await?
+            load_messages_from_db(state, chat_id, context.chat_type, context.caller_channel).await?
         } else {
             // Get new user messages since session was last saved
             let updated_at_cloned = updated_at.clone();
@@ -322,7 +322,7 @@ pub(crate) async fn process_with_agent_impl(
         }
     } else {
         // No session — build from DB history
-        load_messages_from_db(state, chat_id, context.chat_type).await?
+        load_messages_from_db(state, chat_id, context.chat_type, context.caller_channel).await?
     };
 
     // If override_prompt is provided (from scheduler), add it as a user message
@@ -363,8 +363,11 @@ pub(crate) async fn process_with_agent_impl(
     let memory_context = format!("{}{}", file_memory, db_memory);
     let skills_catalog = state.skills.build_skills_catalog();
     let soul_content = load_soul_content(&state.config, chat_id);
+    let bot_username = state
+        .config
+        .bot_username_for_channel(context.caller_channel);
     let mut system_prompt = build_system_prompt(
-        &state.config.bot_username,
+        &bot_username,
         context.caller_channel,
         &memory_context,
         chat_id,
@@ -835,6 +838,7 @@ pub(crate) async fn load_messages_from_db(
     state: &AppState,
     chat_id: i64,
     chat_type: &str,
+    caller_channel: &str,
 ) -> Result<Vec<Message>, anyhow::Error> {
     let max_history = state.config.max_history_messages;
     let history = if chat_type == "group" {
@@ -848,10 +852,8 @@ pub(crate) async fn load_messages_from_db(
         })
         .await?
     };
-    Ok(history_to_claude_messages(
-        &history,
-        &state.config.bot_username,
-    ))
+    let bot_username = state.config.bot_username_for_channel(caller_channel);
+    Ok(history_to_claude_messages(&history, &bot_username))
 }
 
 fn is_cjk(c: char) -> bool {

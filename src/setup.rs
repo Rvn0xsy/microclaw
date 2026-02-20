@@ -78,6 +78,13 @@ const DYNAMIC_CHANNELS: &[DynamicChannelDef] = &[
                 secret: true,
                 required: true,
             },
+            ChannelFieldDef {
+                yaml_key: "bot_username",
+                label: "Slack bot username override (optional)",
+                default: "",
+                secret: false,
+                required: false,
+            },
         ],
     },
     DynamicChannelDef {
@@ -102,6 +109,13 @@ const DYNAMIC_CHANNELS: &[DynamicChannelDef] = &[
                 yaml_key: "domain",
                 label: "Feishu domain (feishu/lark/custom)",
                 default: "feishu",
+                secret: false,
+                required: false,
+            },
+            ChannelFieldDef {
+                yaml_key: "bot_username",
+                label: "Feishu bot username override (optional)",
+                default: "",
                 secret: false,
                 required: false,
             },

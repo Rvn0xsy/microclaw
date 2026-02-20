@@ -388,6 +388,28 @@ pub(super) async fn api_update_config(
     if let Some(v) = body.discord_allowed_channels {
         cfg.discord_allowed_channels = v;
     }
+    let mut set_channel_bot_username = |channel: &str, value: Option<&str>| {
+        if let Some(v) = value.map(str::trim) {
+            if v.is_empty() {
+                return;
+            }
+            let entry = cfg
+                .channels
+                .entry(channel.to_string())
+                .or_insert_with(|| serde_yaml::Value::Mapping(Default::default()));
+            if let Some(map) = entry.as_mapping_mut() {
+                map.insert(
+                    serde_yaml::Value::String("bot_username".to_string()),
+                    serde_yaml::Value::String(v.to_string()),
+                );
+            }
+        }
+    };
+    set_channel_bot_username("telegram", body.telegram_bot_username.as_deref());
+    set_channel_bot_username("discord", body.discord_bot_username.as_deref());
+    set_channel_bot_username("slack", body.slack_bot_username.as_deref());
+    set_channel_bot_username("feishu", body.feishu_bot_username.as_deref());
+    set_channel_bot_username("web", body.web_bot_username.as_deref());
 
     if let Some(channel_configs) = body.channel_configs {
         for (channel_name, fields) in channel_configs {
