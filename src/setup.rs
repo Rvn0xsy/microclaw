@@ -31,9 +31,10 @@ use microclaw_core::text::floor_char_boundary;
 // validate, display order) is derived automatically.
 // ---------------------------------------------------------------------------
 
-/// One config field for a channel that lives under `channels.<name>.<key>`.
+/// One config field for a channel account that lives under
+/// `channels.<name>.accounts.<account_id>.<key>`.
 struct ChannelFieldDef {
-    /// YAML key inside `channels.<name>`, e.g. "bot_token"
+    /// YAML key inside `channels.<name>.accounts.<account_id>`, e.g. "bot_token"
     yaml_key: &'static str,
     /// Display label in the TUI
     label: &'static str,
@@ -126,6 +127,53 @@ const DYNAMIC_CHANNELS: &[DynamicChannelDef] = &[
 /// Build the setup-wizard field key from channel name + yaml key.
 fn dynamic_field_key(channel: &str, yaml_key: &str) -> String {
     format!("DYN_{}_{}", channel.to_uppercase(), yaml_key.to_uppercase())
+}
+
+fn default_account_id() -> &'static str {
+    "main"
+}
+
+fn resolve_channel_default_account_id(channel_cfg: &serde_yaml::Value) -> Option<String> {
+    let explicit = channel_cfg
+        .get("default_account")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(ToOwned::to_owned);
+    if explicit.is_some() {
+        return explicit;
+    }
+
+    let accounts = channel_cfg.get("accounts").and_then(|v| v.as_mapping())?;
+    if accounts.contains_key(serde_yaml::Value::String("default".to_string())) {
+        return Some("default".to_string());
+    }
+    let mut ids: Vec<String> = accounts
+        .keys()
+        .filter_map(|k| k.as_str().map(ToOwned::to_owned))
+        .collect();
+    ids.sort();
+    ids.first().cloned()
+}
+
+fn channel_account_str_value(
+    channel_cfg: &serde_yaml::Value,
+    account_id: &str,
+    key: &str,
+) -> Option<String> {
+    channel_cfg
+        .get("accounts")
+        .and_then(|v| v.get(account_id))
+        .and_then(|v| v.get(key))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn channel_default_account_str_value(channel_cfg: &serde_yaml::Value, key: &str) -> Option<String> {
+    let account_id = resolve_channel_default_account_id(channel_cfg)?;
+    channel_account_str_value(channel_cfg, &account_id, key)
 }
 
 fn default_data_dir_for_setup() -> String {
@@ -638,38 +686,53 @@ impl SetupApp {
                     map.insert("ENABLED_CHANNELS".into(), enabled.join(","));
                     let telegram_bot_token = if !config.telegram_bot_token.trim().is_empty() {
                         config.telegram_bot_token
-                    } else {
-                        config
-                            .channels
-                            .get("telegram")
-                            .and_then(|v| v.get("bot_token"))
-                            .and_then(|v| v.as_str())
+                    } else if let Some(ch_cfg) = config.channels.get("telegram") {
+                        channel_default_account_str_value(ch_cfg, "bot_token")
+                            .or_else(|| {
+                                ch_cfg
+                                    .get("bot_token")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::trim)
+                                    .filter(|v| !v.is_empty())
+                                    .map(ToOwned::to_owned)
+                            })
                             .unwrap_or_default()
-                            .to_string()
+                    } else {
+                        String::new()
                     };
                     let bot_username = if !config.bot_username.trim().is_empty() {
                         config.bot_username
-                    } else {
-                        config
-                            .channels
-                            .get("telegram")
-                            .and_then(|v| v.get("bot_username"))
-                            .and_then(|v| v.as_str())
+                    } else if let Some(ch_cfg) = config.channels.get("telegram") {
+                        channel_default_account_str_value(ch_cfg, "bot_username")
+                            .or_else(|| {
+                                ch_cfg
+                                    .get("bot_username")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::trim)
+                                    .filter(|v| !v.is_empty())
+                                    .map(ToOwned::to_owned)
+                            })
                             .unwrap_or_default()
-                            .to_string()
+                    } else {
+                        String::new()
                     };
                     let discord_bot_token = if let Some(v) =
                         config.discord_bot_token.filter(|v| !v.trim().is_empty())
                     {
                         v
-                    } else {
-                        config
-                            .channels
-                            .get("discord")
-                            .and_then(|v| v.get("bot_token"))
-                            .and_then(|v| v.as_str())
+                    } else if let Some(ch_cfg) = config.channels.get("discord") {
+                        channel_default_account_str_value(ch_cfg, "bot_token")
+                            .or_else(|| {
+                                ch_cfg
+                                    .get("bot_token")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::trim)
+                                    .filter(|v| !v.is_empty())
+                                    .map(ToOwned::to_owned)
+                            })
                             .unwrap_or_default()
-                            .to_string()
+                    } else {
+                        String::new()
                     };
                     map.insert("TELEGRAM_BOT_TOKEN".into(), telegram_bot_token);
                     map.insert("BOT_USERNAME".into(), bot_username);
@@ -678,9 +741,18 @@ impl SetupApp {
                     for ch in DYNAMIC_CHANNELS {
                         if let Some(ch_map) = config.channels.get(ch.name) {
                             for f in ch.fields {
-                                if let Some(v) = ch_map.get(f.yaml_key).and_then(|v| v.as_str()) {
+                                let value = channel_default_account_str_value(ch_map, f.yaml_key)
+                                    .or_else(|| {
+                                        ch_map
+                                            .get(f.yaml_key)
+                                            .and_then(|v| v.as_str())
+                                            .map(str::trim)
+                                            .filter(|v| !v.is_empty())
+                                            .map(ToOwned::to_owned)
+                                    });
+                                if let Some(v) = value {
                                     let key = dynamic_field_key(ch.name, f.yaml_key);
-                                    map.insert(key, v.to_string());
+                                    map.insert(key, v);
                                 }
                             }
                         }
@@ -1740,18 +1812,39 @@ fn save_config_yaml(
     if channel_selected("telegram") || telegram_present {
         yaml.push_str("  telegram:\n");
         yaml.push_str(&format!("    enabled: {}\n", channel_selected("telegram")));
-        if !telegram_token.trim().is_empty() {
-            yaml.push_str(&format!("    bot_token: \"{}\"\n", telegram_token));
-        }
-        if !telegram_username.trim().is_empty() {
-            yaml.push_str(&format!("    bot_username: \"{}\"\n", telegram_username));
+        if telegram_present {
+            yaml.push_str(&format!(
+                "    default_account: \"{}\"\n",
+                default_account_id()
+            ));
+            yaml.push_str("    accounts:\n");
+            yaml.push_str(&format!("      {}:\n", default_account_id()));
+            yaml.push_str("        enabled: true\n");
+            if !telegram_token.trim().is_empty() {
+                yaml.push_str(&format!("        bot_token: \"{}\"\n", telegram_token));
+            }
+            if !telegram_username.trim().is_empty() {
+                yaml.push_str(&format!(
+                    "        bot_username: \"{}\"\n",
+                    telegram_username
+                ));
+            }
         }
     }
     if channel_selected("discord") || discord_present {
         yaml.push_str("  discord:\n");
         yaml.push_str(&format!("    enabled: {}\n", channel_selected("discord")));
-        if !discord_token.trim().is_empty() {
-            yaml.push_str(&format!("    bot_token: \"{}\"\n", discord_token));
+        if discord_present {
+            yaml.push_str(&format!(
+                "    default_account: \"{}\"\n",
+                default_account_id()
+            ));
+            yaml.push_str("    accounts:\n");
+            yaml.push_str(&format!("      {}:\n", default_account_id()));
+            yaml.push_str("        enabled: true\n");
+            if !discord_token.trim().is_empty() {
+                yaml.push_str(&format!("        bot_token: \"{}\"\n", discord_token));
+            }
         }
     }
 
@@ -1759,19 +1852,32 @@ fn save_config_yaml(
         if !include {
             continue;
         }
+        let has_presence = ch.presence_keys.iter().any(|yaml_key| {
+            let key = dynamic_field_key(ch.name, yaml_key);
+            !get(&key).trim().is_empty()
+        });
         yaml.push_str(&format!("  {}:\n", ch.name));
         yaml.push_str(&format!("    enabled: {}\n", channel_selected(ch.name)));
-        for f in ch.fields {
-            let key = dynamic_field_key(ch.name, f.yaml_key);
-            let val = get(&key);
-            if val.trim().is_empty() {
-                continue;
+        if has_presence {
+            yaml.push_str(&format!(
+                "    default_account: \"{}\"\n",
+                default_account_id()
+            ));
+            yaml.push_str("    accounts:\n");
+            yaml.push_str(&format!("      {}:\n", default_account_id()));
+            yaml.push_str("        enabled: true\n");
+            for f in ch.fields {
+                let key = dynamic_field_key(ch.name, f.yaml_key);
+                let val = get(&key);
+                if val.trim().is_empty() {
+                    continue;
+                }
+                // Skip optional fields that match the default value.
+                if !f.required && val == f.default && !val.is_empty() {
+                    continue;
+                }
+                yaml.push_str(&format!("        {}: \"{}\"\n", f.yaml_key, val));
             }
-            // Skip optional fields that match the default value.
-            if !f.required && val == f.default && !val.is_empty() {
-                continue;
-            }
-            yaml.push_str(&format!("    {}: \"{}\"\n", f.yaml_key, val));
         }
     }
     yaml.push('\n');
@@ -2418,8 +2524,12 @@ mod tests {
         assert!(s.contains("\nchannels:\n"));
         assert!(s.contains("  telegram:\n"));
         assert!(s.contains("    enabled: true\n"));
-        assert!(s.contains("    bot_token: \"new_tok\"\n"));
-        assert!(s.contains("    bot_username: \"new_bot\"\n"));
+        assert!(s.contains("    default_account: \"main\"\n"));
+        assert!(s.contains("    accounts:\n"));
+        assert!(s.contains("      main:\n"));
+        assert!(s.contains("        enabled: true\n"));
+        assert!(s.contains("        bot_token: \"new_tok\"\n"));
+        assert!(s.contains("        bot_username: \"new_bot\"\n"));
         assert!(s.contains("  web:\n"));
         assert!(s.contains("    enabled: true\n"));
         assert!(s.contains("llm_provider: \"anthropic\""));
@@ -2482,7 +2592,9 @@ sandbox:
         assert!(s.contains("  mode: \"off\"\n"));
         assert!(s.contains("  discord:\n"));
         assert!(s.contains("    enabled: false\n"));
-        assert!(s.contains("    bot_token: \"discord_token_123\"\n"));
+        assert!(s.contains("    default_account: \"main\"\n"));
+        assert!(s.contains("      main:\n"));
+        assert!(s.contains("        bot_token: \"discord_token_123\"\n"));
         assert!(s.contains("  web:\n"));
         assert!(s.contains("    enabled: true\n"));
 
@@ -2532,8 +2644,10 @@ sandbox:
         let s = fs::read_to_string(&yaml_path).unwrap();
         assert!(s.contains("  telegram:\n"));
         assert!(s.contains("    enabled: false\n"));
-        assert!(s.contains("    bot_token: \"tg_token_123\"\n"));
-        assert!(s.contains("    bot_username: \"tg_bot\"\n"));
+        assert!(s.contains("    default_account: \"main\"\n"));
+        assert!(s.contains("      main:\n"));
+        assert!(s.contains("        bot_token: \"tg_token_123\"\n"));
+        assert!(s.contains("        bot_username: \"tg_bot\"\n"));
 
         let _ = fs::remove_file(&yaml_path);
     }
@@ -2613,8 +2727,10 @@ sandbox:
         assert!(s.contains("\nchannels:\n"));
         assert!(s.contains("  feishu:\n"));
         assert!(s.contains("    enabled: false\n"));
-        assert!(s.contains("    app_id: \"app_id_1\""));
-        assert!(s.contains("    app_secret: \"app_secret_1\""));
+        assert!(s.contains("    default_account: \"main\"\n"));
+        assert!(s.contains("      main:\n"));
+        assert!(s.contains("        app_id: \"app_id_1\""));
+        assert!(s.contains("        app_secret: \"app_secret_1\""));
 
         let _ = fs::remove_file(&yaml_path);
     }
@@ -2642,9 +2758,11 @@ sandbox:
         assert!(s.contains("\nchannels:\n"));
         assert!(s.contains("  feishu:\n"));
         assert!(s.contains("    enabled: true\n"));
-        assert!(s.contains("    app_id: \"app_id_1\""));
-        assert!(s.contains("    app_secret: \"app_secret_1\""));
-        assert!(!s.contains("    domain: \"feishu\""));
+        assert!(s.contains("    default_account: \"main\"\n"));
+        assert!(s.contains("      main:\n"));
+        assert!(s.contains("        app_id: \"app_id_1\""));
+        assert!(s.contains("        app_secret: \"app_secret_1\""));
+        assert!(!s.contains("        domain: \"feishu\""));
 
         let _ = fs::remove_file(&yaml_path);
     }
