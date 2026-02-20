@@ -17,7 +17,7 @@ use crate::runtime::AppState;
 use microclaw_channels::channel::ConversationKind;
 use microclaw_channels::channel_adapter::ChannelAdapter;
 use microclaw_core::llm_types::Message as LlmMessage;
-use microclaw_core::text::split_text;
+use microclaw_core::text::floor_char_boundary;
 use microclaw_storage::db::call_blocking;
 use microclaw_storage::db::StoredMessage;
 use microclaw_storage::usage::build_usage_report;
@@ -160,7 +160,7 @@ impl ChannelAdapter for IrcAdapter {
 
     async fn send_text(&self, external_chat_id: &str, text: &str) -> Result<(), String> {
         let sanitized = sanitize_irc_text(text);
-        for chunk in split_text(&sanitized, self.message_max_len.max(32)) {
+        for chunk in split_irc_text(&sanitized, self.message_max_len.max(32)) {
             self.send_raw(format!("PRIVMSG {} :{}", external_chat_id, chunk))
                 .await?;
         }
@@ -553,6 +553,40 @@ fn sanitize_irc_text(text: &str) -> String {
         .collect()
 }
 
+fn split_irc_text(text: &str, max_len: usize) -> Vec<String> {
+    if text.len() <= max_len {
+        return vec![text.to_string()];
+    }
+
+    let mut chunks = Vec::new();
+    let mut remaining = text;
+    while !remaining.is_empty() {
+        if remaining.len() <= max_len {
+            chunks.push(remaining.to_string());
+            break;
+        }
+
+        let boundary = floor_char_boundary(remaining, max_len.min(remaining.len()));
+        let candidate = &remaining[..boundary];
+        let split_at = candidate
+            .rfind('\n')
+            .or_else(|| candidate.rfind(char::is_whitespace))
+            .filter(|idx| *idx > 0)
+            .unwrap_or(boundary);
+
+        let chunk = remaining[..split_at]
+            .trim_end_matches(char::is_whitespace)
+            .to_string();
+        if !chunk.is_empty() {
+            chunks.push(chunk);
+        }
+
+        remaining = remaining[split_at..].trim_start_matches(char::is_whitespace);
+    }
+
+    chunks
+}
+
 fn is_irc_channel_target(target: &str) -> bool {
     target.starts_with(['#', '&', '+', '!'])
 }
@@ -634,5 +668,22 @@ mod tests {
     fn test_nick_from_prefix() {
         assert_eq!(nick_from_prefix("alice!u@h"), Some("alice"));
         assert_eq!(nick_from_prefix("server"), Some("server"));
+    }
+
+    #[test]
+    fn test_split_irc_text_prefers_word_boundary() {
+        let input = "alpha beta gamma delta epsilon";
+        let chunks = split_irc_text(input, 12);
+        assert_eq!(chunks, vec!["alpha beta", "gamma delta", "epsilon"]);
+    }
+
+    #[test]
+    fn test_split_irc_text_falls_back_to_hard_split_for_long_word() {
+        let input = "supercalifragilisticexpialidocious";
+        let chunks = split_irc_text(input, 8);
+        assert_eq!(
+            chunks,
+            vec!["supercal", "ifragili", "sticexpi", "alidocio", "us"]
+        );
     }
 }
