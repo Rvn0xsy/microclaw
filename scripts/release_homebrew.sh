@@ -130,9 +130,9 @@ cd "$REPO_DIR"
 if [ -f "web/package.json" ]; then
   echo "Building web assets..."
   if [ -f "web/package-lock.json" ]; then
-    npm --prefix web ci
+    npm --prefix web ci --no-audit --no-fund
   else
-    npm --prefix web install
+    npm --prefix web install --no-audit --no-fund
   fi
   npm --prefix web run build
   test -f "web/dist/index.html" || {
