@@ -126,7 +126,11 @@ impl MatrixRuntimeContext {
         user.to_string()
     }
 
-    fn should_respond(&self, text: &str, mentioned: bool) -> bool {
+    fn should_respond(&self, text: &str, mentioned: bool, is_direct: bool) -> bool {
+        if is_direct {
+            return true;
+        }
+
         if !self.mention_required {
             return true;
         }
@@ -289,6 +293,7 @@ impl ChannelAdapter for MatrixAdapter {
 enum MatrixIncomingEvent {
     Message {
         room_id: String,
+        is_direct: bool,
         sender: String,
         event_id: String,
         body: String,
@@ -296,6 +301,7 @@ enum MatrixIncomingEvent {
     },
     Reaction {
         room_id: String,
+        is_direct: bool,
         sender: String,
         event_id: String,
         relates_to_event_id: String,
@@ -324,6 +330,7 @@ pub async fn start_matrix_bot(app_state: Arc<AppState>, runtime: MatrixRuntimeCo
                         match event {
                             MatrixIncomingEvent::Message {
                                 room_id,
+                                is_direct,
                                 sender,
                                 event_id,
                                 body,
@@ -331,6 +338,7 @@ pub async fn start_matrix_bot(app_state: Arc<AppState>, runtime: MatrixRuntimeCo
                             } => {
                                 let msg = MatrixIncomingMessage {
                                     room_id,
+                                    is_direct,
                                     sender,
                                     event_id,
                                     body,
@@ -340,6 +348,7 @@ pub async fn start_matrix_bot(app_state: Arc<AppState>, runtime: MatrixRuntimeCo
                             }
                             MatrixIncomingEvent::Reaction {
                                 room_id,
+                                is_direct,
                                 sender,
                                 event_id,
                                 relates_to_event_id,
@@ -349,6 +358,7 @@ pub async fn start_matrix_bot(app_state: Arc<AppState>, runtime: MatrixRuntimeCo
                                     state,
                                     runtime_ctx,
                                     room_id,
+                                    is_direct,
                                     sender,
                                     event_id,
                                     relates_to_event_id,
@@ -420,6 +430,7 @@ async fn sync_matrix_messages(
         .ok_or_else(|| "Matrix /sync response missing next_batch".to_string())?;
 
     let mut incoming = Vec::new();
+    let direct_rooms = extract_direct_room_ids(&payload);
 
     let joined_rooms = payload
         .pointer("/rooms/join")
@@ -431,6 +442,7 @@ async fn sync_matrix_messages(
         if !runtime.should_process_room(&room_id) {
             continue;
         }
+        let is_direct = room_looks_direct(&room_data, direct_rooms.contains(&room_id));
 
         let Some(events) = room_data
             .pointer("/timeline/events")
@@ -477,6 +489,7 @@ async fn sync_matrix_messages(
 
                 incoming.push(MatrixIncomingEvent::Message {
                     room_id: room_id.clone(),
+                    is_direct,
                     sender,
                     event_id,
                     body,
@@ -500,6 +513,7 @@ async fn sync_matrix_messages(
 
                 incoming.push(MatrixIncomingEvent::Reaction {
                     room_id: room_id.clone(),
+                    is_direct,
                     sender,
                     event_id,
                     relates_to_event_id,
@@ -537,6 +551,52 @@ fn normalize_matrix_message_body(event: &Value) -> String {
         }
         _ => body.to_string(),
     }
+}
+
+fn extract_direct_room_ids(payload: &Value) -> std::collections::HashSet<String> {
+    let mut direct_rooms = std::collections::HashSet::new();
+    let Some(events) = payload
+        .pointer("/account_data/events")
+        .and_then(|v| v.as_array())
+    else {
+        return direct_rooms;
+    };
+    for event in events {
+        if event.get("type").and_then(|v| v.as_str()) != Some("m.direct") {
+            continue;
+        }
+        let Some(content) = event.get("content").and_then(|v| v.as_object()) else {
+            continue;
+        };
+        for room_ids in content.values() {
+            let Some(room_ids) = room_ids.as_array() else {
+                continue;
+            };
+            for room_id in room_ids {
+                if let Some(room_id) = room_id.as_str() {
+                    if !room_id.trim().is_empty() {
+                        direct_rooms.insert(room_id.to_string());
+                    }
+                }
+            }
+        }
+    }
+    direct_rooms
+}
+
+fn room_looks_direct(room_data: &Value, is_marked_direct: bool) -> bool {
+    if is_marked_direct {
+        return true;
+    }
+    let joined = room_data
+        .pointer("/summary/m.joined_member_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let invited = room_data
+        .pointer("/summary/m.invited_member_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    joined > 0 && (joined + invited) <= 2
 }
 
 fn html_escape(input: &str) -> String {
@@ -852,6 +912,7 @@ async fn send_matrix_reaction(
 
 struct MatrixIncomingMessage {
     room_id: String,
+    is_direct: bool,
     sender: String,
     event_id: String,
     body: String,
@@ -862,11 +923,16 @@ async fn resolve_matrix_chat_id(
     app_state: Arc<AppState>,
     runtime: &MatrixRuntimeContext,
     room_id: &str,
+    is_direct: bool,
 ) -> i64 {
     call_blocking(app_state.db.clone(), {
         let room = room_id.to_string();
         let title = format!("matrix-{}", room_id);
-        let chat_type = "matrix".to_string();
+        let chat_type = if is_direct {
+            "matrix_dm".to_string()
+        } else {
+            "matrix".to_string()
+        };
         let channel_name = runtime.channel_name.clone();
         move |db| db.resolve_or_create_chat_id(&channel_name, &room, Some(&title), &chat_type)
     })
@@ -878,12 +944,13 @@ async fn handle_matrix_reaction(
     app_state: Arc<AppState>,
     runtime: MatrixRuntimeContext,
     room_id: String,
+    is_direct: bool,
     sender: String,
     event_id: String,
     relates_to_event_id: String,
     key: String,
 ) {
-    let chat_id = resolve_matrix_chat_id(app_state.clone(), &runtime, &room_id).await;
+    let chat_id = resolve_matrix_chat_id(app_state.clone(), &runtime, &room_id, is_direct).await;
     if chat_id == 0 {
         error!("Matrix: failed to resolve chat ID for room {}", room_id);
         return;
@@ -913,7 +980,8 @@ async fn handle_matrix_message(
     runtime: MatrixRuntimeContext,
     msg: MatrixIncomingMessage,
 ) {
-    let chat_id = resolve_matrix_chat_id(app_state.clone(), &runtime, &msg.room_id).await;
+    let chat_id =
+        resolve_matrix_chat_id(app_state.clone(), &runtime, &msg.room_id, msg.is_direct).await;
 
     if chat_id == 0 {
         error!("Matrix: failed to resolve chat ID for room {}", msg.room_id);
@@ -937,7 +1005,7 @@ async fn handle_matrix_message(
     let _ = call_blocking(app_state.db.clone(), move |db| db.store_message(&incoming)).await;
 
     let trimmed = msg.body.trim();
-    let should_respond = runtime.should_respond(&msg.body, msg.mentioned_bot);
+    let should_respond = runtime.should_respond(&msg.body, msg.mentioned_bot, msg.is_direct);
     if trimmed == "/reset" {
         let _ = call_blocking(app_state.db.clone(), move |db| {
             db.clear_chat_context(chat_id)
@@ -1237,7 +1305,8 @@ mod tests {
             sync_timeout_ms: 30_000,
         };
 
-        assert!(runtime.should_respond("hello there", true));
-        assert!(!runtime.should_respond("hello there", false));
+        assert!(runtime.should_respond("hello there", true, false));
+        assert!(!runtime.should_respond("hello there", false, false));
+        assert!(runtime.should_respond("hello there", false, true));
     }
 }
