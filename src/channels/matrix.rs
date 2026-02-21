@@ -119,7 +119,7 @@ impl MatrixRuntimeContext {
         }
     }
 
-    fn should_process_room(&self, room_id: &str) -> bool {
+    fn should_process_group_room(&self, room_id: &str) -> bool {
         self.allowed_room_ids.is_empty() || self.allowed_room_ids.iter().any(|v| v == room_id)
     }
 
@@ -454,10 +454,10 @@ async fn sync_matrix_messages(
         .unwrap_or_default();
 
     for (room_id, room_data) in joined_rooms {
-        if !runtime.should_process_room(&room_id) {
+        let is_direct = room_looks_direct(&room_data, direct_rooms.contains(&room_id));
+        if !is_direct && !runtime.should_process_group_room(&room_id) {
             continue;
         }
-        let is_direct = room_looks_direct(&room_data, direct_rooms.contains(&room_id));
 
         let Some(events) = room_data
             .pointer("/timeline/events")
@@ -1345,5 +1345,24 @@ mod tests {
 
         assert!(runtime.should_process_dm_sender("@alice:localhost"));
         assert!(!runtime.should_process_dm_sender("@bob:localhost"));
+    }
+
+    #[test]
+    fn test_group_room_allowlist_does_not_imply_dm_blocklist() {
+        let runtime = MatrixRuntimeContext {
+            channel_name: "matrix".to_string(),
+            access_token: "tok".to_string(),
+            homeserver_url: "http://localhost:8008".to_string(),
+            bot_user_id: "@bot:localhost".to_string(),
+            bot_username: "bot".to_string(),
+            allowed_room_ids: vec!["!group:localhost".to_string()],
+            allowed_user_ids: Vec::new(),
+            mention_required: true,
+            sync_timeout_ms: 30_000,
+        };
+
+        assert!(runtime.should_process_group_room("!group:localhost"));
+        assert!(!runtime.should_process_group_room("!some-dm:localhost"));
+        assert!(runtime.should_process_dm_sender("@alice:localhost"));
     }
 }
