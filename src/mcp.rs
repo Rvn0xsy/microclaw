@@ -1038,28 +1038,8 @@ impl McpManager {
     pub async fn from_config_paths(paths: &[PathBuf], default_request_timeout_secs: u64) -> Self {
         let default_request_timeout_secs =
             resolve_request_timeout_secs(None, default_request_timeout_secs);
-
-        let mut merged_default_protocol_version: Option<String> = None;
-        let mut merged_servers: HashMap<String, McpServerConfig> = HashMap::new();
-        let mut loaded_any_config = false;
-        for path in paths {
-            let Some(config) = load_config_from_path(path) else {
-                continue;
-            };
-            loaded_any_config = true;
-            if let Some(protocol_version) = config.default_protocol_version {
-                merged_default_protocol_version = Some(protocol_version);
-            }
-            for (name, server_cfg) in config.mcp_servers {
-                if merged_servers.insert(name.clone(), server_cfg).is_some() {
-                    warn!(
-                        "MCP server '{}' overridden by later config source '{}'",
-                        name,
-                        path.display()
-                    );
-                }
-            }
-        }
+        let (loaded_any_config, merged_default_protocol_version, merged_servers) =
+            merge_config_sources(paths);
         if !loaded_any_config {
             // Config file not found is normal — MCP is optional
             return McpManager {
@@ -1123,6 +1103,37 @@ impl McpManager {
         }
         tools
     }
+}
+
+fn merge_config_sources(
+    paths: &[PathBuf],
+) -> (bool, Option<String>, HashMap<String, McpServerConfig>) {
+    let mut merged_default_protocol_version: Option<String> = None;
+    let mut merged_servers: HashMap<String, McpServerConfig> = HashMap::new();
+    let mut loaded_any_config = false;
+    for path in paths {
+        let Some(config) = load_config_from_path(path) else {
+            continue;
+        };
+        loaded_any_config = true;
+        if let Some(protocol_version) = config.default_protocol_version {
+            merged_default_protocol_version = Some(protocol_version);
+        }
+        for (name, server_cfg) in config.mcp_servers {
+            if merged_servers.insert(name.clone(), server_cfg).is_some() {
+                warn!(
+                    "MCP server '{}' overridden by later config source '{}'",
+                    name,
+                    path.display()
+                );
+            }
+        }
+    }
+    (
+        loaded_any_config,
+        merged_default_protocol_version,
+        merged_servers,
+    )
 }
 
 fn load_config_from_path(path: &Path) -> Option<McpConfig> {
@@ -1224,6 +1235,60 @@ mod tests {
         assert_eq!(remote.max_concurrent_requests, Some(6));
         assert_eq!(remote.queue_wait_ms, Some(500));
         assert_eq!(remote.rate_limit_per_minute, Some(240));
+    }
+
+    #[test]
+    fn test_merge_config_sources_later_overrides_earlier() {
+        let dir =
+            std::env::temp_dir().join(format!("microclaw_mcp_merge_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = dir.join("00-base.json");
+        let override_cfg = dir.join("10-override.json");
+        std::fs::write(
+            &base,
+            r#"{
+              "defaultProtocolVersion": "2025-11-05",
+              "mcpServers": {
+                "shared": {
+                  "transport": "streamable_http",
+                  "endpoint": "http://127.0.0.1:7001/mcp"
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &override_cfg,
+            r#"{
+              "defaultProtocolVersion": "2025-12-01",
+              "mcpServers": {
+                "shared": {
+                  "transport": "streamable_http",
+                  "endpoint": "http://127.0.0.1:7002/mcp"
+                },
+                "extra": {
+                  "transport": "streamable_http",
+                  "endpoint": "http://127.0.0.1:7003/mcp"
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let (loaded, protocol, servers) = merge_config_sources(&[base, override_cfg]);
+        assert!(loaded);
+        assert_eq!(protocol.as_deref(), Some("2025-12-01"));
+        assert_eq!(servers.len(), 2);
+        assert_eq!(
+            servers.get("shared").map(|s| s.endpoint.as_str()),
+            Some("http://127.0.0.1:7002/mcp")
+        );
+        assert_eq!(
+            servers.get("extra").map(|s| s.endpoint.as_str()),
+            Some("http://127.0.0.1:7003/mcp")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -330,6 +330,8 @@ mkdir -p <data_dir>/mcp.d
 cp mcp.hapi-bridge.example.json <data_dir>/mcp.d/hapi-bridge.json
 ```
 
+Detailed ops guide: `docs/operations/hapi-bridge.md`.
+
 Example:
 
 ```json
