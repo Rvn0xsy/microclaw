@@ -366,6 +366,7 @@ fn build_report() -> DoctorReport {
     );
 
     check_config(&mut report);
+    check_web_fetch_validation(&mut report);
     check_path(&mut report);
     check_shell(&mut report);
     check_browser_dependency(&mut report);
@@ -387,6 +388,7 @@ fn build_sandbox_report() -> DoctorReport {
         None,
     );
     check_config(&mut report);
+    check_web_fetch_validation(&mut report);
     check_sandbox_config(&mut report);
     check_docker_runtime(&mut report);
     check_sandbox_image(&mut report);
@@ -417,6 +419,216 @@ fn check_config(report: &mut DoctorReport) {
             err.to_string(),
             Some("Fix MICROCLAW_CONFIG or create a valid config file.".to_string()),
         ),
+    }
+}
+
+fn check_web_fetch_validation(report: &mut DoctorReport) {
+    let config = match Config::load() {
+        Ok(cfg) => cfg,
+        Err(_) => return,
+    };
+
+    let content_cfg = config.web_fetch_validation;
+    report.push(
+        "web_fetch.content_validation",
+        "Web fetch content validation",
+        if content_cfg.enabled {
+            CheckStatus::Pass
+        } else {
+            CheckStatus::Warn
+        },
+        format!(
+            "enabled={} strict_mode={} max_scan_bytes={}",
+            content_cfg.enabled, content_cfg.strict_mode, content_cfg.max_scan_bytes
+        ),
+        if content_cfg.enabled {
+            None
+        } else {
+            Some(
+                "Set web_fetch_validation.enabled: true for prompt-injection screening."
+                    .to_string(),
+            )
+        },
+    );
+
+    if content_cfg.enabled && !content_cfg.strict_mode {
+        report.push(
+            "web_fetch.content_validation.strict_mode",
+            "Web fetch strict mode",
+            CheckStatus::Warn,
+            "strict_mode=false".to_string(),
+            Some("Set web_fetch_validation.strict_mode: true for stricter blocking.".to_string()),
+        );
+    }
+
+    let url_cfg = config.web_fetch_url_validation;
+    let url_policy_has_hosts =
+        !url_cfg.allowlist_hosts.is_empty() || !url_cfg.denylist_hosts.is_empty();
+    let url_status = if !url_cfg.enabled || !url_policy_has_hosts {
+        CheckStatus::Warn
+    } else {
+        CheckStatus::Pass
+    };
+    let url_fix = if !url_cfg.enabled {
+        Some("Set web_fetch_url_validation.enabled: true.".to_string())
+    } else if url_cfg.allowlist_hosts.is_empty() && url_cfg.denylist_hosts.is_empty() {
+        Some(
+            "Configure web_fetch_url_validation.allowlist_hosts and/or denylist_hosts.".to_string(),
+        )
+    } else {
+        None
+    };
+    report.push(
+        "web_fetch.url_policy",
+        "Web fetch URL policy",
+        url_status,
+        format!(
+            "enabled={} schemes={} allowlist_hosts={} denylist_hosts={}",
+            url_cfg.enabled,
+            url_cfg.allowed_schemes.join(","),
+            url_cfg.allowlist_hosts.len(),
+            url_cfg.denylist_hosts.len()
+        ),
+        url_fix,
+    );
+
+    if url_cfg.enabled {
+        let bad_schemes: Vec<String> = url_cfg
+            .allowed_schemes
+            .iter()
+            .filter(|s| *s != "http" && *s != "https")
+            .cloned()
+            .collect();
+        if !bad_schemes.is_empty() {
+            report.push(
+                "web_fetch.url_policy.schemes",
+                "Web fetch allowed schemes",
+                CheckStatus::Warn,
+                format!("non-default schemes configured: {}", bad_schemes.join(",")),
+                Some("Review allowed_schemes; prefer only https/http unless required.".to_string()),
+            );
+        }
+    }
+
+    if !url_cfg.enabled {
+        return;
+    }
+
+    let feed_sync = &url_cfg.feed_sync;
+    if !feed_sync.enabled {
+        report.push(
+            "web_fetch.feed_sync",
+            "Web fetch feed sync",
+            CheckStatus::Miss,
+            "feed sync disabled".to_string(),
+            Some(
+                "Enable web_fetch_url_validation.feed_sync if you want remote allow/deny feeds."
+                    .to_string(),
+            ),
+        );
+        return;
+    }
+
+    if feed_sync.sources.is_empty() {
+        report.push(
+            "web_fetch.feed_sync.sources",
+            "Web fetch feed sources",
+            CheckStatus::Warn,
+            "feed sync enabled but no sources configured".to_string(),
+            Some(
+                "Add at least one feed source under web_fetch_url_validation.feed_sync.sources."
+                    .to_string(),
+            ),
+        );
+        return;
+    }
+
+    if feed_sync.fail_open {
+        report.push(
+            "web_fetch.feed_sync.fail_open",
+            "Web fetch feed fail-open",
+            CheckStatus::Warn,
+            "fail_open=true".to_string(),
+            Some(
+                "Set fail_open=false if you prefer fail-closed behavior when feeds fail."
+                    .to_string(),
+            ),
+        );
+    } else {
+        report.push(
+            "web_fetch.feed_sync.fail_open",
+            "Web fetch feed fail-open",
+            CheckStatus::Pass,
+            "fail_open=false".to_string(),
+            None,
+        );
+    }
+
+    let mut bad_sources = 0usize;
+    for (idx, source) in feed_sync.sources.iter().enumerate() {
+        let id = format!("web_fetch.feed_sync.source.{}", idx + 1);
+        let title = format!("Web fetch feed source #{}", idx + 1);
+        if !source.enabled {
+            report.push(
+                id,
+                title,
+                CheckStatus::Miss,
+                "source disabled".to_string(),
+                None,
+            );
+            continue;
+        }
+
+        let parsed = reqwest::Url::parse(&source.url);
+        let scheme_ok = parsed
+            .as_ref()
+            .map(|u| matches!(u.scheme(), "http" | "https"))
+            .unwrap_or(false);
+        if !scheme_ok {
+            bad_sources += 1;
+            report.push(
+                id,
+                title,
+                CheckStatus::Fail,
+                format!("invalid or unsupported source URL: {}", source.url),
+                Some("Use a valid http/https URL for feed source.".to_string()),
+            );
+            continue;
+        }
+        if source.timeout_secs == 0 || source.refresh_interval_secs == 0 {
+            bad_sources += 1;
+            report.push(
+                id,
+                title,
+                CheckStatus::Fail,
+                format!(
+                    "invalid timing values timeout_secs={} refresh_interval_secs={}",
+                    source.timeout_secs, source.refresh_interval_secs
+                ),
+                Some("Set timeout_secs >= 1 and refresh_interval_secs >= 1.".to_string()),
+            );
+            continue;
+        }
+        report.push(
+            id,
+            title,
+            CheckStatus::Pass,
+            format!(
+                "mode={:?} format={:?} refresh={}s timeout={}s",
+                source.mode, source.format, source.refresh_interval_secs, source.timeout_secs
+            ),
+            None,
+        );
+    }
+
+    if bad_sources == 0 {
+        report.push(
+            "web_fetch.feed_sync.sources",
+            "Web fetch feed sources",
+            CheckStatus::Pass,
+            format!("{} source(s) configured", feed_sync.sources.len()),
+            None,
+        );
     }
 }
 
@@ -1142,6 +1354,94 @@ mod tests {
         std::env::remove_var("MICROCLAW_CONFIG");
         let _ = std::fs::remove_file(path);
         assert!(report.checks.iter().any(|c| c.id == "sandbox.mode"));
+    }
+
+    #[test]
+    fn test_build_report_has_web_fetch_validation_checks() {
+        let _guard = env_lock();
+        let path = std::env::temp_dir().join(format!(
+            "microclaw_doctor_webfetch_{}.yaml",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let mut cfg = Config::test_defaults();
+        cfg.web_fetch_validation.enabled = true;
+        cfg.web_fetch_validation.strict_mode = true;
+        cfg.web_fetch_url_validation.enabled = true;
+        cfg.web_fetch_url_validation.denylist_hosts = vec!["example.com".to_string()];
+        cfg.save_yaml(path.to_string_lossy().as_ref()).unwrap();
+        std::env::set_var("MICROCLAW_CONFIG", &path);
+
+        let report = build_report();
+
+        std::env::remove_var("MICROCLAW_CONFIG");
+        let _ = std::fs::remove_file(path);
+
+        assert!(report
+            .checks
+            .iter()
+            .any(|c| c.id == "web_fetch.content_validation"));
+        assert!(report.checks.iter().any(|c| c.id == "web_fetch.url_policy"));
+    }
+
+    #[test]
+    fn test_build_report_warns_when_feed_sync_enabled_without_sources() {
+        let _guard = env_lock();
+        let path = std::env::temp_dir().join(format!(
+            "microclaw_doctor_feed_sync_warn_{}.yaml",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let mut cfg = Config::test_defaults();
+        cfg.web_fetch_url_validation.feed_sync.enabled = true;
+        cfg.web_fetch_url_validation.feed_sync.sources.clear();
+        cfg.save_yaml(path.to_string_lossy().as_ref()).unwrap();
+        std::env::set_var("MICROCLAW_CONFIG", &path);
+
+        let report = build_report();
+
+        std::env::remove_var("MICROCLAW_CONFIG");
+        let _ = std::fs::remove_file(path);
+
+        let check = report
+            .checks
+            .iter()
+            .find(|c| c.id == "web_fetch.feed_sync.sources")
+            .expect("web_fetch.feed_sync.sources check missing");
+        assert_eq!(check.status, CheckStatus::Warn);
+    }
+
+    #[test]
+    fn test_build_report_fails_invalid_feed_source_url() {
+        let _guard = env_lock();
+        let path = std::env::temp_dir().join(format!(
+            "microclaw_doctor_feed_sync_invalid_url_{}.yaml",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let mut cfg = Config::test_defaults();
+        cfg.web_fetch_url_validation.feed_sync.enabled = true;
+        cfg.web_fetch_url_validation.feed_sync.fail_open = false;
+        cfg.web_fetch_url_validation.feed_sync.sources =
+            vec![microclaw_tools::web_fetch::WebFetchFeedSource {
+                enabled: true,
+                mode: microclaw_tools::web_fetch::WebFetchFeedMode::Denylist,
+                url: "notaurl".to_string(),
+                format: microclaw_tools::web_fetch::WebFetchFeedFormat::Lines,
+                refresh_interval_secs: 60,
+                timeout_secs: 5,
+            }];
+        cfg.save_yaml(path.to_string_lossy().as_ref()).unwrap();
+        std::env::set_var("MICROCLAW_CONFIG", &path);
+
+        let report = build_report();
+
+        std::env::remove_var("MICROCLAW_CONFIG");
+        let _ = std::fs::remove_file(path);
+
+        let check = report
+            .checks
+            .iter()
+            .find(|c| c.id == "web_fetch.feed_sync.source.1")
+            .expect("web_fetch.feed_sync.source.1 check missing");
+        assert_eq!(check.status, CheckStatus::Fail);
     }
 
     #[test]

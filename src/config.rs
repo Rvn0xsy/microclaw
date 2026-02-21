@@ -10,6 +10,8 @@ use crate::codex_auth::{
 use microclaw_core::error::MicroClawError;
 pub use microclaw_tools::sandbox::{SandboxBackend, SandboxConfig, SandboxMode};
 pub use microclaw_tools::types::WorkingDirIsolation;
+use microclaw_tools::web_content_validation::WebContentValidationConfig;
+use microclaw_tools::web_fetch::WebFetchUrlValidationConfig;
 
 fn default_telegram_bot_token() -> String {
     String::new()
@@ -254,6 +256,10 @@ pub struct Config {
     pub web_run_history_limit: usize,
     #[serde(default = "default_web_session_idle_ttl_seconds")]
     pub web_session_idle_ttl_seconds: u64,
+    #[serde(default)]
+    pub web_fetch_validation: WebContentValidationConfig,
+    #[serde(default)]
+    pub web_fetch_url_validation: WebFetchUrlValidationConfig,
 
     // --- Embedding ---
     #[serde(default)]
@@ -476,6 +482,8 @@ impl Config {
             web_rate_window_seconds: 10,
             web_run_history_limit: 512,
             web_session_idle_ttl_seconds: 300,
+            web_fetch_validation: WebContentValidationConfig::default(),
+            web_fetch_url_validation: WebFetchUrlValidationConfig::default(),
             model_prices: vec![],
             embedding_provider: None,
             embedding_api_key: None,
@@ -706,6 +714,8 @@ impl Config {
         if self.web_session_idle_ttl_seconds == 0 {
             self.web_session_idle_ttl_seconds = default_web_session_idle_ttl_seconds();
         }
+        self.web_fetch_validation.normalize();
+        self.web_fetch_url_validation.normalize();
         if self.max_document_size_mb == 0 {
             self.max_document_size_mb = default_max_document_size_mb();
         }
@@ -1026,6 +1036,16 @@ voice_transcription_command: "whisper-mlx --file {file}"
         assert_eq!(config.default_tool_timeout_secs, 30);
         assert!(config.tool_timeout_overrides.is_empty());
         assert_eq!(config.default_mcp_request_timeout_secs, 120);
+        assert!(config.web_fetch_validation.enabled);
+        assert!(config.web_fetch_validation.strict_mode);
+        assert_eq!(config.web_fetch_validation.max_scan_bytes, 100_000);
+        assert!(config.web_fetch_url_validation.enabled);
+        assert_eq!(
+            config.web_fetch_url_validation.allowed_schemes,
+            vec!["https".to_string(), "http".to_string()]
+        );
+        assert!(config.web_fetch_url_validation.allowlist_hosts.is_empty());
+        assert!(config.web_fetch_url_validation.denylist_hosts.is_empty());
     }
 
     #[test]
@@ -1033,6 +1053,10 @@ voice_transcription_command: "whisper-mlx --file {file}"
         let mut config = test_config();
         config.default_tool_timeout_secs = 0;
         config.default_mcp_request_timeout_secs = 0;
+        config.web_fetch_validation.max_scan_bytes = 0;
+        config.web_fetch_url_validation.allowed_schemes.clear();
+        config.web_fetch_url_validation.allowlist_hosts = vec!["  Example.COM  ".into()];
+        config.web_fetch_url_validation.denylist_hosts = vec![" .Bad.EXAMPLE ".into()];
         config.tool_timeout_overrides = HashMap::from([
             ("  bash ".to_string(), 90),
             ("".to_string(), 5),
@@ -1042,6 +1066,19 @@ voice_transcription_command: "whisper-mlx --file {file}"
 
         assert_eq!(config.default_tool_timeout_secs, 30);
         assert_eq!(config.default_mcp_request_timeout_secs, 120);
+        assert_eq!(config.web_fetch_validation.max_scan_bytes, 100_000);
+        assert_eq!(
+            config.web_fetch_url_validation.allowed_schemes,
+            vec!["https".to_string(), "http".to_string()]
+        );
+        assert_eq!(
+            config.web_fetch_url_validation.allowlist_hosts,
+            vec!["example.com".to_string()]
+        );
+        assert_eq!(
+            config.web_fetch_url_validation.denylist_hosts,
+            vec!["bad.example".to_string()]
+        );
         assert_eq!(config.tool_timeout_overrides.len(), 1);
         assert_eq!(config.tool_timeout_overrides.get("bash"), Some(&90));
     }

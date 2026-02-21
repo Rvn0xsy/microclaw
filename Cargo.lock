@@ -1632,6 +1632,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "microclaw-core",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

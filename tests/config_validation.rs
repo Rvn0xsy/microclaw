@@ -44,6 +44,10 @@ fn minimal_config() -> Config {
         web_rate_window_seconds: 10,
         web_run_history_limit: 512,
         web_session_idle_ttl_seconds: 300,
+        web_fetch_validation:
+            microclaw_tools::web_content_validation::WebContentValidationConfig::default(),
+        web_fetch_url_validation: microclaw_tools::web_fetch::WebFetchUrlValidationConfig::default(
+        ),
         model_prices: vec![],
         embedding_provider: None,
         embedding_api_key: None,

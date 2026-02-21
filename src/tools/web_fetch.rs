@@ -1,4 +1,6 @@
 use async_trait::async_trait;
+use microclaw_tools::web_content_validation::WebContentValidationConfig;
+use microclaw_tools::web_fetch::WebFetchUrlValidationConfig;
 use serde_json::json;
 
 use super::{schema_object, Tool, ToolResult};
@@ -6,12 +8,20 @@ use microclaw_core::llm_types::ToolDefinition;
 
 pub struct WebFetchTool {
     default_timeout_secs: u64,
+    validation: WebContentValidationConfig,
+    url_validation: WebFetchUrlValidationConfig,
 }
 
 impl WebFetchTool {
-    pub fn new(default_timeout_secs: u64) -> Self {
+    pub fn new(
+        default_timeout_secs: u64,
+        validation: WebContentValidationConfig,
+        url_validation: WebFetchUrlValidationConfig,
+    ) -> Self {
         Self {
             default_timeout_secs,
+            validation,
+            url_validation,
         }
     }
 }
@@ -54,7 +64,14 @@ impl Tool for WebFetchTool {
             .and_then(|v| v.as_u64())
             .unwrap_or(self.default_timeout_secs);
 
-        match microclaw_tools::web_fetch::fetch_url_with_timeout(url, timeout_secs).await {
+        match microclaw_tools::web_fetch::fetch_url_with_timeout_and_validation(
+            url,
+            timeout_secs,
+            self.validation,
+            self.url_validation.clone(),
+        )
+        .await
+        {
             Ok(text) => ToolResult::success(text),
             Err(e) => ToolResult::error(format!("Failed to fetch URL: {e}")),
         }
@@ -68,7 +85,11 @@ mod tests {
 
     #[test]
     fn test_web_fetch_definition() {
-        let tool = WebFetchTool::new(15);
+        let tool = WebFetchTool::new(
+            15,
+            WebContentValidationConfig::default(),
+            WebFetchUrlValidationConfig::default(),
+        );
         assert_eq!(tool.name(), "web_fetch");
         let def = tool.definition();
         assert_eq!(def.name, "web_fetch");
@@ -80,7 +101,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_web_fetch_missing_url() {
-        let tool = WebFetchTool::new(15);
+        let tool = WebFetchTool::new(
+            15,
+            WebContentValidationConfig::default(),
+            WebFetchUrlValidationConfig::default(),
+        );
         let result = tool.execute(json!({})).await;
         assert!(result.is_error);
         assert!(result.content.contains("Missing required parameter: url"));
@@ -88,7 +113,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_web_fetch_null_url() {
-        let tool = WebFetchTool::new(15);
+        let tool = WebFetchTool::new(
+            15,
+            WebContentValidationConfig::default(),
+            WebFetchUrlValidationConfig::default(),
+        );
         let result = tool.execute(json!({"url": null})).await;
         assert!(result.is_error);
         assert!(result.content.contains("Missing required parameter: url"));
@@ -96,11 +125,42 @@ mod tests {
 
     #[tokio::test]
     async fn test_web_fetch_invalid_url() {
-        let tool = WebFetchTool::new(1);
+        let tool = WebFetchTool::new(
+            1,
+            WebContentValidationConfig::default(),
+            WebFetchUrlValidationConfig::default(),
+        );
         let result = tool
             .execute(json!({"url": "https://this-domain-does-not-exist-12345.example"}))
             .await;
         assert!(result.is_error);
         assert!(result.content.contains("Failed to fetch URL"));
+    }
+
+    #[tokio::test]
+    async fn test_web_fetch_blocks_disallowed_scheme_before_request() {
+        let tool = WebFetchTool::new(
+            15,
+            WebContentValidationConfig::default(),
+            WebFetchUrlValidationConfig::default(),
+        );
+        let result = tool.execute(json!({"url": "ftp://example.com"})).await;
+        assert!(result.is_error);
+        assert!(result.content.contains("not allowed"));
+    }
+
+    #[tokio::test]
+    async fn test_web_fetch_blocks_denylisted_host_before_request() {
+        let tool = WebFetchTool::new(
+            15,
+            WebContentValidationConfig::default(),
+            WebFetchUrlValidationConfig {
+                denylist_hosts: vec!["example.com".to_string()],
+                ..WebFetchUrlValidationConfig::default()
+            },
+        );
+        let result = tool.execute(json!({"url": "https://example.com"})).await;
+        assert!(result.is_error);
+        assert!(result.content.contains("denylisted"));
     }
 }

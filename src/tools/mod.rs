@@ -104,6 +104,8 @@ impl ToolRegistry {
             )),
             Box::new(web_fetch::WebFetchTool::new(
                 config.tool_timeout_secs("web_fetch", 15),
+                config.web_fetch_validation,
+                config.web_fetch_url_validation.clone(),
             )),
             Box::new(web_search::WebSearchTool::new(
                 config.tool_timeout_secs("web_search", 15),
@@ -241,6 +243,8 @@ impl ToolRegistry {
             Box::new(memory::ReadMemoryTool::new(&config.data_dir)),
             Box::new(web_fetch::WebFetchTool::new(
                 config.tool_timeout_secs("web_fetch", 15),
+                config.web_fetch_validation,
+                config.web_fetch_url_validation.clone(),
             )),
             Box::new(web_search::WebSearchTool::new(
                 config.tool_timeout_secs("web_search", 15),
