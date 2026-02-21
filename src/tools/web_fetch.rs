@@ -136,4 +136,31 @@ mod tests {
         assert!(result.is_error);
         assert!(result.content.contains("Failed to fetch URL"));
     }
+
+    #[tokio::test]
+    async fn test_web_fetch_blocks_disallowed_scheme_before_request() {
+        let tool = WebFetchTool::new(
+            15,
+            WebContentValidationConfig::default(),
+            WebFetchUrlValidationConfig::default(),
+        );
+        let result = tool.execute(json!({"url": "ftp://example.com"})).await;
+        assert!(result.is_error);
+        assert!(result.content.contains("not allowed"));
+    }
+
+    #[tokio::test]
+    async fn test_web_fetch_blocks_denylisted_host_before_request() {
+        let tool = WebFetchTool::new(
+            15,
+            WebContentValidationConfig::default(),
+            WebFetchUrlValidationConfig {
+                denylist_hosts: vec!["example.com".to_string()],
+                ..WebFetchUrlValidationConfig::default()
+            },
+        );
+        let result = tool.execute(json!({"url": "https://example.com"})).await;
+        assert!(result.is_error);
+        assert!(result.content.contains("denylisted"));
+    }
 }

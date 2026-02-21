@@ -522,6 +522,17 @@ mod tests {
     }
 
     #[test]
+    fn url_validation_denylist_precedes_allowlist() {
+        let cfg = WebFetchUrlValidationConfig {
+            allowlist_hosts: vec!["example.com".into()],
+            denylist_hosts: vec!["example.com".into()],
+            ..WebFetchUrlValidationConfig::default()
+        };
+        let err = validate_web_fetch_url("https://api.example.com", cfg).unwrap_err();
+        assert!(err.contains("denylisted"));
+    }
+
+    #[test]
     fn url_validation_can_be_disabled() {
         let cfg = WebFetchUrlValidationConfig {
             enabled: false,
@@ -581,6 +592,69 @@ mod tests {
         let resolved = resolve_url_validation_config(cfg).await.unwrap();
         assert!(resolved.denylist_hosts.iter().any(|h| h == "foo.example"));
         assert!(resolved.denylist_hosts.iter().any(|h| h == "bar.example"));
+    }
+
+    #[tokio::test]
+    async fn feed_sync_merges_allowlist_and_denylist_sources() {
+        let cfg = WebFetchUrlValidationConfig {
+            feed_sync: WebFetchFeedSyncConfig {
+                enabled: true,
+                fail_open: false,
+                max_entries_per_source: 100,
+                sources: vec![
+                    WebFetchFeedSource {
+                        enabled: true,
+                        mode: WebFetchFeedMode::Allowlist,
+                        url: "inline:https://allowed.example/path\n".to_string(),
+                        format: WebFetchFeedFormat::Lines,
+                        refresh_interval_secs: 3600,
+                        timeout_secs: 5,
+                    },
+                    WebFetchFeedSource {
+                        enabled: true,
+                        mode: WebFetchFeedMode::Denylist,
+                        url: "inline:blocked.example\n".to_string(),
+                        format: WebFetchFeedFormat::Lines,
+                        refresh_interval_secs: 3600,
+                        timeout_secs: 5,
+                    },
+                ],
+            },
+            ..WebFetchUrlValidationConfig::default()
+        };
+
+        let resolved = resolve_url_validation_config(cfg).await.unwrap();
+        assert!(resolved
+            .allowlist_hosts
+            .iter()
+            .any(|h| h == "allowed.example"));
+        assert!(resolved
+            .denylist_hosts
+            .iter()
+            .any(|h| h == "blocked.example"));
+    }
+
+    #[tokio::test]
+    async fn feed_sync_skips_disabled_sources() {
+        let cfg = WebFetchUrlValidationConfig {
+            feed_sync: WebFetchFeedSyncConfig {
+                enabled: true,
+                fail_open: false,
+                max_entries_per_source: 100,
+                sources: vec![WebFetchFeedSource {
+                    enabled: false,
+                    mode: WebFetchFeedMode::Denylist,
+                    url: "inline:blocked.example\n".to_string(),
+                    format: WebFetchFeedFormat::Lines,
+                    refresh_interval_secs: 3600,
+                    timeout_secs: 5,
+                }],
+            },
+            ..WebFetchUrlValidationConfig::default()
+        };
+
+        let resolved = resolve_url_validation_config(cfg).await.unwrap();
+        assert!(resolved.denylist_hosts.is_empty());
     }
 
     #[tokio::test]

@@ -1384,6 +1384,67 @@ mod tests {
     }
 
     #[test]
+    fn test_build_report_warns_when_feed_sync_enabled_without_sources() {
+        let _guard = env_lock();
+        let path = std::env::temp_dir().join(format!(
+            "microclaw_doctor_feed_sync_warn_{}.yaml",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let mut cfg = Config::test_defaults();
+        cfg.web_fetch_url_validation.feed_sync.enabled = true;
+        cfg.web_fetch_url_validation.feed_sync.sources.clear();
+        cfg.save_yaml(path.to_string_lossy().as_ref()).unwrap();
+        std::env::set_var("MICROCLAW_CONFIG", &path);
+
+        let report = build_report();
+
+        std::env::remove_var("MICROCLAW_CONFIG");
+        let _ = std::fs::remove_file(path);
+
+        let check = report
+            .checks
+            .iter()
+            .find(|c| c.id == "web_fetch.feed_sync.sources")
+            .expect("web_fetch.feed_sync.sources check missing");
+        assert_eq!(check.status, CheckStatus::Warn);
+    }
+
+    #[test]
+    fn test_build_report_fails_invalid_feed_source_url() {
+        let _guard = env_lock();
+        let path = std::env::temp_dir().join(format!(
+            "microclaw_doctor_feed_sync_invalid_url_{}.yaml",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let mut cfg = Config::test_defaults();
+        cfg.web_fetch_url_validation.feed_sync.enabled = true;
+        cfg.web_fetch_url_validation.feed_sync.fail_open = false;
+        cfg.web_fetch_url_validation.feed_sync.sources =
+            vec![microclaw_tools::web_fetch::WebFetchFeedSource {
+                enabled: true,
+                mode: microclaw_tools::web_fetch::WebFetchFeedMode::Denylist,
+                url: "notaurl".to_string(),
+                format: microclaw_tools::web_fetch::WebFetchFeedFormat::Lines,
+                refresh_interval_secs: 60,
+                timeout_secs: 5,
+            }];
+        cfg.save_yaml(path.to_string_lossy().as_ref()).unwrap();
+        std::env::set_var("MICROCLAW_CONFIG", &path);
+
+        let report = build_report();
+
+        std::env::remove_var("MICROCLAW_CONFIG");
+        let _ = std::fs::remove_file(path);
+
+        let check = report
+            .checks
+            .iter()
+            .find(|c| c.id == "web_fetch.feed_sync.source.1")
+            .expect("web_fetch.feed_sync.source.1 check missing");
+        assert_eq!(check.status, CheckStatus::Fail);
+    }
+
+    #[test]
     fn test_migrate_channels_to_accounts_telegram_and_discord() {
         let mut cfg = Config::test_defaults();
         cfg.telegram_bot_token = "tg_token".to_string();
