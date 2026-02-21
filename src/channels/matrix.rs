@@ -39,6 +39,8 @@ pub struct MatrixAccountConfig {
     #[serde(default)]
     pub allowed_room_ids: Vec<String>,
     #[serde(default)]
+    pub allowed_user_ids: Vec<String>,
+    #[serde(default)]
     pub bot_username: String,
     #[serde(default = "default_matrix_mention_required")]
     pub mention_required: bool,
@@ -58,6 +60,8 @@ pub struct MatrixChannelConfig {
     pub bot_user_id: String,
     #[serde(default)]
     pub allowed_room_ids: Vec<String>,
+    #[serde(default)]
+    pub allowed_user_ids: Vec<String>,
     #[serde(default)]
     pub bot_username: String,
     #[serde(default = "default_matrix_mention_required")]
@@ -97,6 +101,7 @@ pub struct MatrixRuntimeContext {
     pub bot_user_id: String,
     pub bot_username: String,
     pub allowed_room_ids: Vec<String>,
+    pub allowed_user_ids: Vec<String>,
     pub mention_required: bool,
     pub sync_timeout_ms: u64,
 }
@@ -116,6 +121,14 @@ impl MatrixRuntimeContext {
 
     fn should_process_room(&self, room_id: &str) -> bool {
         self.allowed_room_ids.is_empty() || self.allowed_room_ids.iter().any(|v| v == room_id)
+    }
+
+    fn should_process_dm_sender(&self, sender_user_id: &str) -> bool {
+        self.allowed_user_ids.is_empty()
+            || self
+                .allowed_user_ids
+                .iter()
+                .any(|v| v.eq_ignore_ascii_case(sender_user_id))
     }
 
     fn bot_localpart(&self) -> String {
@@ -201,6 +214,7 @@ pub fn build_matrix_runtime_contexts(config: &crate::config::Config) -> Vec<Matr
             bot_user_id: account_cfg.bot_user_id.clone(),
             bot_username,
             allowed_room_ids: account_cfg.allowed_room_ids.clone(),
+            allowed_user_ids: account_cfg.allowed_user_ids.clone(),
             mention_required: account_cfg.mention_required,
             sync_timeout_ms: account_cfg.sync_timeout_ms,
         });
@@ -222,6 +236,7 @@ pub fn build_matrix_runtime_contexts(config: &crate::config::Config) -> Vec<Matr
                 matrix_cfg.bot_username.trim().to_string()
             },
             allowed_room_ids: matrix_cfg.allowed_room_ids,
+            allowed_user_ids: matrix_cfg.allowed_user_ids,
             mention_required: matrix_cfg.mention_required,
             sync_timeout_ms: matrix_cfg.sync_timeout_ms,
         });
@@ -458,6 +473,9 @@ async fn sync_matrix_messages(
                 .unwrap_or("")
                 .to_string();
             if sender.trim().is_empty() || sender == runtime.bot_user_id {
+                continue;
+            }
+            if is_direct && !runtime.should_process_dm_sender(&sender) {
                 continue;
             }
 
@@ -1301,6 +1319,7 @@ mod tests {
             bot_user_id: "@bot:localhost".to_string(),
             bot_username: "bot".to_string(),
             allowed_room_ids: Vec::new(),
+            allowed_user_ids: Vec::new(),
             mention_required: true,
             sync_timeout_ms: 30_000,
         };
@@ -1308,5 +1327,23 @@ mod tests {
         assert!(runtime.should_respond("hello there", true, false));
         assert!(!runtime.should_respond("hello there", false, false));
         assert!(runtime.should_respond("hello there", false, true));
+    }
+
+    #[test]
+    fn test_should_process_dm_sender_allowlist() {
+        let runtime = MatrixRuntimeContext {
+            channel_name: "matrix".to_string(),
+            access_token: "tok".to_string(),
+            homeserver_url: "http://localhost:8008".to_string(),
+            bot_user_id: "@bot:localhost".to_string(),
+            bot_username: "bot".to_string(),
+            allowed_room_ids: Vec::new(),
+            allowed_user_ids: vec!["@alice:localhost".to_string()],
+            mention_required: true,
+            sync_timeout_ms: 30_000,
+        };
+
+        assert!(runtime.should_process_dm_sender("@alice:localhost"));
+        assert!(!runtime.should_process_dm_sender("@bob:localhost"));
     }
 }

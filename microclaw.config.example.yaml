@@ -119,6 +119,7 @@ channels:
   #   access_token: "syt_xxx"
   #   bot_user_id: "@microclaw:matrix.org"
   #   # allowed_room_ids: ["!roomid:matrix.org"]
+  #   # allowed_user_ids: ["@alice:matrix.org"]   # DM sender allowlist (empty = allow all DMs)
   #   # mention_required: true
 
 # Local web UI (optional)
