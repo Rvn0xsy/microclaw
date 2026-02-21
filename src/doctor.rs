@@ -462,9 +462,9 @@ fn check_web_fetch_validation(report: &mut DoctorReport) {
     }
 
     let url_cfg = config.web_fetch_url_validation;
-    let url_status = if !url_cfg.enabled {
-        CheckStatus::Warn
-    } else if url_cfg.allowlist_hosts.is_empty() && url_cfg.denylist_hosts.is_empty() {
+    let url_policy_has_hosts =
+        !url_cfg.allowlist_hosts.is_empty() || !url_cfg.denylist_hosts.is_empty();
+    let url_status = if !url_cfg.enabled || !url_policy_has_hosts {
         CheckStatus::Warn
     } else {
         CheckStatus::Pass
