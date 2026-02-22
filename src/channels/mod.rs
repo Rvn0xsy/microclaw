@@ -1,14 +1,28 @@
+pub mod dingtalk;
 pub mod discord;
+pub mod email;
 pub mod feishu;
+pub mod imessage;
 pub mod irc;
 pub mod matrix;
+pub mod nostr;
+pub mod qq;
+pub mod signal;
 pub mod slack;
 pub mod telegram;
+pub mod whatsapp;
 
 // Re-export adapter types
+pub use dingtalk::DingTalkAdapter;
 pub use discord::DiscordAdapter;
+pub use email::EmailAdapter;
 pub use feishu::FeishuAdapter;
+pub use imessage::IMessageAdapter;
 pub use irc::IrcAdapter;
 pub use matrix::MatrixAdapter;
+pub use nostr::NostrAdapter;
+pub use qq::QQAdapter;
+pub use signal::SignalAdapter;
 pub use slack::SlackAdapter;
 pub use telegram::TelegramAdapter;
+pub use whatsapp::WhatsAppAdapter;

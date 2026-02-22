@@ -15,6 +15,7 @@ pub mod otlp;
 pub mod runtime;
 pub mod scheduler;
 pub mod setup;
+pub mod setup_def;
 pub mod skills;
 pub mod tools;
 pub mod web;

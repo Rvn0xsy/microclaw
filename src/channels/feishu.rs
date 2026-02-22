@@ -14,6 +14,7 @@ use crate::agent_engine::AgentEvent;
 use crate::agent_engine::AgentRequestContext;
 use crate::chat_commands::handle_chat_command;
 use crate::runtime::AppState;
+use crate::setup_def::{ChannelFieldDef, DynamicChannelDef};
 use microclaw_channels::channel::ConversationKind;
 use microclaw_channels::channel_adapter::ChannelAdapter;
 use microclaw_storage::db::call_blocking;
@@ -30,6 +31,48 @@ type WsSink = Arc<
     >,
 >;
 use microclaw_core::text::split_text;
+
+pub const SETUP_DEF: DynamicChannelDef = DynamicChannelDef {
+    name: "feishu",
+    presence_keys: &["app_id", "app_secret"],
+    fields: &[
+        ChannelFieldDef {
+            yaml_key: "app_id",
+            label: "Feishu app ID",
+            default: "",
+            secret: false,
+            required: true,
+        },
+        ChannelFieldDef {
+            yaml_key: "app_secret",
+            label: "Feishu app secret",
+            default: "",
+            secret: true,
+            required: true,
+        },
+        ChannelFieldDef {
+            yaml_key: "domain",
+            label: "Feishu domain (feishu/lark/custom)",
+            default: "feishu",
+            secret: false,
+            required: false,
+        },
+        ChannelFieldDef {
+            yaml_key: "bot_username",
+            label: "Feishu bot username override (optional)",
+            default: "",
+            secret: false,
+            required: false,
+        },
+        ChannelFieldDef {
+            yaml_key: "model",
+            label: "Feishu bot model override (optional)",
+            default: "",
+            secret: false,
+            required: false,
+        },
+    ],
+};
 
 // ---------------------------------------------------------------------------
 // Config

@@ -15,7 +15,7 @@
 > **注意：** 本项目正在积极开发中，功能可能会变化，欢迎贡献！
 
 
-一个住在聊天平台里的 AI 智能助手，灵感来自 [nanoclaw](https://github.com/gavrielc/nanoclaw/)，参考了 nanoclaw 的部分思路。MicroClaw 采用“渠道无关核心 + 平台适配器”架构：当前支持 Telegram、Discord、Slack、飞书/Lark、IRC 和 Web，后续可持续扩展更多平台。它支持完整的工具执行：运行 Shell 命令、读写编辑文件、搜索代码库、浏览网页、定时任务、持久化记忆等。
+一个住在聊天平台里的 AI 智能助手，灵感来自 [nanoclaw](https://github.com/gavrielc/nanoclaw/)，参考了 nanoclaw 的部分思路。MicroClaw 采用“渠道无关核心 + 平台适配器”架构：当前支持 Telegram、Discord、Slack、飞书/Lark、Matrix、WhatsApp、iMessage、Email、Nostr、Signal、DingTalk、QQ、IRC 和 Web，后续可持续扩展更多平台。它支持完整的工具执行：运行 Shell 命令、读写编辑文件、搜索代码库、浏览网页、定时任务、持久化记忆等。
 
 
 <p align="center">
@@ -374,7 +374,7 @@ Todo 列表存储在 `<data_dir>/runtime/groups/{chat_id}/TODO.json`，跨会话
 
 ### 1. 创建渠道机器人凭据
 
-至少启用一个渠道：Telegram、Discord、Slack、飞书/Lark、IRC，或 Web UI。
+至少启用一个渠道：Telegram、Discord、Slack、飞书/Lark、Matrix、WhatsApp、iMessage、Email、Nostr、Signal、DingTalk、QQ、IRC，或 Web UI。
 
 Telegram（可选）：
 1. 打开 Telegram，搜索 [@BotFather](https://t.me/BotFather)
