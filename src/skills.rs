@@ -84,6 +84,10 @@ pub struct SkillManager {
     skills_dir: PathBuf,
 }
 
+const MAX_SKILLS_CATALOG_ITEMS: usize = 40;
+const MAX_SKILL_DESCRIPTION_CHARS: usize = 120;
+const COMPACT_SKILLS_MODE_THRESHOLD: usize = 20;
+
 impl SkillManager {
     pub fn from_skills_dir(skills_dir: &str) -> Self {
         SkillManager {
@@ -230,13 +234,39 @@ impl SkillManager {
     /// Build a compact skills catalog for the system prompt.
     /// Returns empty string if no skills are available.
     pub fn build_skills_catalog(&self) -> String {
-        let skills = self.discover_skills();
+        let mut skills = self.discover_skills();
         if skills.is_empty() {
             return String::new();
         }
+
+        // Keep prompt injection stable across runs and bounded for token budget.
+        skills.sort_by_key(|s| s.name.to_ascii_lowercase());
+
+        let total_count = skills.len();
+        let omitted = total_count.saturating_sub(MAX_SKILLS_CATALOG_ITEMS);
+        let visible = skills
+            .into_iter()
+            .take(MAX_SKILLS_CATALOG_ITEMS)
+            .collect::<Vec<_>>();
+        let compact_mode = total_count > COMPACT_SKILLS_MODE_THRESHOLD || omitted > 0;
+
         let mut catalog = String::from("<available_skills>\n");
-        for skill in &skills {
-            catalog.push_str(&format!("- {}: {}\n", skill.name, skill.description));
+        for skill in &visible {
+            if compact_mode {
+                catalog.push_str(&format!("- {}\n", skill.name));
+            } else {
+                let desc = truncate_chars(&skill.description, MAX_SKILL_DESCRIPTION_CHARS);
+                catalog.push_str(&format!("- {}: {}\n", skill.name, desc));
+            }
+        }
+        if compact_mode {
+            catalog.push_str("- (compact mode: use activate_skill to load full instructions)\n");
+        }
+        if omitted > 0 {
+            catalog.push_str(&format!(
+                "- ... ({} additional skills omitted for prompt budget)\n",
+                omitted
+            ));
         }
         catalog.push_str("</available_skills>");
         catalog
@@ -376,6 +406,14 @@ fn missing_deps(deps: &[String]) -> Vec<String> {
         .filter(|dep| !command_exists(dep))
         .cloned()
         .collect()
+}
+
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let truncated: String = s.chars().take(max_chars).collect();
+    format!("{truncated}...")
 }
 
 /// Attempt to convert single-line frontmatter (`--- name: x description: y --- body`)
@@ -598,6 +636,97 @@ Instructions.
         let sm = SkillManager::new(dir.to_str().unwrap());
         let catalog = sm.build_skills_catalog();
         assert!(catalog.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_build_skills_catalog_sorted_and_truncated() {
+        let dir = std::env::temp_dir().join(format!(
+            "microclaw_skills_catalog_sorted_{}",
+            uuid::Uuid::new_v4()
+        ));
+        let long_desc = "z".repeat(MAX_SKILL_DESCRIPTION_CHARS + 32);
+        let zeta = dir.join("zeta");
+        let alpha = dir.join("alpha");
+        std::fs::create_dir_all(&zeta).unwrap();
+        std::fs::create_dir_all(&alpha).unwrap();
+        std::fs::write(
+            zeta.join("SKILL.md"),
+            format!("---\nname: zeta\ndescription: {long_desc}\n---\nok\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            alpha.join("SKILL.md"),
+            r#"---
+name: alpha
+description: alpha skill
+---
+ok
+"#,
+        )
+        .unwrap();
+
+        let sm = SkillManager::from_skills_dir(dir.to_str().unwrap());
+        let catalog = sm.build_skills_catalog();
+        let alpha_pos = catalog.find("- alpha: alpha skill").unwrap();
+        let zeta_pos = catalog.find("- zeta: ").unwrap();
+        assert!(alpha_pos < zeta_pos);
+        assert!(catalog.contains("..."));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_build_skills_catalog_applies_item_cap() {
+        let dir = std::env::temp_dir().join(format!(
+            "microclaw_skills_catalog_cap_{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        for idx in 0..=MAX_SKILLS_CATALOG_ITEMS {
+            let name = format!("skill-{idx:02}");
+            let skill_dir = dir.join(&name);
+            std::fs::create_dir_all(&skill_dir).unwrap();
+            std::fs::write(
+                skill_dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: test skill {idx}\n---\nbody\n"),
+            )
+            .unwrap();
+        }
+        let sm = SkillManager::from_skills_dir(dir.to_str().unwrap());
+        let catalog = sm.build_skills_catalog();
+        assert!(catalog.contains("additional skills omitted for prompt budget"));
+        let rendered_items = catalog
+            .lines()
+            .filter(|line| line.starts_with("- skill-"))
+            .count();
+        assert_eq!(rendered_items, MAX_SKILLS_CATALOG_ITEMS);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_build_skills_catalog_enters_compact_mode_when_many_skills() {
+        let dir = std::env::temp_dir().join(format!(
+            "microclaw_skills_catalog_compact_mode_{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        for idx in 0..=COMPACT_SKILLS_MODE_THRESHOLD {
+            let name = format!("compact-skill-{idx:02}");
+            let skill_dir = dir.join(&name);
+            std::fs::create_dir_all(&skill_dir).unwrap();
+            std::fs::write(
+                skill_dir.join("SKILL.md"),
+                format!(
+                    "---\nname: {name}\ndescription: this description should not appear in compact mode\n---\nbody\n"
+                ),
+            )
+            .unwrap();
+        }
+
+        let sm = SkillManager::from_skills_dir(dir.to_str().unwrap());
+        let catalog = sm.build_skills_catalog();
+        assert!(catalog.contains("compact mode: use activate_skill"));
+        assert!(!catalog.contains(": this description should not appear"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -29,6 +29,18 @@ pub(super) async fn api_config_self_check(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .is_some();
+    let since_24h = (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
+    let (task_runs_24h, task_success_24h) = call_blocking(state.app_state.db.clone(), {
+        let since = since_24h.clone();
+        move |db| db.get_task_run_summary_since(Some(&since))
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let reflector_observability = call_blocking(state.app_state.db.clone(), move |db| {
+        db.get_memory_observability_summary(None)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let sandbox_runtime_available = docker_runtime_available();
     let sandbox_mode = match state.app_state.config.sandbox.mode {
         crate::config::SandboxMode::All => "all",
@@ -183,6 +195,71 @@ pub(super) async fn api_config_self_check(
                 "web_session_idle_ttl_seconds={} may cause frequent session lock churn.",
                 state.app_state.config.web_session_idle_ttl_seconds
             ),
+        });
+    }
+    if state.app_state.config.max_session_messages <= state.app_state.config.compact_keep_recent {
+        warnings.push(ConfigWarning {
+            code: "compaction_threshold_not_effective",
+            severity: "medium",
+            message: format!(
+                "max_session_messages={} and compact_keep_recent={} make compaction ineffective.",
+                state.app_state.config.max_session_messages,
+                state.app_state.config.compact_keep_recent
+            ),
+        });
+    }
+    if state.app_state.config.memory_token_budget < 400 {
+        warnings.push(ConfigWarning {
+            code: "memory_token_budget_low",
+            severity: "medium",
+            message: format!(
+                "memory_token_budget={} may reduce memory recall quality for long tasks.",
+                state.app_state.config.memory_token_budget
+            ),
+        });
+    }
+    if !state.app_state.config.reflector_enabled {
+        warnings.push(ConfigWarning {
+            code: "reflector_disabled",
+            severity: "medium",
+            message:
+                "Memory reflector is disabled; durable facts may not be extracted automatically."
+                    .to_string(),
+        });
+    } else if state.app_state.config.reflector_interval_mins < 5 {
+        warnings.push(ConfigWarning {
+            code: "reflector_interval_too_low",
+            severity: "medium",
+            message: format!(
+                "reflector_interval_mins={} may cause unnecessary LLM cost and churn.",
+                state.app_state.config.reflector_interval_mins
+            ),
+        });
+    } else if state.app_state.config.reflector_interval_mins > 240 {
+        warnings.push(ConfigWarning {
+            code: "reflector_interval_too_high",
+            severity: "medium",
+            message: format!(
+                "reflector_interval_mins={} may delay memory freshness significantly.",
+                state.app_state.config.reflector_interval_mins
+            ),
+        });
+    }
+    let task_failed_24h = (task_runs_24h - task_success_24h).max(0);
+    if task_runs_24h >= 5 && task_failed_24h * 2 >= task_runs_24h {
+        warnings.push(ConfigWarning {
+            code: "scheduler_failure_rate_high",
+            severity: "high",
+            message: format!(
+                "Scheduler failure rate is high in last 24h ({task_failed_24h}/{task_runs_24h} failed)."
+            ),
+        });
+    }
+    if state.app_state.config.reflector_enabled && reflector_observability.reflector_runs_24h == 0 {
+        warnings.push(ConfigWarning {
+            code: "reflector_no_recent_runs",
+            severity: "medium",
+            message: "Reflector is enabled but recorded 0 runs in the last 24h.".to_string(),
         });
     }
 

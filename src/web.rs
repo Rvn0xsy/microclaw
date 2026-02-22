@@ -885,10 +885,54 @@ async fn api_health(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     metrics_http_inc(&state).await;
     require_scope(&state, &headers, AuthScope::Read).await?;
+    let since_24h = (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
+    let task_summary_24h = call_blocking(state.app_state.db.clone(), move |db| {
+        db.get_task_run_summary_since(Some(&since_24h))
+    })
+    .await
+    .ok();
+    let reflector_summary = call_blocking(state.app_state.db.clone(), move |db| {
+        db.get_memory_observability_summary(None)
+    })
+    .await
+    .ok();
+
+    let (task_runs_24h, task_success_24h) = task_summary_24h.unwrap_or((0, 0));
+    let task_failed_24h = (task_runs_24h - task_success_24h).max(0);
+    let reflector_runs_24h = reflector_summary
+        .as_ref()
+        .map(|s| s.reflector_runs_24h)
+        .unwrap_or(0);
+    let reflector_inserted_24h = reflector_summary
+        .as_ref()
+        .map(|s| s.reflector_inserted_24h)
+        .unwrap_or(0);
+    let reflector_updated_24h = reflector_summary
+        .as_ref()
+        .map(|s| s.reflector_updated_24h)
+        .unwrap_or(0);
+    let reflector_skipped_24h = reflector_summary
+        .as_ref()
+        .map(|s| s.reflector_skipped_24h)
+        .unwrap_or(0);
+
     Ok(Json(json!({
         "ok": true,
         "version": env!("CARGO_PKG_VERSION"),
         "web_enabled": state.app_state.config.web_enabled,
+        "scheduler": {
+            "task_runs_24h": task_runs_24h,
+            "task_success_24h": task_success_24h,
+            "task_failed_24h": task_failed_24h
+        },
+        "reflector": {
+            "enabled": state.app_state.config.reflector_enabled,
+            "interval_mins": state.app_state.config.reflector_interval_mins,
+            "runs_24h": reflector_runs_24h,
+            "inserted_24h": reflector_inserted_24h,
+            "updated_24h": reflector_updated_24h,
+            "skipped_24h": reflector_skipped_24h
+        }
     })))
 }
 
@@ -1690,6 +1734,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_api_health_includes_scheduler_and_reflector_status() {
+        let web_state = test_web_state(Box::new(DummyLlm), None, WebLimits::default());
+        let app = build_router(web_state);
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/health")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert!(json.get("scheduler").and_then(|v| v.as_object()).is_some());
+        assert!(json
+            .get("scheduler")
+            .and_then(|s| s.get("task_runs_24h"))
+            .and_then(|v| v.as_i64())
+            .is_some());
+        assert!(json.get("reflector").and_then(|v| v.as_object()).is_some());
+        assert!(json
+            .get("reflector")
+            .and_then(|s| s.get("enabled"))
+            .and_then(|v| v.as_bool())
+            .is_some());
+    }
+
+    #[tokio::test]
     async fn test_same_session_concurrency_limited() {
         let limits = WebLimits {
             max_inflight_per_session: 1,
@@ -2319,6 +2394,102 @@ mod tests {
             .any(|w| w.get("code").and_then(|v| v.as_str()) == Some("otlp_retry_attempts_too_low"));
         assert!(has_missing_endpoint);
         assert!(has_low_retry);
+    }
+
+    #[tokio::test]
+    async fn test_config_self_check_warns_for_reflector_and_compaction_risks() {
+        let mut cfg = test_config_template();
+        cfg.reflector_enabled = false;
+        cfg.max_session_messages = 20;
+        cfg.compact_keep_recent = 20;
+        cfg.memory_token_budget = 300;
+        let state = test_state_with_config(Box::new(DummyLlm), cfg);
+        let web_state = test_web_state_from_app_state(state, None, WebLimits::default());
+        let app = build_router(web_state);
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/config/self_check")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let warnings = json
+            .get("warnings")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let has_reflector_disabled = warnings
+            .iter()
+            .any(|w| w.get("code").and_then(|v| v.as_str()) == Some("reflector_disabled"));
+        let has_compaction_threshold = warnings.iter().any(|w| {
+            w.get("code").and_then(|v| v.as_str()) == Some("compaction_threshold_not_effective")
+        });
+        let has_low_memory_budget = warnings
+            .iter()
+            .any(|w| w.get("code").and_then(|v| v.as_str()) == Some("memory_token_budget_low"));
+
+        assert!(has_reflector_disabled);
+        assert!(has_compaction_threshold);
+        assert!(has_low_memory_budget);
+    }
+
+    #[tokio::test]
+    async fn test_config_self_check_warns_scheduler_failures_and_reflector_idle() {
+        let cfg = test_config_template();
+        let state = test_state_with_config(Box::new(DummyLlm), cfg);
+        let now = chrono::Utc::now().to_rfc3339();
+        let db = state.db.clone();
+        call_blocking(db, move |d| {
+            for idx in 0..6 {
+                d.log_task_run(
+                    1000 + idx,
+                    42,
+                    &now,
+                    &now,
+                    1,
+                    false,
+                    Some("simulated failure"),
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let web_state = test_web_state_from_app_state(state, None, WebLimits::default());
+        let app = build_router(web_state);
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/config/self_check")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let warnings = json
+            .get("warnings")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let has_scheduler_failure = warnings
+            .iter()
+            .any(|w| w.get("code").and_then(|v| v.as_str()) == Some("scheduler_failure_rate_high"));
+        let has_reflector_idle = warnings
+            .iter()
+            .any(|w| w.get("code").and_then(|v| v.as_str()) == Some("reflector_no_recent_runs"));
+
+        assert!(has_scheduler_failure);
+        assert!(has_reflector_idle);
     }
 
     #[tokio::test]
