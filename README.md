@@ -301,8 +301,13 @@ Supported frontmatter fields:
 Unavailable skills are filtered automatically by platform/dependencies, so unsupported skills do not appear in `/skills`.
 
 **Commands:**
+- `/reset` -- clear current chat context (session + chat history)
 - `/skills` -- list all available skills
+- `/reload-skills` -- reload skills from disk
+- `/archive` -- archive current in-memory session as markdown
 - `/usage` -- show token usage summary (current chat + global totals)
+- `/status` -- show provider/model plus current chat session/task status
+- `/model` -- show current provider/model (`/model <name>` currently reports switch is not supported yet)
 
 ## MCP
 
@@ -467,7 +472,10 @@ Recommended BotFather settings (optional but useful):
 - `/setcommands` -- register commands so users see them in the menu:
   ```
   reset - Clear current session
+  status - Show runtime/session status
+  model - Show current provider/model
   skills - List available agent skills
+  usage - Show usage summary
   ```
 - `/setprivacy` -- set to `Disable` if you want the bot to see all group messages (not just @mentions)
 

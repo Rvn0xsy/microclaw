@@ -12,19 +12,16 @@ use serenity::model::id::ChannelId;
 use serenity::prelude::*;
 use tracing::{error, info, warn};
 
-use crate::agent_engine::archive_conversation;
 use crate::agent_engine::process_with_agent_with_events;
 use crate::agent_engine::AgentEvent;
 use crate::agent_engine::AgentRequestContext;
-use crate::chat_commands::{build_model_response, build_status_response};
+use crate::chat_commands::handle_chat_command;
 use crate::runtime::AppState;
 use microclaw_channels::channel::ConversationKind;
 use microclaw_channels::channel_adapter::ChannelAdapter;
-use microclaw_core::llm_types::Message as LlmMessage;
 use microclaw_core::text::{floor_char_boundary, split_text};
 use microclaw_storage::db::call_blocking;
 use microclaw_storage::db::StoredMessage;
-use microclaw_storage::usage::build_usage_report;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DiscordAccountConfig {
@@ -348,105 +345,18 @@ impl EventHandler for Handler {
             return;
         }
 
-        // Handle /reset command
-        if text.trim() == "/reset" {
-            let _ = call_blocking(self.app_state.db.clone(), move |db| {
-                db.clear_chat_context(channel_id)
-            })
-            .await;
-            let _ = msg
-                .channel_id
-                .say(&ctx.http, "Context cleared (session + chat history).")
-                .await;
-            return;
-        }
-
-        // Handle /skills command
-        if text.trim() == "/skills" {
-            let formatted = self.app_state.skills.list_skills_formatted();
-            let _ = msg.channel_id.say(&ctx.http, &formatted).await;
-            return;
-        }
-
-        // Handle /reload-skills command
-        if text.trim() == "/reload-skills" {
-            let reloaded = self.app_state.skills.reload();
-            let count = reloaded.len();
-            let _ = msg
-                .channel_id
-                .say(&ctx.http, format!("Reloaded {} skills from disk.", count))
-                .await;
-            return;
-        }
-
-        // Handle /archive command
-        if text.trim() == "/archive" {
-            if let Ok(Some((json, _))) = call_blocking(self.app_state.db.clone(), move |db| {
-                db.load_session(channel_id)
-            })
-            .await
-            {
-                let messages: Vec<LlmMessage> = serde_json::from_str(&json).unwrap_or_default();
-                if messages.is_empty() {
-                    let _ = msg
-                        .channel_id
-                        .say(&ctx.http, "No session to archive.")
-                        .await;
-                } else {
-                    archive_conversation(
-                        &self.app_state.config.data_dir,
-                        &self.runtime.channel_name,
-                        channel_id,
-                        &messages,
-                    );
-                    let _ = msg
-                        .channel_id
-                        .say(&ctx.http, format!("Archived {} messages.", messages.len()))
-                        .await;
-                }
-            } else {
-                let _ = msg
-                    .channel_id
-                    .say(&ctx.http, "No session to archive.")
-                    .await;
-            }
-            return;
-        }
-
-        // Handle /usage command
-        if text.trim() == "/usage" {
-            match build_usage_report(self.app_state.db.clone(), channel_id).await {
-                Ok(text) => {
-                    let _ = msg.channel_id.say(&ctx.http, text).await;
-                }
-                Err(e) => {
-                    let _ = msg
-                        .channel_id
-                        .say(&ctx.http, format!("Failed to query usage statistics: {e}"))
-                        .await;
-                }
-            }
-            return;
-        }
-
-        // Handle /status command
-        if text.trim() == "/status" {
-            let status = build_status_response(
-                self.app_state.db.clone(),
-                &self.app_state.config,
+        if text.trim_start().starts_with('/') {
+            if let Some(reply) = handle_chat_command(
+                &self.app_state,
                 channel_id,
                 &self.runtime.channel_name,
+                &text,
             )
-            .await;
-            let _ = msg.channel_id.say(&ctx.http, status).await;
-            return;
-        }
-
-        // Handle /model command
-        if text.trim() == "/model" || text.trim_start().starts_with("/model ") {
-            let model_text = build_model_response(&self.app_state.config, &text);
-            let _ = msg.channel_id.say(&ctx.http, model_text).await;
-            return;
+            .await
+            {
+                let _ = msg.channel_id.say(&ctx.http, reply).await;
+                return;
+            }
         }
 
         if text.is_empty() {

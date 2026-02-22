@@ -9,19 +9,16 @@ use tokio::sync::{mpsc, RwLock};
 use tokio_native_tls::TlsConnector as TokioTlsConnector;
 use tracing::{error, info, warn};
 
-use crate::agent_engine::archive_conversation;
 use crate::agent_engine::process_with_agent_with_events;
 use crate::agent_engine::AgentEvent;
 use crate::agent_engine::AgentRequestContext;
-use crate::chat_commands::{build_model_response, build_status_response};
+use crate::chat_commands::handle_chat_command;
 use crate::runtime::AppState;
 use microclaw_channels::channel::ConversationKind;
 use microclaw_channels::channel_adapter::ChannelAdapter;
-use microclaw_core::llm_types::Message as LlmMessage;
 use microclaw_core::text::floor_char_boundary;
 use microclaw_storage::db::call_blocking;
 use microclaw_storage::db::StoredMessage;
-use microclaw_storage::usage::build_usage_report;
 
 fn default_irc_port() -> String {
     "6667".into()
@@ -390,85 +387,11 @@ async fn handle_irc_message(
     let _ = call_blocking(app_state.db.clone(), move |db| db.store_message(&stored)).await;
 
     let trimmed = text.trim();
-    if trimmed == "/reset" {
-        let _ = call_blocking(app_state.db.clone(), move |db| {
-            db.clear_chat_context(chat_id)
-        })
-        .await;
-        let _ = adapter
-            .send_text(
-                &response_target,
-                "Context cleared (session + chat history).",
-            )
-            .await;
-        return;
-    }
-    if trimmed == "/skills" {
-        let formatted = app_state.skills.list_skills_formatted();
-        let _ = adapter.send_text(&response_target, &formatted).await;
-        return;
-    }
-    if trimmed == "/reload-skills" {
-        let count = app_state.skills.reload().len();
-        let _ = adapter
-            .send_text(
-                &response_target,
-                &format!("Reloaded {} skills from disk.", count),
-            )
-            .await;
-        return;
-    }
-    if trimmed == "/archive" {
-        if let Ok(Some((json, _))) =
-            call_blocking(app_state.db.clone(), move |db| db.load_session(chat_id)).await
-        {
-            let messages: Vec<LlmMessage> = serde_json::from_str(&json).unwrap_or_default();
-            if messages.is_empty() {
-                let _ = adapter
-                    .send_text(&response_target, "No session to archive.")
-                    .await;
-            } else {
-                archive_conversation(&app_state.config.data_dir, "irc", chat_id, &messages);
-                let _ = adapter
-                    .send_text(
-                        &response_target,
-                        &format!("Archived {} messages.", messages.len()),
-                    )
-                    .await;
-            }
-        } else {
-            let _ = adapter
-                .send_text(&response_target, "No session to archive.")
-                .await;
+    if trimmed.starts_with('/') {
+        if let Some(reply) = handle_chat_command(&app_state, chat_id, "irc", trimmed).await {
+            let _ = adapter.send_text(&response_target, &reply).await;
+            return;
         }
-        return;
-    }
-    if trimmed == "/usage" {
-        match build_usage_report(app_state.db.clone(), chat_id).await {
-            Ok(report) => {
-                let _ = adapter.send_text(&response_target, &report).await;
-            }
-            Err(e) => {
-                let _ = adapter
-                    .send_text(
-                        &response_target,
-                        &format!("Failed to query usage statistics: {e}"),
-                    )
-                    .await;
-            }
-        }
-        return;
-    }
-    if trimmed == "/status" {
-        let status =
-            build_status_response(app_state.db.clone(), &app_state.config, chat_id, "irc").await;
-        let _ = adapter.send_text(&response_target, &status).await;
-        return;
-    }
-    if trimmed == "/model" || trimmed.starts_with("/model ") {
-        let model_text = build_model_response(&app_state.config, trimmed);
-        let _ = adapter.send_text(&response_target, &model_text).await;
-        return;
     }
 
     if is_group && cfg.mention_required_bool() && !is_irc_mention(&text, cfg.nick.trim()) {

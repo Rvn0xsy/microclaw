@@ -277,8 +277,13 @@ MicroClaw 支持 [Anthropic Agent Skills](https://github.com/anthropics/skills) 
 **添加技能：** 在 `<data_dir>/skills/` 下创建子目录，放入包含 YAML frontmatter（`name` 和 `description`）和 markdown 指令的 `SKILL.md` 文件。
 
 **命令：**
+- `/reset` -- 清除当前聊天上下文（会话 + 聊天历史）
 - `/skills` -- 列出所有可用技能
+- `/reload-skills` -- 从磁盘重新加载技能
+- `/archive` -- 将当前内存会话归档为 markdown
 - `/usage` -- 查看 token 用量统计（当前聊天 + 全局汇总）
+- `/status` -- 查看 provider/model 和当前聊天会话/任务状态
+- `/model` -- 查看当前 provider/model（`/model <name>` 目前会提示暂不支持切换）
 
 ## MCP
 
@@ -383,7 +388,10 @@ Telegram（可选）：
 - `/setcommands` -- 注册命令，用户可以在菜单中看到：
   ```
   reset - 清除当前会话
+  status - 查看运行/会话状态
+  model - 查看当前 provider/model
   skills - 查看可用技能列表
+  usage - 查看用量统计
   ```
 - `/setprivacy` -- 设置为 `Disable`，这样机器人可以看到群里所有消息（而不仅仅是 @提及）
 

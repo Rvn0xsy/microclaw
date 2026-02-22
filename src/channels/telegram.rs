@@ -8,19 +8,15 @@ use teloxide::prelude::*;
 use teloxide::types::{ChatAction, InputFile, ParseMode, ThreadId};
 use tracing::{error, info, warn};
 
-use crate::agent_engine::{
-    archive_conversation, process_with_agent_with_events, AgentEvent, AgentRequestContext,
-};
-use crate::chat_commands::{build_model_response, build_status_response};
+use crate::agent_engine::{process_with_agent_with_events, AgentEvent, AgentRequestContext};
+use crate::chat_commands::handle_chat_command;
 use crate::runtime::AppState;
 use microclaw_channels::channel::ConversationKind;
 use microclaw_channels::channel_adapter::ChannelAdapter;
-use microclaw_core::llm_types::Message;
 #[cfg(test)]
 use microclaw_core::llm_types::{ContentBlock, ImageSource, MessageContent};
 use microclaw_core::text::floor_char_boundary;
 use microclaw_storage::db::{call_blocking, StoredMessage};
-use microclaw_storage::usage::build_usage_report;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct TelegramAccountConfig {
@@ -371,8 +367,7 @@ async fn handle_message(
     let mut image_data: Option<(String, String)> = None; // (base64, media_type)
     let mut document_saved_path: Option<String> = None;
 
-    // Handle /reset command — clear session
-    if text.trim() == "/reset" {
+    if text.trim_start().starts_with('/') {
         let external_chat_id = raw_chat_id.to_string();
         let chat_title_for_lookup = chat_title.clone();
         let chat_type_for_lookup = db_chat_type.to_string();
@@ -387,130 +382,10 @@ async fn handle_message(
         })
         .await
         .unwrap_or(raw_chat_id);
-        let _ = call_blocking(state.db.clone(), move |db| db.clear_chat_context(chat_id)).await;
-        let _ = bot
-            .send_message(msg.chat.id, "Context cleared (session + chat history).")
-            .await;
-        return Ok(());
-    }
-
-    // Handle /skills command — list available skills
-    if text.trim() == "/skills" {
-        let formatted = state.skills.list_skills_formatted();
-        let _ = bot.send_message(msg.chat.id, formatted).await;
-        return Ok(());
-    }
-
-    // Handle /reload-skills command — reload skills from disk
-    if text.trim() == "/reload-skills" {
-        let reloaded = state.skills.reload();
-        let count = reloaded.len();
-        let _ = bot
-            .send_message(msg.chat.id, format!("Reloaded {} skills from disk.", count))
-            .await;
-        return Ok(());
-    }
-
-    // Handle /archive command — archive current session to markdown
-    if text.trim() == "/archive" {
-        let external_chat_id = raw_chat_id.to_string();
-        let chat_title_for_lookup = chat_title.clone();
-        let chat_type_for_lookup = db_chat_type.to_string();
-        let channel_name = tg_channel_name.clone();
-        let chat_id = call_blocking(state.db.clone(), move |db| {
-            db.resolve_or_create_chat_id(
-                &channel_name,
-                &external_chat_id,
-                chat_title_for_lookup.as_deref(),
-                &chat_type_for_lookup,
-            )
-        })
-        .await
-        .unwrap_or(raw_chat_id);
-        if let Ok(Some((json, _))) =
-            call_blocking(state.db.clone(), move |db| db.load_session(chat_id)).await
-        {
-            let messages: Vec<Message> = serde_json::from_str(&json).unwrap_or_default();
-            if messages.is_empty() {
-                let _ = bot
-                    .send_message(msg.chat.id, "No session to archive.")
-                    .await;
-            } else {
-                archive_conversation(&state.config.data_dir, &tg_channel_name, chat_id, &messages);
-                let _ = bot
-                    .send_message(
-                        msg.chat.id,
-                        format!("Archived {} messages.", messages.len()),
-                    )
-                    .await;
-            }
-        } else {
-            let _ = bot
-                .send_message(msg.chat.id, "No session to archive.")
-                .await;
+        if let Some(reply) = handle_chat_command(&state, chat_id, &tg_channel_name, &text).await {
+            let _ = bot.send_message(msg.chat.id, reply).await;
+            return Ok(());
         }
-        return Ok(());
-    }
-
-    // Handle /usage command — token usage summary
-    if text.trim() == "/usage" {
-        let external_chat_id = raw_chat_id.to_string();
-        let chat_title_for_lookup = chat_title.clone();
-        let chat_type_for_lookup = db_chat_type.to_string();
-        let channel_name = tg_channel_name.clone();
-        let chat_id = call_blocking(state.db.clone(), move |db| {
-            db.resolve_or_create_chat_id(
-                &channel_name,
-                &external_chat_id,
-                chat_title_for_lookup.as_deref(),
-                &chat_type_for_lookup,
-            )
-        })
-        .await
-        .unwrap_or(raw_chat_id);
-        match build_usage_report(state.db.clone(), chat_id).await {
-            Ok(response) => {
-                let _ = bot.send_message(msg.chat.id, response).await;
-            }
-            Err(e) => {
-                let _ = bot
-                    .send_message(
-                        msg.chat.id,
-                        format!("Failed to query usage statistics: {e}"),
-                    )
-                    .await;
-            }
-        }
-        return Ok(());
-    }
-
-    // Handle /status command — runtime and session summary
-    if text.trim() == "/status" {
-        let external_chat_id = raw_chat_id.to_string();
-        let chat_title_for_lookup = chat_title.clone();
-        let chat_type_for_lookup = db_chat_type.to_string();
-        let channel_name = tg_channel_name.clone();
-        let chat_id = call_blocking(state.db.clone(), move |db| {
-            db.resolve_or_create_chat_id(
-                &channel_name,
-                &external_chat_id,
-                chat_title_for_lookup.as_deref(),
-                &chat_type_for_lookup,
-            )
-        })
-        .await
-        .unwrap_or(raw_chat_id);
-        let status =
-            build_status_response(state.db.clone(), &state.config, chat_id, &tg_channel_name).await;
-        let _ = bot.send_message(msg.chat.id, status).await;
-        return Ok(());
-    }
-
-    // Handle /model command — show current provider/model
-    if text.trim() == "/model" || text.trim_start().starts_with("/model ") {
-        let model_text = build_model_response(&state.config, &text);
-        let _ = bot.send_message(msg.chat.id, model_text).await;
-        return Ok(());
     }
 
     if let Some(photos) = msg.photo() {
@@ -1188,6 +1063,7 @@ mod tests {
         build_system_prompt, history_to_claude_messages, message_to_text, strip_images_for_session,
         strip_thinking,
     };
+    use microclaw_core::llm_types::Message;
     use microclaw_storage::db::StoredMessage;
 
     fn make_msg(id: &str, sender: &str, content: &str, is_bot: bool, ts: &str) -> StoredMessage {

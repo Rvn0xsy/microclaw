@@ -7,19 +7,16 @@ use serde::Deserialize;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tracing::{error, info, warn};
 
-use crate::agent_engine::archive_conversation;
 use crate::agent_engine::process_with_agent_with_events;
 use crate::agent_engine::AgentEvent;
 use crate::agent_engine::AgentRequestContext;
-use crate::chat_commands::{build_model_response, build_status_response};
+use crate::chat_commands::handle_chat_command;
 use crate::runtime::AppState;
 use microclaw_channels::channel::ConversationKind;
 use microclaw_channels::channel_adapter::ChannelAdapter;
-use microclaw_core::llm_types::Message as LlmMessage;
 use microclaw_core::text::split_text;
 use microclaw_storage::db::call_blocking;
 use microclaw_storage::db::StoredMessage;
-use microclaw_storage::usage::build_usage_report;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SlackAccountConfig {
@@ -596,94 +593,14 @@ async fn handle_slack_message(
     };
     let _ = call_blocking(app_state.db.clone(), move |db| db.store_message(&stored)).await;
 
-    // Handle slash commands
     let trimmed = text.trim();
-    if trimmed == "/reset" {
-        let _ = call_blocking(app_state.db.clone(), move |db| {
-            db.clear_chat_context(chat_id)
-        })
-        .await;
-        let _ = send_slack_response(
-            bot_token,
-            channel,
-            "Context cleared (session + chat history).",
-        )
-        .await;
-        return;
-    }
-    if trimmed == "/skills" {
-        let formatted = app_state.skills.list_skills_formatted();
-        let _ = send_slack_response(bot_token, channel, &formatted).await;
-        return;
-    }
-    if trimmed == "/reload-skills" {
-        let reloaded = app_state.skills.reload();
-        let count = reloaded.len();
-        let _ = send_slack_response(
-            bot_token,
-            channel,
-            &format!("Reloaded {} skills from disk.", count),
-        )
-        .await;
-        return;
-    }
-    if trimmed == "/archive" {
-        if let Ok(Some((json, _))) =
-            call_blocking(app_state.db.clone(), move |db| db.load_session(chat_id)).await
+    if trimmed.starts_with('/') {
+        if let Some(reply) =
+            handle_chat_command(&app_state, chat_id, &runtime.channel_name, trimmed).await
         {
-            let messages: Vec<LlmMessage> = serde_json::from_str(&json).unwrap_or_default();
-            if messages.is_empty() {
-                let _ = send_slack_response(bot_token, channel, "No session to archive.").await;
-            } else {
-                archive_conversation(
-                    &app_state.config.data_dir,
-                    &runtime.channel_name,
-                    chat_id,
-                    &messages,
-                );
-                let _ = send_slack_response(
-                    bot_token,
-                    channel,
-                    &format!("Archived {} messages.", messages.len()),
-                )
-                .await;
-            }
-        } else {
-            let _ = send_slack_response(bot_token, channel, "No session to archive.").await;
+            let _ = send_slack_response(bot_token, channel, &reply).await;
+            return;
         }
-        return;
-    }
-    if trimmed == "/usage" {
-        match build_usage_report(app_state.db.clone(), chat_id).await {
-            Ok(report) => {
-                let _ = send_slack_response(bot_token, channel, &report).await;
-            }
-            Err(e) => {
-                let _ = send_slack_response(
-                    bot_token,
-                    channel,
-                    &format!("Failed to query usage statistics: {e}"),
-                )
-                .await;
-            }
-        }
-        return;
-    }
-    if trimmed == "/status" {
-        let status = build_status_response(
-            app_state.db.clone(),
-            &app_state.config,
-            chat_id,
-            &runtime.channel_name,
-        )
-        .await;
-        let _ = send_slack_response(bot_token, channel, &status).await;
-        return;
-    }
-    if trimmed == "/model" || trimmed.starts_with("/model ") {
-        let model_text = build_model_response(&app_state.config, trimmed);
-        let _ = send_slack_response(bot_token, channel, &model_text).await;
-        return;
     }
 
     // Determine if we should respond
