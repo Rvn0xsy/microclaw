@@ -6,7 +6,7 @@ pub(super) async fn api_send_stream(
     Json(body): Json<SendRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     metrics_http_inc(&state).await;
-    require_scope(&state, &headers, AuthScope::Write).await?;
+    let identity = require_scope(&state, &headers, AuthScope::Write).await?;
     let start = Instant::now();
 
     let text = body.message.trim().to_string();
@@ -30,7 +30,7 @@ pub(super) async fn api_send_stream(
     }
 
     let run_id = uuid::Uuid::new_v4().to_string();
-    state.run_hub.create(&run_id).await;
+    state.run_hub.create(&run_id, identity.actor.clone()).await;
     let state_for_task = state.clone();
     let run_id_for_task = run_id.clone();
     let lock = state
@@ -227,15 +227,24 @@ pub(super) async fn api_stream(
     Query(query): Query<StreamQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     metrics_http_inc(&state).await;
-    require_scope(&state, &headers, AuthScope::Read).await?;
+    let identity = require_scope(&state, &headers, AuthScope::Read).await?;
     let start = Instant::now();
 
-    let Some((mut rx, replay, done, replay_truncated, oldest_event_id)) = state
+    let (mut rx, replay, done, replay_truncated, oldest_event_id) = match state
         .run_hub
-        .subscribe_with_replay(&query.run_id, query.last_event_id)
+        .subscribe_with_replay(
+            &query.run_id,
+            query.last_event_id,
+            &identity.actor,
+            identity.allows(AuthScope::Admin),
+        )
         .await
-    else {
-        return Err((StatusCode::NOT_FOUND, "run not found".into()));
+    {
+        Ok(v) => v,
+        Err(RunLookupError::NotFound) => {
+            return Err((StatusCode::NOT_FOUND, "run not found".into()))
+        }
+        Err(RunLookupError::Forbidden) => return Err((StatusCode::FORBIDDEN, "forbidden".into())),
     };
     info!(
         target: "web",
@@ -314,9 +323,21 @@ pub(super) async fn api_run_status(
     Query(query): Query<RunStatusQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     metrics_http_inc(&state).await;
-    require_scope(&state, &headers, AuthScope::Read).await?;
-    let Some((done, last_event_id)) = state.run_hub.status(&query.run_id).await else {
-        return Err((StatusCode::NOT_FOUND, "run not found".into()));
+    let identity = require_scope(&state, &headers, AuthScope::Read).await?;
+    let (done, last_event_id) = match state
+        .run_hub
+        .status(
+            &query.run_id,
+            &identity.actor,
+            identity.allows(AuthScope::Admin),
+        )
+        .await
+    {
+        Ok(v) => v,
+        Err(RunLookupError::NotFound) => {
+            return Err((StatusCode::NOT_FOUND, "run not found".into()))
+        }
+        Err(RunLookupError::Forbidden) => return Err((StatusCode::FORBIDDEN, "forbidden".into())),
     };
     Ok(Json(json!({
         "ok": true,

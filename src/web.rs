@@ -182,10 +182,17 @@ struct RunChannel {
     history: VecDeque<RunEvent>,
     next_id: u64,
     done: bool,
+    owner_actor: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RunLookupError {
+    NotFound,
+    Forbidden,
 }
 
 impl RunHub {
-    async fn create(&self, run_id: &str) {
+    async fn create(&self, run_id: &str, owner_actor: String) {
         let (tx, _) = broadcast::channel(512);
         let mut guard = self.channels.lock().await;
         guard.insert(
@@ -195,6 +202,7 @@ impl RunHub {
                 history: VecDeque::new(),
                 next_id: 1,
                 done: false,
+                owner_actor,
             },
         );
     }
@@ -225,15 +233,25 @@ impl RunHub {
         &self,
         run_id: &str,
         last_event_id: Option<u64>,
-    ) -> Option<(
-        broadcast::Receiver<RunEvent>,
-        Vec<RunEvent>,
-        bool,
-        bool,
-        Option<u64>,
-    )> {
+        requester_actor: &str,
+        is_admin: bool,
+    ) -> Result<
+        (
+            broadcast::Receiver<RunEvent>,
+            Vec<RunEvent>,
+            bool,
+            bool,
+            Option<u64>,
+        ),
+        RunLookupError,
+    > {
         let guard = self.channels.lock().await;
-        let channel = guard.get(run_id)?;
+        let Some(channel) = guard.get(run_id) else {
+            return Err(RunLookupError::NotFound);
+        };
+        if !is_admin && channel.owner_actor != requester_actor {
+            return Err(RunLookupError::Forbidden);
+        }
         let oldest_event_id = channel.history.front().map(|e| e.id);
         let replay_truncated = matches!(
             (last_event_id, oldest_event_id),
@@ -245,7 +263,7 @@ impl RunHub {
             .filter(|e| last_event_id.is_none_or(|id| e.id > id))
             .cloned()
             .collect::<Vec<_>>();
-        Some((
+        Ok((
             channel.sender.subscribe(),
             replay,
             channel.done,
@@ -254,10 +272,20 @@ impl RunHub {
         ))
     }
 
-    async fn status(&self, run_id: &str) -> Option<(bool, u64)> {
+    async fn status(
+        &self,
+        run_id: &str,
+        requester_actor: &str,
+        is_admin: bool,
+    ) -> Result<(bool, u64), RunLookupError> {
         let guard = self.channels.lock().await;
-        let channel = guard.get(run_id)?;
-        Some((channel.done, channel.next_id.saturating_sub(1)))
+        let Some(channel) = guard.get(run_id) else {
+            return Err(RunLookupError::NotFound);
+        };
+        if !is_admin && channel.owner_actor != requester_actor {
+            return Err(RunLookupError::Forbidden);
+        }
+        Ok((channel.done, channel.next_id.saturating_sub(1)))
     }
 
     async fn remove_later(&self, run_id: String, after_seconds: u64) {
@@ -2393,5 +2421,74 @@ mod tests {
             .unwrap();
         let ok = app.oneshot(reset_with_csrf).await.unwrap();
         assert_eq!(ok.status(), StatusCode::OK);
+    }
+    #[tokio::test]
+    async fn test_stream_run_is_owner_isolated_for_api_keys() {
+        let web_state = test_web_state(Box::new(DummyLlm), None, WebLimits::default());
+        let db = web_state.app_state.db.clone();
+        call_blocking(db, move |d| {
+            let scopes = vec!["operator.read".to_string(), "operator.write".to_string()];
+            d.upsert_auth_password_hash(&make_password_hash("passw0rd!"))?;
+            d.create_api_key(
+                "owner-a",
+                &sha256_hex("mk_owner_a"),
+                "mk_owner_a",
+                &scopes,
+                None,
+                None,
+            )?;
+            d.create_api_key(
+                "owner-b",
+                &sha256_hex("mk_owner_b"),
+                "mk_owner_b",
+                &scopes,
+                None,
+                None,
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let app = build_router(web_state);
+
+        let send_req = Request::builder()
+            .method("POST")
+            .uri("/api/send_stream")
+            .header("authorization", "Bearer mk_owner_a")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"session_key":"main","sender_name":"u","message":"hello"}"#,
+            ))
+            .unwrap();
+        let send_resp = app.clone().oneshot(send_req).await.unwrap();
+        assert_eq!(send_resp.status(), StatusCode::OK);
+        let send_body = axum::body::to_bytes(send_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let send_json: serde_json::Value = serde_json::from_slice(&send_body).unwrap();
+        let run_id = send_json
+            .get("run_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        assert!(!run_id.is_empty());
+
+        let foreign_stream_req = Request::builder()
+            .method("GET")
+            .uri(format!("/api/stream?run_id={run_id}"))
+            .header("authorization", "Bearer mk_owner_b")
+            .body(Body::empty())
+            .unwrap();
+        let foreign_stream_resp = app.clone().oneshot(foreign_stream_req).await.unwrap();
+        assert_eq!(foreign_stream_resp.status(), StatusCode::FORBIDDEN);
+
+        let foreign_status_req = Request::builder()
+            .method("GET")
+            .uri(format!("/api/run_status?run_id={run_id}"))
+            .header("authorization", "Bearer mk_owner_b")
+            .body(Body::empty())
+            .unwrap();
+        let foreign_status_resp = app.oneshot(foreign_status_req).await.unwrap();
+        assert_eq!(foreign_status_resp.status(), StatusCode::FORBIDDEN);
     }
 }
