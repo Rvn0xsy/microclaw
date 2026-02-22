@@ -367,7 +367,6 @@ fn build_report() -> DoctorReport {
     );
 
     check_config(&mut report);
-    check_workspace_contract_files(&mut report);
     check_web_fetch_validation(&mut report);
     check_path(&mut report);
     check_shell(&mut report);
@@ -422,77 +421,6 @@ fn check_config(report: &mut DoctorReport) {
             Some("Fix MICROCLAW_CONFIG or create a valid config file.".to_string()),
         ),
     }
-}
-
-fn check_workspace_contract_files(report: &mut DoctorReport) {
-    let cfg = match Config::load() {
-        Ok(cfg) => cfg,
-        Err(_) => return,
-    };
-    let working_dir = PathBuf::from(&cfg.working_dir);
-    if !working_dir.exists() {
-        report.push(
-            "workspace.working_dir",
-            "Working directory",
-            CheckStatus::Warn,
-            format!("working_dir does not exist: {}", working_dir.display()),
-            Some(
-                "Create working_dir or update config. Run `microclaw setup` if needed.".to_string(),
-            ),
-        );
-        return;
-    }
-
-    report.push(
-        "workspace.working_dir",
-        "Working directory",
-        CheckStatus::Pass,
-        format!("found {}", working_dir.display()),
-        None,
-    );
-
-    let agents_md = working_dir.join("AGENTS.md");
-    if agents_md.exists() {
-        report.push(
-            "workspace.agents_md",
-            "Workspace AGENTS.md",
-            CheckStatus::Pass,
-            format!("found {}", agents_md.display()),
-            None,
-        );
-    } else {
-        report.push(
-            "workspace.agents_md",
-            "Workspace AGENTS.md",
-            CheckStatus::Warn,
-            format!("missing {}", agents_md.display()),
-            Some(
-                "Create AGENTS.md in working_dir to define durable operating instructions."
-                    .to_string(),
-            ),
-        );
-    }
-
-    let soul_md = working_dir.join("SOUL.md");
-    report.push(
-        "workspace.soul_md",
-        "Workspace SOUL.md",
-        if soul_md.exists() {
-            CheckStatus::Pass
-        } else {
-            CheckStatus::Miss
-        },
-        if soul_md.exists() {
-            format!("found {}", soul_md.display())
-        } else {
-            format!("optional file not found: {}", soul_md.display())
-        },
-        if soul_md.exists() {
-            None
-        } else {
-            Some("Optional: add SOUL.md for custom assistant identity and tone.".to_string())
-        },
-    );
 }
 
 fn check_web_fetch_validation(report: &mut DoctorReport) {
@@ -1493,44 +1421,6 @@ mod tests {
             .iter()
             .any(|c| c.id == "web_fetch.content_validation"));
         assert!(report.checks.iter().any(|c| c.id == "web_fetch.url_policy"));
-    }
-
-    #[test]
-    fn test_build_report_checks_workspace_contract_files() {
-        let _guard = env_lock();
-        let cfg_path = std::env::temp_dir().join(format!(
-            "microclaw_doctor_workspace_contract_{}.yaml",
-            Utc::now().timestamp_nanos_opt().unwrap_or_default()
-        ));
-        let workdir = std::env::temp_dir().join(format!(
-            "microclaw_doctor_workspace_contract_dir_{}",
-            Utc::now().timestamp_nanos_opt().unwrap_or_default()
-        ));
-        std::fs::create_dir_all(&workdir).unwrap();
-        std::fs::write(workdir.join("AGENTS.md"), "# agent instructions\n").unwrap();
-        let mut cfg = Config::test_defaults();
-        cfg.working_dir = workdir.to_string_lossy().to_string();
-        cfg.save_yaml(cfg_path.to_string_lossy().as_ref()).unwrap();
-        std::env::set_var("MICROCLAW_CONFIG", &cfg_path);
-
-        let report = build_report();
-
-        std::env::remove_var("MICROCLAW_CONFIG");
-        let _ = std::fs::remove_file(cfg_path);
-        let _ = std::fs::remove_dir_all(workdir);
-
-        let agents = report
-            .checks
-            .iter()
-            .find(|c| c.id == "workspace.agents_md")
-            .expect("workspace.agents_md check missing");
-        assert_eq!(agents.status, CheckStatus::Pass);
-        let soul = report
-            .checks
-            .iter()
-            .find(|c| c.id == "workspace.soul_md")
-            .expect("workspace.soul_md check missing");
-        assert_eq!(soul.status, CheckStatus::Miss);
     }
 
     #[test]
