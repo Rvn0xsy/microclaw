@@ -187,7 +187,7 @@ DB_PATH='${DB_PATH}'
 STATE
 
 pushd "$ROOT_DIR" >/dev/null
-MICROCLAW_CONFIG="$CONFIG_FILE" cargo run -- start >"$LOG_FILE" 2>&1 &
+MICROCLAW_CONFIG="$CONFIG_FILE" cargo run --bin microclaw -- start >"$LOG_FILE" 2>&1 &
 MICROCLAW_PID=$!
 popd >/dev/null
 
