@@ -10,17 +10,10 @@ use std::path::{Path, PathBuf};
 use tracing::info;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-
-#[derive(Debug, Parser)]
-#[command(
-    name = "microclaw",
-    version = VERSION,
-    help_template = "{about-with-newline}",
-    about = "MicroClaw multi-channel agent runtime",
-    long_about = concat!(
-        "MicroClaw v",
-        env!("CARGO_PKG_VERSION"),
-        r#"
+const LONG_ABOUT: &str = concat!(
+    "MicroClaw v",
+    env!("CARGO_PKG_VERSION"),
+    r#"
 
 Usage:
   microclaw <command>
@@ -46,7 +39,15 @@ Channel requirement:
 
 More:
   https://microclaw.ai"#
-    )
+);
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "microclaw",
+    version = VERSION,
+    help_template = "{about-with-newline}",
+    about = "MicroClaw multi-channel agent runtime",
+    long_about = LONG_ABOUT
 )]
 struct Cli {
     #[command(subcommand)]
