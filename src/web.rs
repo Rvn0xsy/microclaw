@@ -1113,13 +1113,10 @@ async fn resolve_chat_id_for_session_key_read(
 
     let key = session_key.to_string();
     let by_title = call_blocking(state.app_state.db.clone(), move |db| {
-        db.get_recent_chats(4000)
+        db.get_chat_id_by_channel_and_title("web", &key)
     })
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    .into_iter()
-    .find(|c| c.chat_title.as_deref() == Some(key.as_str()))
-    .map(|c| c.chat_id);
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     if let Some(cid) = by_title {
         return Ok(cid);
@@ -1138,13 +1135,10 @@ async fn resolve_chat_id_for_session_key(
 
     let key = session_key.to_string();
     let by_title = call_blocking(state.app_state.db.clone(), move |db| {
-        db.get_recent_chats(4000)
+        db.get_chat_id_by_channel_and_title("web", &key)
     })
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    .into_iter()
-    .find(|c| c.chat_title.as_deref() == Some(key.as_str()))
-    .map(|c| c.chat_id);
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if let Some(cid) = by_title {
         return Ok(cid);
     }
@@ -2438,6 +2432,63 @@ mod tests {
             .unwrap()
             .len();
         assert_eq!(after, before);
+    }
+
+    #[tokio::test]
+    async fn test_read_endpoints_resolve_session_older_than_recent_limit() {
+        let web_state = test_web_state(Box::new(DummyLlm), None, WebLimits::default());
+        let db = web_state.app_state.db.clone();
+        let read_key = "mk_read_old";
+        call_blocking(db.clone(), move |d| {
+            d.upsert_auth_password_hash(&make_password_hash("passw0rd!"))?;
+            d.create_api_key(
+                "read-old",
+                &sha256_hex(read_key),
+                "mk_read_ol",
+                &["operator.read".to_string()],
+                None,
+                None,
+            )?;
+            for i in 0..5000 {
+                d.resolve_or_create_chat_id(
+                    "web",
+                    &format!("ext-{i}"),
+                    Some(&format!("title-{i}")),
+                    "web",
+                )?;
+            }
+            let legacy_chat =
+                d.resolve_or_create_chat_id("web", "legacy-ext", Some("legacy-session"), "web")?;
+            for i in 5000..9300 {
+                d.resolve_or_create_chat_id(
+                    "web",
+                    &format!("ext-{i}"),
+                    Some(&format!("title-{i}")),
+                    "web",
+                )?;
+            }
+            d.store_message(&StoredMessage {
+                id: uuid::Uuid::new_v4().to_string(),
+                chat_id: legacy_chat,
+                sender_name: "user".to_string(),
+                content: "hello".to_string(),
+                is_from_bot: false,
+                timestamp: chrono::Utc::now().to_rfc3339(),
+            })?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let app = build_router(web_state);
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/history?session_key=legacy-session")
+            .header("authorization", format!("Bearer {read_key}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]
