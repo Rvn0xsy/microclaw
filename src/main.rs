@@ -90,6 +90,24 @@ fn print_version() {
     println!("microclaw {VERSION}");
 }
 
+fn print_web_help() {
+    println!(
+        r#"Manage Web UI Configurations
+
+Usage:
+  microclaw web [password <value> | password-generate | password-clear]
+
+Options:
+  password <value>      Set the exact new password (min 8 chars)
+  password-generate     Generate a random password
+  password-clear        Clear password hash and revoke sessions (test/reset)
+
+Notes:
+  - Existing Web login sessions are revoked automatically.
+  - Restart is not required."#
+    );
+}
+
 fn make_password_hash(password: &str) -> anyhow::Result<String> {
     let salt = SaltString::generate(&mut OsRng);
     let hash: PasswordHashString = Argon2::default()
@@ -105,6 +123,11 @@ fn generate_password() -> String {
 }
 
 fn handle_web_cli(action: Option<WebAction>) -> anyhow::Result<()> {
+    if action.is_none() {
+        print_web_help();
+        return Ok(());
+    }
+
     if matches!(action, Some(WebAction::PasswordClear)) {
         let config = Config::load()?;
         let runtime_data_dir = config.runtime_data_dir();
@@ -120,9 +143,10 @@ fn handle_web_cli(action: Option<WebAction>) -> anyhow::Result<()> {
     }
 
     let (password, generated) = match action {
-        None | Some(WebAction::PasswordGenerate) => (generate_password(), true),
+        Some(WebAction::PasswordGenerate) => (generate_password(), true),
         Some(WebAction::Password { value }) => (value, false),
         Some(WebAction::PasswordClear) => unreachable!("handled above"),
+        None => unreachable!("handled above"),
     };
     let normalized = password.trim().to_string();
     if normalized.len() < 8 {
