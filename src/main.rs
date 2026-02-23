@@ -13,7 +13,11 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const LONG_ABOUT: &str = concat!(
     "\x1b[1mMicroClaw v",
     env!("CARGO_PKG_VERSION"),
-    " https://microclaw.ai\x1b[22m\n\n",
+    "\x1b[22m\n",
+    "\x1b[1mWebsite:\x1b[22m https://microclaw.ai\n",
+    "\x1b[1mGitHub:\x1b[22m https://github.com/microclaw/microclaw\n",
+    "\x1b[1mDiscord:\x1b[22m https://discord.gg/pvmezwkAk5\n",
+    "\n",
     "\x1b[1mQuick Start:\x1b[22m\n",
     "  1) microclaw setup\n",
     "  2) microclaw doctor\n",
