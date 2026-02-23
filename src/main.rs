@@ -3,6 +3,8 @@ use microclaw::error::MicroClawError;
 use microclaw::{
     builtin_skills, db, doctor, gateway, hooks, logging, mcp, memory, runtime, setup, skills,
 };
+use argon2::password_hash::{rand_core::OsRng, PasswordHashString, SaltString};
+use argon2::{Argon2, PasswordHasher};
 use std::path::{Path, PathBuf};
 use tracing::info;
 
@@ -19,6 +21,7 @@ Commands:
   start      Start runtime (enabled channels)
   setup      Full-screen setup wizard (or `setup --enable-sandbox`)
   doctor     Preflight diagnostics
+  web-password  Reset Web UI operator password
   hooks      Manage runtime hooks (list/info/enable/disable)
   skill      Manage ClawHub skills (search/install/list/inspect)
   gateway    Manage service (install/start/stop/status/logs)
@@ -40,6 +43,119 @@ More:
 
 fn print_version() {
     println!("microclaw {VERSION}");
+}
+
+fn print_web_password_help() {
+    println!(
+        r#"Reset Web UI operator password
+
+Usage:
+  microclaw web-password [--password <value> | --generate | --clear]
+
+Options:
+  --password <value>  Set the exact new password (min 8 chars)
+  --generate          Generate a random password (default when omitted)
+  --clear             Clear password hash and revoke sessions (test/reset)
+  -h, --help          Show this help
+
+Notes:
+  - Existing Web login sessions are revoked automatically.
+  - Restart is not required."#
+    );
+}
+
+fn make_password_hash(password: &str) -> anyhow::Result<String> {
+    let salt = SaltString::generate(&mut OsRng);
+    let hash: PasswordHashString = Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map_err(|e| anyhow::anyhow!("password hashing failed: {e}"))?
+        .serialize();
+    Ok(hash.to_string())
+}
+
+fn generate_password() -> String {
+    let rand = uuid::Uuid::new_v4().simple().to_string();
+    format!("mc-{}-{}!", &rand[..6], &rand[6..12])
+}
+
+fn handle_web_password_cli(args: &[String]) -> anyhow::Result<()> {
+    if args.iter().any(|a| a == "-h" || a == "--help") {
+        print_web_password_help();
+        return Ok(());
+    }
+
+    if args.len() == 1 && args[0] == "--clear" {
+        let config = Config::load()?;
+        let runtime_data_dir = config.runtime_data_dir();
+        let database = db::Database::new(&runtime_data_dir)?;
+        database.clear_auth_password_hash()?;
+        let revoked = database.revoke_all_auth_sessions()?;
+        println!("Web password cleared.");
+        println!("Revoked web sessions: {revoked}");
+        println!(
+            "State is now uninitialized. On next `microclaw start`, default password bootstrap policy will apply."
+        );
+        return Ok(());
+    }
+
+    let mut password_arg: Option<String> = None;
+    let mut generate = false;
+    let mut clear = false;
+    let mut i = 0usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--password" => {
+                i += 1;
+                let Some(v) = args.get(i) else {
+                    anyhow::bail!("missing value for --password");
+                };
+                password_arg = Some(v.clone());
+            }
+            "--generate" => {
+                generate = true;
+            }
+            "--clear" => {
+                clear = true;
+            }
+            other => {
+                anyhow::bail!("unknown option for web-password: {other}");
+            }
+        }
+        i += 1;
+    }
+
+    if clear {
+        anyhow::bail!("use `microclaw web-password --clear` by itself");
+    }
+
+    if password_arg.is_some() && generate {
+        anyhow::bail!("use either --password or --generate, not both");
+    }
+
+    let generated = password_arg.is_none();
+    let password = if let Some(p) = password_arg {
+        p
+    } else {
+        generate_password()
+    };
+    let normalized = password.trim().to_string();
+    if normalized.len() < 8 {
+        anyhow::bail!("password must be at least 8 chars");
+    }
+
+    let config = Config::load()?;
+    let runtime_data_dir = config.runtime_data_dir();
+    let database = db::Database::new(&runtime_data_dir)?;
+    let hash = make_password_hash(&normalized)?;
+    database.upsert_auth_password_hash(&hash)?;
+    let revoked = database.revoke_all_auth_sessions()?;
+
+    println!("Web password reset successfully.");
+    println!("Revoked web sessions: {revoked}");
+    if generated {
+        println!("Generated password: {normalized}");
+    }
+    Ok(())
 }
 
 fn move_path(src: &Path, dst: &Path) -> std::io::Result<()> {
@@ -259,6 +375,10 @@ async fn main() -> anyhow::Result<()> {
         }
         Some("doctor") => {
             doctor::run_cli(&args[2..])?;
+            return Ok(());
+        }
+        Some("web-password") => {
+            handle_web_password_cli(&args[2..])?;
             return Ok(());
         }
         Some("skill") => {

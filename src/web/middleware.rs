@@ -68,16 +68,20 @@ pub(super) fn parse_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     None
 }
 
-pub(super) fn session_cookie_header(session_id: &str, expires_at: &str) -> String {
+pub(super) fn session_cookie_header(session_id: &str, expires_at: &str, secure: bool) -> String {
     let mut header =
         format!("mc_session={session_id}; Path=/; HttpOnly; SameSite=Strict; Expires={expires_at}");
-    header.push_str("; Secure");
+    if secure {
+        header.push_str("; Secure");
+    }
     header
 }
 
-pub(super) fn csrf_cookie_header(csrf_token: &str, expires_at: &str) -> String {
+pub(super) fn csrf_cookie_header(csrf_token: &str, expires_at: &str, secure: bool) -> String {
     let mut header = format!("mc_csrf={csrf_token}; Path=/; SameSite=Strict; Expires={expires_at}");
-    header.push_str("; Secure");
+    if secure {
+        header.push_str("; Secure");
+    }
     header
 }
 

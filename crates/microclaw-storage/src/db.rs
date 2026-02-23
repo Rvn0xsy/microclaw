@@ -1749,6 +1749,12 @@ impl Database {
         Ok(value)
     }
 
+    pub fn clear_auth_password_hash(&self) -> Result<bool, MicroClawError> {
+        let conn = self.lock_conn();
+        let rows = conn.execute("DELETE FROM auth_passwords WHERE id = 1", [])?;
+        Ok(rows > 0)
+    }
+
     pub fn create_auth_session(
         &self,
         session_id: &str,
@@ -1800,6 +1806,18 @@ impl Database {
             params![session_id, now],
         )?;
         Ok(rows > 0)
+    }
+
+    pub fn revoke_all_auth_sessions(&self) -> Result<usize, MicroClawError> {
+        let conn = self.lock_conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        let rows = conn.execute(
+            "UPDATE auth_sessions
+             SET revoked_at = COALESCE(revoked_at, ?1)
+             WHERE revoked_at IS NULL",
+            params![now],
+        )?;
+        Ok(rows)
     }
 
     pub fn create_api_key(

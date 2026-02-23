@@ -40,6 +40,7 @@ mod stream;
 use middleware::*;
 
 static WEB_ASSETS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/web/dist");
+pub(crate) const DEFAULT_WEB_PASSWORD: &str = "helloworld";
 
 pub struct WebAdapter;
 
@@ -1610,16 +1611,16 @@ pub async fn start_web_server(state: Arc<AppState>) {
         .ok()
         .flatten()
         .is_some();
-    let bootstrap_token = if state.config.web_auth_token.is_none() && !has_password {
-        let token = uuid::Uuid::new_v4().to_string();
+    if state.config.web_auth_token.is_none() && !has_password {
+        let default_hash = make_password_hash(DEFAULT_WEB_PASSWORD);
+        let _ = call_blocking(state.db.clone(), move |db| db.upsert_auth_password_hash(&default_hash))
+            .await;
         warn!(
-            "web auth bootstrap enabled: set a password via /api/auth/password with header x-bootstrap-token: {}",
-            token
+            "web auth default password enabled: no operator password was configured. Temporary password is '{}'. Please change it in Web UI after sign in.",
+            DEFAULT_WEB_PASSWORD
         );
-        Some(token)
-    } else {
-        None
-    };
+    }
+    let bootstrap_token = None;
     let web_state = WebState {
         legacy_auth_token: state.config.web_auth_token.clone(),
         bootstrap_token: Arc::new(Mutex::new(bootstrap_token)),

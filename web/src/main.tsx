@@ -50,6 +50,13 @@ type StreamEvent = {
   payload: Record<string, unknown>
 }
 
+type AuthStatusResponse = {
+  ok?: boolean
+  authenticated?: boolean
+  has_password?: boolean
+  using_default_password?: boolean
+}
+
 type BackendMessage = {
   id?: string
   sender_name?: string
@@ -366,6 +373,12 @@ function writeSessionToUrl(sessionKey: string): void {
   window.history.replaceState(null, '', url.toString())
 }
 
+function readSessionFromUrl(): string {
+  if (typeof window === 'undefined') return ''
+  const url = new URL(window.location.href)
+  return url.searchParams.get('session')?.trim() || ''
+}
+
 function pickLatestSessionKey(items: SessionItem[]): string {
   if (items.length === 0) return makeSessionKey()
 
@@ -393,17 +406,80 @@ function makeHeaders(options: RequestInit = {}): HeadersInit {
   if (options.body && !headers['Content-Type']) {
     headers['Content-Type'] = 'application/json'
   }
+  const method = String(options.method || 'GET').toUpperCase()
+  if (method !== 'GET' && method !== 'HEAD') {
+    const csrf = readCookie('mc_csrf')
+    if (csrf && !hasHeader(headers, 'x-csrf-token')) {
+      headers['x-csrf-token'] = csrf
+    }
+  }
   return headers
+}
+
+class ApiError extends Error {
+  status: number
+
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+  }
+}
+
+function hasHeader(headers: Record<string, string>, key: string): boolean {
+  const needle = key.toLowerCase()
+  return Object.keys(headers).some((k) => k.toLowerCase() === needle)
+}
+
+function readCookie(name: string): string {
+  if (typeof document === 'undefined') return ''
+  const encodedName = `${encodeURIComponent(name)}=`
+  const items = document.cookie ? document.cookie.split('; ') : []
+  for (const item of items) {
+    if (!item.startsWith(encodedName)) continue
+    return decodeURIComponent(item.slice(encodedName.length))
+  }
+  return ''
+}
+
+function readBootstrapTokenFromHash(): string {
+  if (typeof window === 'undefined') return ''
+  const raw = window.location.hash.startsWith('#')
+    ? window.location.hash.slice(1)
+    : window.location.hash
+  const params = new URLSearchParams(raw)
+  return params.get('bootstrap')?.trim() || ''
+}
+
+function clearBootstrapTokenFromHash(): void {
+  if (typeof window === 'undefined') return
+  const raw = window.location.hash.startsWith('#')
+    ? window.location.hash.slice(1)
+    : window.location.hash
+  const params = new URLSearchParams(raw)
+  if (!params.has('bootstrap')) return
+  params.delete('bootstrap')
+  const next = params.toString()
+  window.location.hash = next ? `#${next}` : ''
+}
+
+function generatePassword(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    const raw = crypto.randomUUID().replace(/-/g, '')
+    return `mc-${raw.slice(0, 6)}-${raw.slice(6, 12)}!`
+  }
+  const fallback = Math.random().toString(36).slice(2, 14)
+  return `mc-${fallback.slice(0, 6)}-${fallback.slice(6, 12)}!`
 }
 
 async function api<T>(
   path: string,
   options: RequestInit = {},
 ): Promise<T> {
-  const res = await fetch(path, { ...options, headers: makeHeaders(options) })
+  const res = await fetch(path, { ...options, headers: makeHeaders(options), credentials: 'same-origin' })
   const data = (await res.json().catch(() => ({}))) as Record<string, unknown>
   if (!res.ok) {
-    throw new Error(String(data.error || data.message || `HTTP ${res.status}`))
+    throw new ApiError(String(data.error || data.message || `HTTP ${res.status}`), res.status)
   }
   return data as T
 }
@@ -789,6 +865,22 @@ function App() {
   const [usageInjectionLogs, setUsageInjectionLogs] = useState<InjectionLogPoint[]>([])
   const [usageError, setUsageError] = useState<string>('')
   const [usageSession, setUsageSession] = useState<string>('')
+  const [authReady, setAuthReady] = useState<boolean>(false)
+  const [authHasPassword, setAuthHasPassword] = useState<boolean>(false)
+  const [authAuthenticated, setAuthAuthenticated] = useState<boolean>(false)
+  const [authUsingDefaultPassword, setAuthUsingDefaultPassword] = useState<boolean>(false)
+  const [authMessage, setAuthMessage] = useState<string>('')
+  const [loginPassword, setLoginPassword] = useState<string>('')
+  const [bootstrapToken, setBootstrapToken] = useState<string>(() => readBootstrapTokenFromHash())
+  const [bootstrapPassword, setBootstrapPassword] = useState<string>('')
+  const [bootstrapConfirm, setBootstrapConfirm] = useState<string>('')
+  const [generatedPasswordPreview, setGeneratedPasswordPreview] = useState<string>('')
+  const [authBusy, setAuthBusy] = useState<boolean>(false)
+  const [passwordPromptOpen, setPasswordPromptOpen] = useState<boolean>(false)
+  const [passwordPromptMessage, setPasswordPromptMessage] = useState<string>('')
+  const [passwordPromptBusy, setPasswordPromptBusy] = useState<boolean>(false)
+  const [newPassword, setNewPassword] = useState<string>('')
+  const [newPasswordConfirm, setNewPasswordConfirm] = useState<string>('')
 
   const sessionItems = useMemo(() => {
     const map = new Map<string, SessionItem>()
@@ -829,19 +921,201 @@ function App() {
   const selectedSessionLabel = selectedSession?.label || sessionKey
   const selectedSessionReadOnly = Boolean(selectedSession && selectedSession.chat_type !== 'web')
 
-  async function loadSessions(): Promise<void> {
+  function isUnauthorizedError(err: unknown): boolean {
+    return err instanceof ApiError && err.status === 401
+  }
+
+  function lockForAuth(message = 'Authentication required. Please sign in.'): void {
+    setAuthAuthenticated(false)
+    setAuthMessage(message)
+    setError(message)
+  }
+
+  async function refreshAuthStatus(): Promise<AuthStatusResponse> {
+    try {
+      const data = await api<AuthStatusResponse>('/api/auth/status')
+      const hasPassword = Boolean(data.has_password)
+      const authenticated = Boolean(data.authenticated)
+      const usingDefaultPassword = Boolean(data.using_default_password)
+      setAuthHasPassword(hasPassword)
+      setAuthAuthenticated(authenticated)
+      setAuthUsingDefaultPassword(usingDefaultPassword)
+      setAuthReady(true)
+      if (authenticated) {
+        setAuthMessage('')
+        setError('')
+      }
+      if (authenticated && usingDefaultPassword) {
+        setPasswordPromptOpen(true)
+      }
+      if (!usingDefaultPassword) {
+        setPasswordPromptOpen(false)
+      }
+      return data
+    } catch (e) {
+      setAuthReady(true)
+      throw e
+    }
+  }
+
+  async function loadInitialConversation(): Promise<void> {
+    setError('')
     const data = await api<{ sessions?: SessionItem[] }>('/api/sessions')
-    setSessions(Array.isArray(data.sessions) ? data.sessions : [])
+    const loaded = Array.isArray(data.sessions) ? data.sessions : []
+    setSessions(loaded)
+
+    const latestSession = pickLatestSessionKey(loaded)
+    const preferredSession = readSessionFromUrl()
+    const initialSession = preferredSession || latestSession
+
+    setSessionKey(initialSession)
+    writeSessionToUrl(initialSession)
+    await loadHistory(initialSession)
+  }
+
+  async function loadSessions(): Promise<void> {
+    try {
+      const data = await api<{ sessions?: SessionItem[] }>('/api/sessions')
+      setSessions(Array.isArray(data.sessions) ? data.sessions : [])
+    } catch (e) {
+      if (isUnauthorizedError(e)) {
+        lockForAuth()
+        return
+      }
+      throw e
+    }
   }
 
   async function loadHistory(target = sessionKey): Promise<void> {
-    const query = new URLSearchParams({ session_key: target, limit: '200' })
-    const data = await api<{ messages?: BackendMessage[] }>(`/api/history?${query.toString()}`)
-    const rawMessages = Array.isArray(data.messages) ? data.messages : []
-    const mapped = mapBackendHistory(rawMessages)
-    setHistorySeed(mapped)
-    setHistoryCountBySession((prev) => ({ ...prev, [target]: rawMessages.length }))
-    setRuntimeNonce((x) => x + 1)
+    try {
+      const query = new URLSearchParams({ session_key: target, limit: '200' })
+      const data = await api<{ messages?: BackendMessage[] }>(`/api/history?${query.toString()}`)
+      const rawMessages = Array.isArray(data.messages) ? data.messages : []
+      const mapped = mapBackendHistory(rawMessages)
+      setHistorySeed(mapped)
+      setHistoryCountBySession((prev) => ({ ...prev, [target]: rawMessages.length }))
+      setRuntimeNonce((x) => x + 1)
+      setError('')
+    } catch (e) {
+      if (isUnauthorizedError(e)) {
+        lockForAuth()
+        return
+      }
+      if (e instanceof ApiError && e.status === 404) {
+        setHistorySeed([])
+        setHistoryCountBySession((prev) => ({ ...prev, [target]: 0 }))
+        setRuntimeNonce((x) => x + 1)
+        setError('')
+        return
+      }
+      throw e
+    }
+  }
+
+  async function submitLogin(password: string): Promise<void> {
+    const normalized = password.trim()
+    if (!normalized) {
+      setAuthMessage('Please enter your password.')
+      return
+    }
+    setAuthBusy(true)
+    setAuthMessage('')
+    try {
+      await api('/api/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({ password: normalized }),
+      })
+      setLoginPassword('')
+      await refreshAuthStatus()
+      await loadInitialConversation()
+      setStatusText('Authenticated')
+    } catch (e) {
+      if (e instanceof ApiError) {
+        if (e.status === 401) {
+          setAuthMessage('Password is incorrect. Please try again or reset with `microclaw web-password --generate`.')
+          return
+        }
+        if (e.status === 429) {
+          setAuthMessage('Too many login attempts. Please wait and retry.')
+          return
+        }
+      }
+      setAuthMessage(e instanceof Error ? e.message : String(e))
+    } finally {
+      setAuthBusy(false)
+    }
+  }
+
+  async function submitBootstrapPassword(): Promise<void> {
+    const token = bootstrapToken.trim()
+    const password = bootstrapPassword.trim()
+    const confirm = bootstrapConfirm.trim()
+
+    if (!token) {
+      setAuthMessage('Bootstrap token is required.')
+      return
+    }
+    if (password.length < 8) {
+      setAuthMessage('Password must be at least 8 characters.')
+      return
+    }
+    if (password !== confirm) {
+      setAuthMessage('Passwords do not match.')
+      return
+    }
+
+    setAuthBusy(true)
+    setAuthMessage('')
+    try {
+      await api('/api/auth/password', {
+        method: 'POST',
+        headers: { 'x-bootstrap-token': token },
+        body: JSON.stringify({ password }),
+      })
+      clearBootstrapTokenFromHash()
+      await submitLogin(password)
+      setBootstrapPassword('')
+      setBootstrapConfirm('')
+      setGeneratedPasswordPreview('')
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) {
+        setAuthMessage('Bootstrap token is invalid or expired. Please copy the latest token from startup logs.')
+        return
+      }
+      setAuthMessage(e instanceof Error ? e.message : String(e))
+    } finally {
+      setAuthBusy(false)
+    }
+  }
+
+  async function submitPasswordUpdate(): Promise<void> {
+    const password = newPassword.trim()
+    const confirm = newPasswordConfirm.trim()
+    if (password.length < 8) {
+      setPasswordPromptMessage('Password must be at least 8 characters.')
+      return
+    }
+    if (password !== confirm) {
+      setPasswordPromptMessage('Passwords do not match.')
+      return
+    }
+    setPasswordPromptBusy(true)
+    setPasswordPromptMessage('')
+    try {
+      await api('/api/auth/password', {
+        method: 'POST',
+        body: JSON.stringify({ password }),
+      })
+      setNewPassword('')
+      setNewPasswordConfirm('')
+      await refreshAuthStatus()
+      setPasswordPromptOpen(false)
+      setStatusText('Password updated')
+    } catch (e) {
+      setPasswordPromptMessage(e instanceof Error ? e.message : String(e))
+    } finally {
+      setPasswordPromptBusy(false)
+    }
   }
 
   const adapter = useMemo<ChatModelAdapter>(
@@ -880,13 +1154,14 @@ function App() {
           const streamResponse = await fetch(`/api/stream?${query.toString()}`, {
             method: 'GET',
             headers: makeHeaders(),
+            credentials: 'same-origin',
             cache: 'no-store',
             signal: options.abortSignal,
           })
 
           if (!streamResponse.ok) {
             const text = await streamResponse.text().catch(() => '')
-            throw new Error(text || `HTTP ${streamResponse.status}`)
+            throw new ApiError(text || `HTTP ${streamResponse.status}`, streamResponse.status)
           }
 
           let assistantText = ''
@@ -998,6 +1273,12 @@ function App() {
               break
             }
           }
+        } catch (e) {
+          if (isUnauthorizedError(e)) {
+            lockForAuth('Session expired. Please sign in again.')
+            setStatusText('Auth required')
+          }
+          throw e
         } finally {
           setSending(false)
           void loadSessions()
@@ -1493,17 +1774,9 @@ function App() {
   useEffect(() => {
     ;(async () => {
       try {
-        setError('')
-        const data = await api<{ sessions?: SessionItem[] }>('/api/sessions')
-        const loaded = Array.isArray(data.sessions) ? data.sessions : []
-        setSessions(loaded)
-
-        const latestSession = pickLatestSessionKey(loaded)
-        const initialSession = latestSession
-
-        setSessionKey(initialSession)
-        writeSessionToUrl(initialSession)
-        await loadHistory(initialSession)
+        const auth = await refreshAuthStatus()
+        if (!auth.has_password || !auth.authenticated) return
+        await loadInitialConversation()
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e))
       }
@@ -1512,9 +1785,10 @@ function App() {
   }, [])
 
   useEffect(() => {
+    if (!authAuthenticated) return
     loadHistory(sessionKey).catch((e) => setError(e instanceof Error ? e.message : String(e)))
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionKey])
+  }, [sessionKey, authAuthenticated])
 
   useEffect(() => {
     writeSessionToUrl(sessionKey)
@@ -1612,6 +1886,166 @@ function App() {
             </div>
           </main>
         </div>
+        <Dialog.Root open={authReady && !authHasPassword}>
+          <Dialog.Content maxWidth="520px">
+            <Dialog.Title>Set Operator Password</Dialog.Title>
+            <Dialog.Description size="2">
+              First-time setup: set an admin password using the bootstrap token from server logs.
+            </Dialog.Description>
+            <div className="mt-4 space-y-3">
+              <ConfigFieldCard
+                label="Bootstrap Token"
+                description={<>Copy <code>x-bootstrap-token</code> from MicroClaw startup logs.</>}
+              >
+                <TextField.Root
+                  className="mt-2"
+                  value={bootstrapToken}
+                  onChange={(e) => setBootstrapToken(e.target.value)}
+                  placeholder="902439dd-a93b-4c66-81bb-7ffba0057936"
+                />
+              </ConfigFieldCard>
+              <ConfigFieldCard
+                label="Password"
+                description={<>At least 8 characters.</>}
+              >
+                <TextField.Root
+                  className="mt-2"
+                  type="password"
+                  value={bootstrapPassword}
+                  onChange={(e) => setBootstrapPassword(e.target.value)}
+                  placeholder="********"
+                />
+                <div className="mt-2 flex items-center justify-end">
+                  <Button
+                    size="1"
+                    variant="soft"
+                    onClick={() => {
+                      const next = generatePassword()
+                      setBootstrapPassword(next)
+                      setBootstrapConfirm(next)
+                      setGeneratedPasswordPreview(next)
+                    }}
+                    disabled={authBusy}
+                  >
+                    Generate Password
+                  </Button>
+                </div>
+              </ConfigFieldCard>
+              <ConfigFieldCard label="Confirm Password" description={<>Re-enter the same password.</>}>
+                <TextField.Root
+                  className="mt-2"
+                  type="password"
+                  value={bootstrapConfirm}
+                  onChange={(e) => setBootstrapConfirm(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') void submitBootstrapPassword()
+                  }}
+                  placeholder="********"
+                />
+              </ConfigFieldCard>
+            </div>
+            {authMessage ? (
+              <Callout.Root color="red" size="1" variant="soft" className="mt-3">
+                <Callout.Text>{authMessage}</Callout.Text>
+              </Callout.Root>
+            ) : null}
+            {generatedPasswordPreview ? (
+              <Callout.Root color="green" size="1" variant="soft" className="mt-3">
+                <Callout.Text>Generated password: <code>{generatedPasswordPreview}</code></Callout.Text>
+              </Callout.Root>
+            ) : null}
+            <div className="mt-4 flex justify-end">
+              <Button onClick={() => void submitBootstrapPassword()} disabled={authBusy}>
+                {authBusy ? 'Applying...' : 'Set Password'}
+              </Button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Root>
+        <Dialog.Root open={authReady && authHasPassword && !authAuthenticated}>
+          <Dialog.Content maxWidth="460px">
+            <Dialog.Title>Sign In</Dialog.Title>
+            <Dialog.Description size="2">
+              Enter your operator password to access sessions and history.
+            </Dialog.Description>
+            {authUsingDefaultPassword ? (
+              <Callout.Root color="orange" size="1" variant="soft" className="mt-2">
+                <Callout.Text>
+                  No custom password is set yet. Temporary default password: <code>helloworld</code>
+                </Callout.Text>
+              </Callout.Root>
+            ) : null}
+            <ConfigFieldCard label="Password" description={<>Use the password configured for this Web UI.</>}>
+              <TextField.Root
+                className="mt-2"
+                type="password"
+                value={loginPassword}
+                onChange={(e) => setLoginPassword(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void submitLogin(loginPassword)
+                }}
+                placeholder="********"
+              />
+            </ConfigFieldCard>
+            {authMessage ? (
+              <Callout.Root color="red" size="1" variant="soft" className="mt-3">
+                <Callout.Text>{authMessage}</Callout.Text>
+              </Callout.Root>
+            ) : null}
+            <div className="mt-4 flex justify-end">
+              <Button onClick={() => void submitLogin(loginPassword)} disabled={authBusy}>
+                {authBusy ? 'Signing in...' : 'Sign In'}
+              </Button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Root>
+        <Dialog.Root open={authReady && authAuthenticated && authUsingDefaultPassword && passwordPromptOpen}>
+          <Dialog.Content maxWidth="520px">
+            <Dialog.Title>Change Default Password</Dialog.Title>
+            <Dialog.Description size="2">
+              You are using the default password <code>helloworld</code>. Set a new password now, or skip for now.
+            </Dialog.Description>
+            <div className="mt-4 space-y-3">
+              <ConfigFieldCard label="New Password" description={<>At least 8 characters.</>}>
+                <TextField.Root
+                  className="mt-2"
+                  type="password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  placeholder="********"
+                />
+              </ConfigFieldCard>
+              <ConfigFieldCard label="Confirm Password" description={<>Re-enter the new password.</>}>
+                <TextField.Root
+                  className="mt-2"
+                  type="password"
+                  value={newPasswordConfirm}
+                  onChange={(e) => setNewPasswordConfirm(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') void submitPasswordUpdate()
+                  }}
+                  placeholder="********"
+                />
+              </ConfigFieldCard>
+            </div>
+            {passwordPromptMessage ? (
+              <Callout.Root color="red" size="1" variant="soft" className="mt-3">
+                <Callout.Text>{passwordPromptMessage}</Callout.Text>
+              </Callout.Root>
+            ) : null}
+            <div className="mt-4 flex justify-end gap-2">
+              <Button
+                variant="soft"
+                onClick={() => setPasswordPromptOpen(false)}
+                disabled={passwordPromptBusy}
+              >
+                Skip for now
+              </Button>
+              <Button onClick={() => void submitPasswordUpdate()} disabled={passwordPromptBusy}>
+                {passwordPromptBusy ? 'Updating...' : 'Update Password'}
+              </Button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Root>
         <Dialog.Root open={configOpen} onOpenChange={setConfigOpen}>
           <Dialog.Content maxWidth="1120px" className="overflow-hidden flex flex-col" style={{ width: "1120px", height: "760px", maxWidth: "1120px", maxHeight: "760px" }}>
             <Dialog.Title>Settings</Dialog.Title>
