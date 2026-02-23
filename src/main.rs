@@ -1,6 +1,6 @@
 use argon2::password_hash::{rand_core::OsRng, PasswordHashString, SaltString};
 use argon2::{Argon2, PasswordHasher};
-use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 use microclaw::config::Config;
 use microclaw::error::MicroClawError;
 use microclaw::{
@@ -15,8 +15,6 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[command(
     name = "microclaw",
     version = VERSION,
-    disable_help_flag = true,
-    disable_version_flag = true,
     about = "MicroClaw multi-channel agent runtime",
     long_about = concat!(
         "MicroClaw v",
@@ -50,10 +48,6 @@ More:
     )
 )]
 struct Cli {
-    #[arg(short = 'h', long = "help", action = ArgAction::Help, global = true, hide = true)]
-    _help: bool,
-    #[arg(short = 'V', long = "version", action = ArgAction::Version, global = true, hide = true)]
-    _version: bool,
     #[command(subcommand)]
     command: Option<MainCommand>,
 }
