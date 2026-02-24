@@ -309,6 +309,44 @@ cp mcp.hapi-bridge.example.json <data_dir>/mcp.d/hapi-bridge.json
 
 详细操作可见：`docs/operations/hapi-bridge.md`。
 
+### 在 macOS 上接入 Peekaboo MCP（桌面自动化）
+
+[Peekaboo](https://github.com/steipete/Peekaboo) 是一个 macOS 桌面自动化 MCP server。MicroClaw 可通过 `stdio` 直接接入（无需修改运行时代码）。
+
+```sh
+mkdir -p <data_dir>/mcp.d
+cp mcp.peekaboo.example.json <data_dir>/mcp.d/peekaboo.json
+```
+
+`mcp.peekaboo.example.json`：
+
+```json
+{
+  "mcpServers": {
+    "peekaboo": {
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "peekaboo-mcp@latest"]
+    }
+  }
+}
+```
+
+### Windows 上的类似方案
+
+MicroClaw 也可以通过 `stdio` 接入 Windows 桌面自动化 MCP server：
+
+```sh
+mkdir -p <data_dir>/mcp.d
+cp mcp.windows.desktop.example.json <data_dir>/mcp.d/windows-desktop.json
+```
+
+`mcp.windows.desktop.example.json` 包含：
+- `pywinauto`（Windows 原生桌面 UI 自动化，stdio MCP）
+- 可选 `playwright` MCP（Windows 浏览器自动化）
+
+注意：部分 Windows MCP 项目只提供 `sse` transport。MicroClaw 当前仅直接支持 `stdio` 与 `streamable_http`，SSE-only 服务需先通过协议桥接后再接入。
+
 ## 计划与执行
 
 <p align="center">

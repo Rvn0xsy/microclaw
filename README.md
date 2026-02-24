@@ -427,6 +427,44 @@ RUST_LOG=info cargo run -- start
 
 Look for log lines like `MCP server '...' connected (...)`.
 
+### macOS Desktop Automation with Peekaboo MCP
+
+[Peekaboo](https://github.com/steipete/Peekaboo) is a macOS desktop automation MCP server. MicroClaw can use it directly via `stdio` transport (no runtime code changes needed).
+
+```sh
+mkdir -p <data_dir>/mcp.d
+cp mcp.peekaboo.example.json <data_dir>/mcp.d/peekaboo.json
+```
+
+`mcp.peekaboo.example.json`:
+
+```json
+{
+  "mcpServers": {
+    "peekaboo": {
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "peekaboo-mcp@latest"]
+    }
+  }
+}
+```
+
+### Windows Desktop Automation Options
+
+MicroClaw can also consume Windows desktop automation MCP servers via `stdio`.
+
+```sh
+mkdir -p <data_dir>/mcp.d
+cp mcp.windows.desktop.example.json <data_dir>/mcp.d/windows-desktop.json
+```
+
+`mcp.windows.desktop.example.json` includes:
+- `pywinauto` (native Windows desktop UI automation, stdio MCP)
+- optional `playwright` MCP for browser automation on Windows
+
+Note: some Windows MCP projects expose only `sse` transport. MicroClaw runtime currently supports `stdio` and `streamable_http` transports only, so SSE-only servers need a protocol bridge before use.
+
 ## Plan & Execute
 
 <p align="center">
