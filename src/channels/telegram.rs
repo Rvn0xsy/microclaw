@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -37,70 +36,6 @@ pub struct TelegramAccountConfig {
 
 fn default_enabled() -> bool {
     true
-}
-
-const DUPLICATE_FINGERPRINT_WINDOW: Duration = Duration::from_secs(12);
-const DUPLICATE_FINGERPRINT_CACHE_TTL: Duration = Duration::from_secs(60);
-
-static RECENT_INBOUND_FINGERPRINTS: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
-
-fn inbound_fingerprint_cache() -> &'static Mutex<HashMap<String, Instant>> {
-    RECENT_INBOUND_FINGERPRINTS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn build_inbound_fingerprint(
-    channel_name: &str,
-    raw_chat_id: i64,
-    sender_user_id: Option<i64>,
-    msg: &teloxide::types::Message,
-) -> Option<String> {
-    let mut parts = vec![format!("ch={channel_name}"), format!("chat={raw_chat_id}")];
-    if let Some(uid) = sender_user_id {
-        parts.push(format!("uid={uid}"));
-    }
-    if let Some(text) = msg.text().map(str::trim).filter(|v| !v.is_empty()) {
-        parts.push(format!("t={}", text.chars().take(200).collect::<String>()));
-    }
-    if let Some(caption) = msg.caption().map(str::trim).filter(|v| !v.is_empty()) {
-        parts.push(format!(
-            "c={}",
-            caption.chars().take(200).collect::<String>()
-        ));
-    }
-    if let Some(group_id) = msg.media_group_id() {
-        parts.push(format!("mg={}", group_id.0));
-    }
-    if let Some(photos) = msg.photo() {
-        if let Some(photo) = photos.last() {
-            parts.push(format!("p={}", photo.file.unique_id.0));
-        }
-    }
-    if let Some(document) = msg.document() {
-        parts.push(format!("d={}", document.file.unique_id.0));
-    }
-    if let Some(voice) = msg.voice() {
-        parts.push(format!("v={}", voice.file.unique_id.0));
-    }
-
-    if parts.len() <= 2 {
-        return None;
-    }
-    Some(parts.join("|"))
-}
-
-fn is_recent_duplicate_fingerprint(fingerprint: &str) -> bool {
-    let now = Instant::now();
-    let Ok(mut cache) = inbound_fingerprint_cache().lock() else {
-        return false;
-    };
-    cache.retain(|_, seen_at| now.duration_since(*seen_at) <= DUPLICATE_FINGERPRINT_CACHE_TTL);
-    if let Some(previous_seen) = cache.get(fingerprint) {
-        if now.duration_since(*previous_seen) <= DUPLICATE_FINGERPRINT_WINDOW {
-            return true;
-        }
-    }
-    cache.insert(fingerprint.to_string(), now);
-    false
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -485,18 +420,6 @@ async fn handle_message(
         return Ok(());
     }
 
-    if let Some(fingerprint) =
-        build_inbound_fingerprint(&tg_channel_name, raw_chat_id, sender_user_id, &msg)
-    {
-        if is_recent_duplicate_fingerprint(&fingerprint) {
-            info!(
-                "Skipping recent duplicate Telegram payload: channel={}, raw_chat_id={}",
-                tg_channel_name, raw_chat_id
-            );
-            return Ok(());
-        }
-    }
-
     // Extract content: text, photo, or voice
     let mut text = msg.text().unwrap_or("").to_string();
     let mut image_data: Option<(String, String)> = None; // (base64, media_type)
@@ -517,16 +440,70 @@ async fn handle_message(
         })
         .await
         .unwrap_or(raw_chat_id);
+        let inbound_message_id = msg.id.0.to_string();
+        let chat_title_owned = chat_title.clone();
+        let chat_type_owned = db_chat_type.to_string();
+        let sender_name = msg
+            .from
+            .as_ref()
+            .map(|u| u.username.clone().unwrap_or_else(|| u.first_name.clone()))
+            .unwrap_or_else(|| "Unknown".into());
         if let Some(reply) = handle_chat_command(&state, chat_id, &tg_channel_name, &text).await {
+            let _ = call_blocking(state.db.clone(), move |db| {
+                db.upsert_chat(chat_id, chat_title_owned.as_deref(), &chat_type_owned)
+            })
+            .await;
+            let stored = StoredMessage {
+                id: inbound_message_id.clone(),
+                chat_id,
+                sender_name: sender_name.clone(),
+                content: text.clone(),
+                is_from_bot: false,
+                timestamp: chrono::Utc::now().to_rfc3339(),
+            };
+            let inserted =
+                call_blocking(state.db.clone(), move |db| db.store_message_if_new(&stored))
+                    .await
+                    .unwrap_or(false);
+            if !inserted {
+                info!(
+                    "Skipping duplicate Telegram message: chat_id={}, message_id={}",
+                    chat_id, inbound_message_id
+                );
+                return Ok(());
+            }
             let _ = bot.send_message(msg.chat.id, reply).await;
             return Ok(());
         }
-    }
-    if let Some(plugin_response) =
-        maybe_plugin_slash_response(&state.config, &text, raw_chat_id, &tg_channel_name).await
-    {
-        let _ = bot.send_message(msg.chat.id, plugin_response).await;
-        return Ok(());
+        if let Some(plugin_response) =
+            maybe_plugin_slash_response(&state.config, &text, chat_id, &tg_channel_name).await
+        {
+            let _ = call_blocking(state.db.clone(), move |db| {
+                db.upsert_chat(chat_id, chat_title_owned.as_deref(), &chat_type_owned)
+            })
+            .await;
+            let stored = StoredMessage {
+                id: inbound_message_id.clone(),
+                chat_id,
+                sender_name,
+                content: text.clone(),
+                is_from_bot: false,
+                timestamp: chrono::Utc::now().to_rfc3339(),
+            };
+            let inserted =
+                call_blocking(state.db.clone(), move |db| db.store_message_if_new(&stored))
+                    .await
+                    .unwrap_or(false);
+            if !inserted {
+                info!(
+                    "Skipping duplicate Telegram message: chat_id={}, message_id={}",
+                    chat_id, inbound_message_id
+                );
+                return Ok(());
+            }
+            let _ = bot.send_message(msg.chat.id, plugin_response).await;
+            return Ok(());
+        }
     }
 
     if let Some(photos) = msg.photo() {
@@ -750,7 +727,7 @@ async fn handle_message(
             is_from_bot: false,
             timestamp: chrono::Utc::now().to_rfc3339(),
         };
-        let _ = call_blocking(state.db.clone(), move |db| db.store_message(&stored)).await;
+        let _ = call_blocking(state.db.clone(), move |db| db.store_message_if_new(&stored)).await;
         return Ok(());
     }
 
@@ -768,21 +745,6 @@ async fn handle_message(
     })
     .await
     .unwrap_or(raw_chat_id);
-
-    let inbound_message_id = msg.id.0.to_string();
-    let already_seen = call_blocking(state.db.clone(), {
-        let inbound_message_id = inbound_message_id.clone();
-        move |db| db.message_exists(chat_id, &inbound_message_id)
-    })
-    .await
-    .unwrap_or(false);
-    if already_seen {
-        info!(
-            "Skipping duplicate Telegram message: chat_id={}, message_id={}",
-            chat_id, inbound_message_id
-        );
-        return Ok(());
-    }
 
     // Store the chat and message
     let chat_title_owned = chat_title.clone();
@@ -810,15 +772,25 @@ async fn handle_message(
     } else {
         text.clone()
     };
+    let inbound_message_id = msg.id.0.to_string();
     let stored = StoredMessage {
-        id: inbound_message_id,
+        id: inbound_message_id.clone(),
         chat_id,
         sender_name: sender_name.clone(),
         content: stored_content,
         is_from_bot: false,
         timestamp: chrono::Utc::now().to_rfc3339(),
     };
-    let _ = call_blocking(state.db.clone(), move |db| db.store_message(&stored)).await;
+    let inserted = call_blocking(state.db.clone(), move |db| db.store_message_if_new(&stored))
+        .await
+        .unwrap_or(false);
+    if !inserted {
+        info!(
+            "Skipping duplicate Telegram message: chat_id={}, message_id={}",
+            chat_id, inbound_message_id
+        );
+        return Ok(());
+    }
 
     // Determine if we should respond
     let should_respond = match runtime_chat_type {
