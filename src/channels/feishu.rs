@@ -255,6 +255,46 @@ async fn maybe_plugin_slash_response(
 
 static FEISHU_CHAT_LOCKS: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
     OnceLock::new();
+static FEISHU_RUNTIME_START_MS: OnceLock<Mutex<HashMap<String, i64>>> = OnceLock::new();
+static FEISHU_RUNTIME_BOT_OPEN_ID: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+
+fn runtime_start_registry() -> &'static Mutex<HashMap<String, i64>> {
+    FEISHU_RUNTIME_START_MS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn runtime_bot_id_registry() -> &'static Mutex<HashMap<String, String>> {
+    FEISHU_RUNTIME_BOT_OPEN_ID.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn mark_runtime_started(channel_name: &str) {
+    let start_ms = chrono::Utc::now().timestamp_millis();
+    if let Ok(mut map) = runtime_start_registry().lock() {
+        map.insert(channel_name.to_string(), start_ms);
+    }
+}
+
+fn runtime_start_ms(channel_name: &str) -> Option<i64> {
+    runtime_start_registry()
+        .lock()
+        .ok()
+        .and_then(|map| map.get(channel_name).copied())
+}
+
+fn set_runtime_bot_open_id(channel_name: &str, bot_open_id: &str) {
+    if bot_open_id.trim().is_empty() {
+        return;
+    }
+    if let Ok(mut map) = runtime_bot_id_registry().lock() {
+        map.insert(channel_name.to_string(), bot_open_id.to_string());
+    }
+}
+
+fn runtime_bot_open_id(channel_name: &str) -> Option<String> {
+    runtime_bot_id_registry()
+        .lock()
+        .ok()
+        .and_then(|map| map.get(channel_name).cloned())
+}
 
 fn feishu_chat_lock(channel_name: &str, external_chat_id: &str) -> Arc<tokio::sync::Mutex<()>> {
     let key = format!("{channel_name}:{external_chat_id}");
@@ -1103,6 +1143,7 @@ pub struct FeishuRuntimeContext {
 
 pub async fn start_feishu_bot(app_state: Arc<AppState>, runtime: FeishuRuntimeContext) {
     let feishu_cfg = runtime.config.clone();
+    mark_runtime_started(&runtime.channel_name);
 
     let base_url = resolve_domain(&feishu_cfg.domain);
     let http_client = reqwest::Client::new();
@@ -1126,6 +1167,7 @@ pub async fn start_feishu_bot(app_state: Arc<AppState>, runtime: FeishuRuntimeCo
     let bot_open_id = match resolve_bot_open_id(&http_client, &base_url, &token).await {
         Ok(id) => {
             info!("Feishu bot open_id: {id}");
+            set_runtime_bot_open_id(&runtime.channel_name, &id);
             id
         }
         Err(e) => {
@@ -1394,6 +1436,27 @@ async fn handle_feishu_event(
         .get("message_id")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    let message_create_time_ms = message.get("create_time").and_then(|v| {
+        v.as_str()
+            .and_then(|s| s.parse::<i64>().ok())
+            .or_else(|| v.as_i64())
+    });
+
+    if let (Some(create_time_ms), Some(start_ms)) = (
+        message_create_time_ms,
+        runtime_start_ms(&runtime.channel_name),
+    ) {
+        if create_time_ms < start_ms {
+            info!(
+                "Feishu: dropping pre-start message channel={} message_id={} create_time_ms={} startup_ms={}",
+                runtime.channel_name.as_str(),
+                message_id,
+                create_time_ms,
+                start_ms
+            );
+            return;
+        }
+    }
 
     if chat_id_str.is_empty() || content_raw.is_empty() {
         return;
@@ -1680,6 +1743,7 @@ pub fn register_feishu_webhook(router: axum::Router, app_state: Arc<AppState>) -
     let mut router = router;
     for runtime in runtimes {
         let cfg = runtime.config.clone();
+        mark_runtime_started(&runtime.channel_name);
         if cfg.connection_mode != "webhook" {
             continue;
         }
@@ -1716,16 +1780,7 @@ pub fn register_feishu_webhook(router: axum::Router, app_state: Arc<AppState>) -
                         return axum::Json(serde_json::json!({ "challenge": challenge }));
                     }
 
-                    let http_client = reqwest::Client::new();
-                    let bot_id = if let Ok(token) =
-                        get_token(&http_client, &base, &cfg.app_id, &cfg.app_secret).await
-                    {
-                        resolve_bot_open_id(&http_client, &base, &token)
-                            .await
-                            .unwrap_or_default()
-                    } else {
-                        String::new()
-                    };
+                    let bot_id = runtime_bot_open_id(&runtime_ctx.channel_name).unwrap_or_default();
 
                     // Process the event
                     let event = body.0;
