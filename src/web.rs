@@ -1504,6 +1504,14 @@ async fn handle_web_slash_command(state: &WebState, text: &str, chat_id: i64) ->
         return Some("Context cleared (session + chat history).".to_string());
     }
 
+    if trimmed == "/stop" {
+        let _ = call_blocking(state.app_state.db.clone(), move |db| {
+            db.clear_chat_context(chat_id)
+        })
+        .await;
+        return Some("Context cleared (session + chat history).".to_string());
+    }
+
     if trimmed == "/skills" {
         return Some(state.app_state.skills.list_skills_formatted());
     }

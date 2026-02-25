@@ -55,6 +55,11 @@ pub async fn handle_chat_command(
         return Some("Context cleared (session + chat history).".to_string());
     }
 
+    if trimmed == "/stop" {
+        let _ = call_blocking(state.db.clone(), move |db| db.clear_chat_context(chat_id)).await;
+        return Some("Context cleared (session + chat history).".to_string());
+    }
+
     if trimmed == "/skills" {
         return Some(state.skills.list_skills_formatted());
     }

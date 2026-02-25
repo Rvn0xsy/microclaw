@@ -1562,6 +1562,32 @@ async fn handle_feishu_message(
 
     let trimmed = text.trim();
     let should_respond = is_dm || is_mentioned;
+    let inbound_message_id = if message_id.is_empty() {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        message_id.to_string()
+    };
+    let stored = StoredMessage {
+        id: inbound_message_id.clone(),
+        chat_id,
+        sender_name: user.to_string(),
+        content: text.to_string(),
+        is_from_bot: false,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    };
+    let inserted = call_blocking(app_state.db.clone(), move |db| {
+        db.store_message_if_new(&stored)
+    })
+    .await
+    .unwrap_or(false);
+    if !inserted {
+        info!(
+            "Feishu: skipping duplicate message chat_id={} message_id={}",
+            chat_id, inbound_message_id
+        );
+        return;
+    }
+
     if is_slash_command(trimmed) {
         if !should_respond && !app_state.config.allow_group_slash_without_mention {
             return;
@@ -1595,33 +1621,6 @@ async fn handle_feishu_message(
             &unknown_command_response(),
         )
         .await;
-        return;
-    }
-
-    // Store incoming non-command message
-    let inbound_message_id = if message_id.is_empty() {
-        uuid::Uuid::new_v4().to_string()
-    } else {
-        message_id.to_string()
-    };
-    let stored = StoredMessage {
-        id: inbound_message_id.clone(),
-        chat_id,
-        sender_name: user.to_string(),
-        content: text.to_string(),
-        is_from_bot: false,
-        timestamp: chrono::Utc::now().to_rfc3339(),
-    };
-    let inserted = call_blocking(app_state.db.clone(), move |db| {
-        db.store_message_if_new(&stored)
-    })
-    .await
-    .unwrap_or(false);
-    if !inserted {
-        info!(
-            "Feishu: skipping duplicate message chat_id={} message_id={}",
-            chat_id, inbound_message_id
-        );
         return;
     }
 
