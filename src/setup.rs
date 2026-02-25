@@ -54,6 +54,10 @@ fn dynamic_account_id_field_key(channel: &str) -> String {
     format!("DYN_{}_ACCOUNT_ID", channel.to_uppercase())
 }
 
+fn dynamic_accounts_json_field_key(channel: &str) -> String {
+    format!("DYN_{}_ACCOUNTS_JSON", channel.to_uppercase())
+}
+
 fn default_account_id() -> &'static str {
     "main"
 }
@@ -115,6 +119,51 @@ fn channel_account_str_value(
 fn channel_default_account_str_value(channel_cfg: &serde_yaml::Value, key: &str) -> Option<String> {
     let account_id = resolve_channel_default_account_id(channel_cfg)?;
     channel_account_str_value(channel_cfg, &account_id, key)
+}
+
+fn compact_json_string(value: &serde_yaml::Value) -> Option<String> {
+    let json_value = serde_json::to_value(value).ok()?;
+    serde_json::to_string(&json_value).ok()
+}
+
+fn parse_accounts_json_value(
+    raw: &str,
+    field_key: &str,
+) -> Result<Option<serde_json::Map<String, serde_json::Value>>, MicroClawError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let parsed: serde_json::Value = serde_json::from_str(trimmed).map_err(|e| {
+        MicroClawError::Config(format!("{field_key} must be valid JSON object: {e}"))
+    })?;
+    let Some(obj) = parsed.as_object() else {
+        return Err(MicroClawError::Config(format!(
+            "{field_key} must be a JSON object with account ids as keys"
+        )));
+    };
+    for account_id in obj.keys() {
+        if !is_valid_account_id(account_id) {
+            return Err(MicroClawError::Config(format!(
+                "{field_key} contains invalid account id '{account_id}' (allowed: letters, numbers, '_' or '-')"
+            )));
+        }
+    }
+    Ok(Some(obj.clone()))
+}
+
+fn append_yaml_value(yaml: &mut String, indent: usize, value: &serde_yaml::Value) {
+    if let Ok(rendered) = serde_yaml::to_string(value) {
+        let prefix = " ".repeat(indent);
+        for line in rendered.lines() {
+            if line == "---" || line.trim().is_empty() {
+                continue;
+            }
+            yaml.push_str(&prefix);
+            yaml.push_str(line);
+            yaml.push('\n');
+        }
+    }
 }
 
 fn default_data_dir_for_setup() -> String {
@@ -472,6 +521,16 @@ impl SetupApp {
                     secret: false,
                 },
                 Field {
+                    key: "TELEGRAM_ACCOUNTS_JSON".into(),
+                    label: "Telegram accounts JSON (optional, multi-bot)".into(),
+                    value: existing
+                        .get("TELEGRAM_ACCOUNTS_JSON")
+                        .cloned()
+                        .unwrap_or_default(),
+                    required: false,
+                    secret: true,
+                },
+                Field {
                     key: "DISCORD_BOT_TOKEN".into(),
                     label: "Discord bot token".into(),
                     value: existing.get("DISCORD_BOT_TOKEN").cloned().unwrap_or_default(),
@@ -494,6 +553,16 @@ impl SetupApp {
                     value: existing.get("DISCORD_MODEL").cloned().unwrap_or_default(),
                     required: false,
                     secret: false,
+                },
+                Field {
+                    key: "DISCORD_ACCOUNTS_JSON".into(),
+                    label: "Discord accounts JSON (optional, multi-bot)".into(),
+                    value: existing
+                        .get("DISCORD_ACCOUNTS_JSON")
+                        .cloned()
+                        .unwrap_or_default(),
+                    required: false,
+                    secret: true,
                 },
                 Field {
                     key: "LLM_PROVIDER".into(),
@@ -657,6 +726,17 @@ impl SetupApp {
                 required: false,
                 secret: false,
             });
+            let accounts_json_key = dynamic_accounts_json_field_key(ch.name);
+            app.fields.push(Field {
+                key: accounts_json_key.clone(),
+                label: format!("{} accounts JSON (optional, multi-bot)", ch.name),
+                value: existing
+                    .get(&accounts_json_key)
+                    .cloned()
+                    .unwrap_or_default(),
+                required: false,
+                secret: true,
+            });
             for f in ch.fields {
                 let key = dynamic_field_key(ch.name, f.yaml_key);
                 let value = existing
@@ -734,6 +814,12 @@ impl SetupApp {
                             })
                         })
                         .unwrap_or_default();
+                    let telegram_accounts_json = config
+                        .channels
+                        .get("telegram")
+                        .and_then(|ch_cfg| ch_cfg.get("accounts"))
+                        .and_then(compact_json_string)
+                        .unwrap_or_default();
                     let bot_username = if !config.bot_username.trim().is_empty() {
                         config.bot_username
                     } else if let Some(ch_cfg) = config.channels.get("telegram") {
@@ -787,13 +873,21 @@ impl SetupApp {
                             })
                         })
                         .unwrap_or_default();
+                    let discord_accounts_json = config
+                        .channels
+                        .get("discord")
+                        .and_then(|ch_cfg| ch_cfg.get("accounts"))
+                        .and_then(compact_json_string)
+                        .unwrap_or_default();
                     map.insert("TELEGRAM_BOT_TOKEN".into(), telegram_bot_token);
                     map.insert("TELEGRAM_ACCOUNT_ID".into(), telegram_account_id);
                     map.insert("TELEGRAM_MODEL".into(), telegram_model);
+                    map.insert("TELEGRAM_ACCOUNTS_JSON".into(), telegram_accounts_json);
                     map.insert("BOT_USERNAME".into(), bot_username);
                     map.insert("DISCORD_BOT_TOKEN".into(), discord_bot_token);
                     map.insert("DISCORD_ACCOUNT_ID".into(), discord_account_id);
                     map.insert("DISCORD_MODEL".into(), discord_model);
+                    map.insert("DISCORD_ACCOUNTS_JSON".into(), discord_accounts_json);
                     // Extract dynamic channel configs
                     for ch in DYNAMIC_CHANNELS {
                         if let Some(ch_map) = config.channels.get(ch.name) {
@@ -801,6 +895,11 @@ impl SetupApp {
                             let account_id = resolve_channel_default_account_id(ch_map)
                                 .unwrap_or_else(|| default_account_id().to_string());
                             map.insert(account_key, account_id);
+                            if let Some(accounts_json) =
+                                ch_map.get("accounts").and_then(compact_json_string)
+                            {
+                                map.insert(dynamic_accounts_json_field_key(ch.name), accounts_json);
+                            }
                             for f in ch.fields {
                                 let value = channel_default_account_str_value(ch_map, f.yaml_key)
                                     .or_else(|| {
@@ -956,6 +1055,9 @@ impl SetupApp {
             if key == dynamic_account_id_field_key(ch.name) {
                 return Some(ch.name);
             }
+            if key == dynamic_accounts_json_field_key(ch.name) {
+                return Some(ch.name);
+            }
             for f in ch.fields {
                 if key == dynamic_field_key(ch.name, f.yaml_key) {
                     return Some(ch.name);
@@ -967,12 +1069,15 @@ impl SetupApp {
 
     fn is_field_visible(&self, key: &str) -> bool {
         match key {
-            "TELEGRAM_BOT_TOKEN" | "BOT_USERNAME" | "TELEGRAM_ACCOUNT_ID" | "TELEGRAM_MODEL" => {
-                self.channel_enabled("telegram")
-            }
-            "DISCORD_BOT_TOKEN" | "DISCORD_ACCOUNT_ID" | "DISCORD_MODEL" => {
-                self.channel_enabled("discord")
-            }
+            "TELEGRAM_BOT_TOKEN"
+            | "BOT_USERNAME"
+            | "TELEGRAM_ACCOUNT_ID"
+            | "TELEGRAM_MODEL"
+            | "TELEGRAM_ACCOUNTS_JSON" => self.channel_enabled("telegram"),
+            "DISCORD_BOT_TOKEN"
+            | "DISCORD_ACCOUNT_ID"
+            | "DISCORD_MODEL"
+            | "DISCORD_ACCOUNTS_JSON" => self.channel_enabled("discord"),
             _ => Self::dynamic_field_channel(key)
                 .map(|ch| self.channel_enabled(ch))
                 .unwrap_or(true),
@@ -1048,9 +1153,26 @@ impl SetupApp {
                     "TELEGRAM_ACCOUNT_ID must use only letters, numbers, '_' or '-'".into(),
                 ));
             }
-            if self.field_value("TELEGRAM_BOT_TOKEN").is_empty() {
+            let telegram_accounts = parse_accounts_json_value(
+                &self.field_value("TELEGRAM_ACCOUNTS_JSON"),
+                "TELEGRAM_ACCOUNTS_JSON",
+            )?;
+            let telegram_has_account_token = telegram_accounts
+                .as_ref()
+                .map(|accounts| {
+                    accounts.values().any(|account| {
+                        account
+                            .get("bot_token")
+                            .and_then(|v| v.as_str())
+                            .map(str::trim)
+                            .filter(|v| !v.is_empty())
+                            .is_some()
+                    })
+                })
+                .unwrap_or(false);
+            if self.field_value("TELEGRAM_BOT_TOKEN").is_empty() && !telegram_has_account_token {
                 return Err(MicroClawError::Config(
-                    "TELEGRAM_BOT_TOKEN is required when telegram is enabled".into(),
+                    "TELEGRAM_BOT_TOKEN or TELEGRAM_ACCOUNTS_JSON(bot_token) is required when telegram is enabled".into(),
                 ));
             }
             let username = self.field_value("BOT_USERNAME");
@@ -1073,6 +1195,28 @@ impl SetupApp {
                     "DISCORD_ACCOUNT_ID must use only letters, numbers, '_' or '-'".into(),
                 ));
             }
+            let discord_accounts = parse_accounts_json_value(
+                &self.field_value("DISCORD_ACCOUNTS_JSON"),
+                "DISCORD_ACCOUNTS_JSON",
+            )?;
+            let discord_has_account_token = discord_accounts
+                .as_ref()
+                .map(|accounts| {
+                    accounts.values().any(|account| {
+                        account
+                            .get("bot_token")
+                            .and_then(|v| v.as_str())
+                            .map(str::trim)
+                            .filter(|v| !v.is_empty())
+                            .is_some()
+                    })
+                })
+                .unwrap_or(false);
+            if self.field_value("DISCORD_BOT_TOKEN").is_empty() && !discord_has_account_token {
+                return Err(MicroClawError::Config(
+                    "DISCORD_BOT_TOKEN or DISCORD_ACCOUNTS_JSON(bot_token) is required when discord is enabled".into(),
+                ));
+            }
         }
 
         for ch in DYNAMIC_CHANNELS {
@@ -1085,24 +1229,45 @@ impl SetupApp {
                         account_key
                     )));
                 }
-                for f in ch.fields {
-                    if f.required {
-                        let key = dynamic_field_key(ch.name, f.yaml_key);
-                        if self.field_value(&key).is_empty() {
-                            return Err(MicroClawError::Config(format!(
-                                "{} is required when {} is enabled",
-                                key, ch.name
-                            )));
+                let accounts_json_key = dynamic_accounts_json_field_key(ch.name);
+                let dynamic_accounts = parse_accounts_json_value(
+                    &self.field_value(&accounts_json_key),
+                    &accounts_json_key,
+                )?;
+                if let Some(accounts) = dynamic_accounts {
+                    for (account_id, account) in &accounts {
+                        for f in ch.fields {
+                            if !f.required {
+                                continue;
+                            }
+                            let has_required = account
+                                .get(f.yaml_key)
+                                .and_then(|v| v.as_str())
+                                .map(str::trim)
+                                .filter(|v| !v.is_empty())
+                                .is_some();
+                            if !has_required {
+                                return Err(MicroClawError::Config(format!(
+                                    "{} account '{}' missing required field '{}'",
+                                    accounts_json_key, account_id, f.yaml_key
+                                )));
+                            }
+                        }
+                    }
+                } else {
+                    for f in ch.fields {
+                        if f.required {
+                            let key = dynamic_field_key(ch.name, f.yaml_key);
+                            if self.field_value(&key).is_empty() {
+                                return Err(MicroClawError::Config(format!(
+                                    "{} is required when {} is enabled",
+                                    key, ch.name
+                                )));
+                            }
                         }
                     }
                 }
             }
-        }
-
-        if self.channel_enabled("discord") && self.field_value("DISCORD_BOT_TOKEN").is_empty() {
-            return Err(MicroClawError::Config(
-                "DISCORD_BOT_TOKEN is required when discord is enabled".into(),
-            ));
         }
 
         let provider = self.field_value("LLM_PROVIDER");
@@ -1190,7 +1355,28 @@ impl SetupApp {
 
     fn validate_online(&self) -> Result<Vec<String>, MicroClawError> {
         let tg_enabled = self.channel_enabled("telegram");
-        let tg_token = self.field_value("TELEGRAM_BOT_TOKEN");
+        let tg_token = if !self.field_value("TELEGRAM_BOT_TOKEN").is_empty() {
+            self.field_value("TELEGRAM_BOT_TOKEN")
+        } else {
+            parse_accounts_json_value(
+                &self.field_value("TELEGRAM_ACCOUNTS_JSON"),
+                "TELEGRAM_ACCOUNTS_JSON",
+            )?
+            .and_then(|accounts| {
+                let mut ids: Vec<String> = accounts.keys().cloned().collect();
+                ids.sort();
+                ids.into_iter().find_map(|id| {
+                    accounts
+                        .get(&id)
+                        .and_then(|account| account.get("bot_token"))
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty())
+                        .map(ToOwned::to_owned)
+                })
+            })
+            .unwrap_or_default()
+        };
         let env_username = self
             .field_value("BOT_USERNAME")
             .trim_start_matches('@')
@@ -1457,8 +1643,14 @@ impl SetupApp {
         match key {
             "ENABLED_CHANNELS" => "web".into(),
             "TELEGRAM_ACCOUNT_ID" | "DISCORD_ACCOUNT_ID" => default_account_id().to_string(),
-            "TELEGRAM_BOT_TOKEN" | "BOT_USERNAME" | "TELEGRAM_MODEL" | "DISCORD_BOT_TOKEN"
-            | "DISCORD_MODEL" | "LLM_API_KEY" => String::new(),
+            "TELEGRAM_BOT_TOKEN"
+            | "BOT_USERNAME"
+            | "TELEGRAM_MODEL"
+            | "TELEGRAM_ACCOUNTS_JSON"
+            | "DISCORD_BOT_TOKEN"
+            | "DISCORD_MODEL"
+            | "DISCORD_ACCOUNTS_JSON"
+            | "LLM_API_KEY" => String::new(),
             "LLM_PROVIDER" => "anthropic".into(),
             "LLM_MODEL" => default_model_for_provider(&provider).into(),
             "LLM_BASE_URL" => find_provider_preset(&provider)
@@ -1477,6 +1669,9 @@ impl SetupApp {
                 for ch in DYNAMIC_CHANNELS {
                     if key == dynamic_account_id_field_key(ch.name) {
                         return default_account_id().to_string();
+                    }
+                    if key == dynamic_accounts_json_field_key(ch.name) {
+                        return String::new();
                     }
                 }
                 String::new()
@@ -1517,9 +1712,11 @@ impl SetupApp {
             | "BOT_USERNAME"
             | "TELEGRAM_ACCOUNT_ID"
             | "TELEGRAM_MODEL"
+            | "TELEGRAM_ACCOUNTS_JSON"
             | "DISCORD_BOT_TOKEN"
             | "DISCORD_ACCOUNT_ID"
-            | "DISCORD_MODEL" => "Channel",
+            | "DISCORD_MODEL"
+            | "DISCORD_ACCOUNTS_JSON" => "Channel",
             _ => "Setup",
         }
     }
@@ -1531,6 +1728,11 @@ impl SetupApp {
             for ch in DYNAMIC_CHANNELS {
                 let account_expected = dynamic_account_id_field_key(ch.name);
                 if account_expected == key {
+                    return 20 + offset;
+                }
+                offset += 1;
+                let accounts_json_expected = dynamic_accounts_json_field_key(ch.name);
+                if accounts_json_expected == key {
                     return 20 + offset;
                 }
                 offset += 1;
@@ -1556,9 +1758,11 @@ impl SetupApp {
             "BOT_USERNAME" => 12,
             "TELEGRAM_ACCOUNT_ID" => 13,
             "TELEGRAM_MODEL" => 14,
-            "DISCORD_BOT_TOKEN" => 15,
-            "DISCORD_ACCOUNT_ID" => 16,
-            "DISCORD_MODEL" => 17,
+            "TELEGRAM_ACCOUNTS_JSON" => 15,
+            "DISCORD_BOT_TOKEN" => 16,
+            "DISCORD_ACCOUNT_ID" => 17,
+            "DISCORD_MODEL" => 18,
+            "DISCORD_ACCOUNTS_JSON" => 19,
             // 3) App
             "DATA_DIR" => 40,
             "TIMEZONE" => 41,
@@ -1902,13 +2106,43 @@ fn save_config_yaml(
     let telegram_username = get("BOT_USERNAME");
     let telegram_account_id = account_id_from_value(&get("TELEGRAM_ACCOUNT_ID"));
     let telegram_model = get("TELEGRAM_MODEL");
+    let telegram_accounts_json = get("TELEGRAM_ACCOUNTS_JSON");
+    let telegram_accounts =
+        parse_accounts_json_value(&telegram_accounts_json, "TELEGRAM_ACCOUNTS_JSON")?;
     let discord_token = get("DISCORD_BOT_TOKEN");
     let discord_account_id = account_id_from_value(&get("DISCORD_ACCOUNT_ID"));
     let discord_model = get("DISCORD_MODEL");
+    let discord_accounts_json = get("DISCORD_ACCOUNTS_JSON");
+    let discord_accounts =
+        parse_accounts_json_value(&discord_accounts_json, "DISCORD_ACCOUNTS_JSON")?;
 
-    let telegram_present =
-        !telegram_token.trim().is_empty() || !telegram_username.trim().is_empty();
-    let discord_present = !discord_token.trim().is_empty();
+    let pick_default_account_id =
+        |configured: &str, accounts: &serde_json::Map<String, serde_json::Value>| {
+            let configured_trimmed = configured.trim();
+            if !configured_trimmed.is_empty() && accounts.contains_key(configured_trimmed) {
+                return configured_trimmed.to_string();
+            }
+            if accounts.contains_key("default") {
+                return "default".to_string();
+            }
+            let mut keys: Vec<String> = accounts.keys().cloned().collect();
+            keys.sort();
+            keys.first()
+                .cloned()
+                .unwrap_or_else(|| default_account_id().to_string())
+        };
+
+    let telegram_present = !telegram_token.trim().is_empty()
+        || !telegram_username.trim().is_empty()
+        || telegram_accounts
+            .as_ref()
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+    let discord_present = !discord_token.trim().is_empty()
+        || discord_accounts
+            .as_ref()
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
     // Use presence keys so optional defaults (e.g. feishu.domain = "feishu")
     // do not create disabled channel blocks unexpectedly.
     let dynamic_channel_include: Vec<(&DynamicChannelDef, bool)> = DYNAMIC_CHANNELS
@@ -1937,7 +2171,16 @@ fn save_config_yaml(
     if channel_selected("telegram") || telegram_present {
         yaml.push_str("  telegram:\n");
         yaml.push_str(&format!("    enabled: {}\n", channel_selected("telegram")));
-        if telegram_present {
+        if let Some(accounts) = &telegram_accounts {
+            let default_id = pick_default_account_id(&telegram_account_id, accounts);
+            yaml.push_str(&format!("    default_account: \"{}\"\n", default_id));
+            yaml.push_str("    accounts:\n");
+            let yaml_accounts = serde_yaml::to_value(serde_json::Value::Object(accounts.clone()))
+                .map_err(|e| {
+                MicroClawError::Config(format!("Failed to render TELEGRAM_ACCOUNTS_JSON: {e}"))
+            })?;
+            append_yaml_value(&mut yaml, 6, &yaml_accounts);
+        } else if telegram_present {
             yaml.push_str(&format!(
                 "    default_account: \"{}\"\n",
                 telegram_account_id
@@ -1962,7 +2205,16 @@ fn save_config_yaml(
     if channel_selected("discord") || discord_present {
         yaml.push_str("  discord:\n");
         yaml.push_str(&format!("    enabled: {}\n", channel_selected("discord")));
-        if discord_present {
+        if let Some(accounts) = &discord_accounts {
+            let default_id = pick_default_account_id(&discord_account_id, accounts);
+            yaml.push_str(&format!("    default_account: \"{}\"\n", default_id));
+            yaml.push_str("    accounts:\n");
+            let yaml_accounts = serde_yaml::to_value(serde_json::Value::Object(accounts.clone()))
+                .map_err(|e| {
+                MicroClawError::Config(format!("Failed to render DISCORD_ACCOUNTS_JSON: {e}"))
+            })?;
+            append_yaml_value(&mut yaml, 6, &yaml_accounts);
+        } else if discord_present {
             yaml.push_str(&format!(
                 "    default_account: \"{}\"\n",
                 discord_account_id
@@ -1987,9 +2239,24 @@ fn save_config_yaml(
             let key = dynamic_field_key(ch.name, yaml_key);
             !get(&key).trim().is_empty()
         });
+        let accounts_json_key = dynamic_accounts_json_field_key(ch.name);
+        let accounts_json = get(&accounts_json_key);
+        let accounts = parse_accounts_json_value(&accounts_json, &accounts_json_key)?;
+        let has_accounts = accounts.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
         yaml.push_str(&format!("  {}:\n", ch.name));
         yaml.push_str(&format!("    enabled: {}\n", channel_selected(ch.name)));
-        if has_presence {
+        if has_accounts {
+            let account_id = account_id_from_value(&get(&dynamic_account_id_field_key(ch.name)));
+            let accounts_map = accounts.unwrap_or_default();
+            let default_id = pick_default_account_id(&account_id, &accounts_map);
+            yaml.push_str(&format!("    default_account: \"{}\"\n", default_id));
+            yaml.push_str("    accounts:\n");
+            let yaml_accounts = serde_yaml::to_value(serde_json::Value::Object(accounts_map))
+                .map_err(|e| {
+                    MicroClawError::Config(format!("Failed to render {accounts_json_key}: {e}"))
+                })?;
+            append_yaml_value(&mut yaml, 6, &yaml_accounts);
+        } else if has_presence {
             let account_id = account_id_from_value(&get(&dynamic_account_id_field_key(ch.name)));
             yaml.push_str(&format!("    default_account: \"{}\"\n", account_id));
             yaml.push_str("    accounts:\n");
@@ -2682,6 +2949,44 @@ mod tests {
     }
 
     #[test]
+    fn test_save_config_yaml_uses_accounts_json_for_telegram_and_discord() {
+        let yaml_path = std::env::temp_dir().join(format!(
+            "microclaw_setup_accounts_json_test_{}.yaml",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+
+        let mut values = HashMap::new();
+        values.insert("ENABLED_CHANNELS".into(), "telegram,discord".into());
+        values.insert(
+            "TELEGRAM_ACCOUNTS_JSON".into(),
+            r#"{"main":{"enabled":true,"bot_token":"tg_main","bot_username":"tg_main_bot"},"ops":{"enabled":true,"bot_token":"tg_ops","bot_username":"tg_ops_bot"}}"#.into(),
+        );
+        values.insert("TELEGRAM_ACCOUNT_ID".into(), "main".into());
+        values.insert(
+            "DISCORD_ACCOUNTS_JSON".into(),
+            r#"{"main":{"enabled":true,"bot_token":"dc_main","allowed_channels":[111,222]},"ops":{"enabled":false,"bot_token":"dc_ops"}}"#.into(),
+        );
+        values.insert("DISCORD_ACCOUNT_ID".into(), "main".into());
+        values.insert("LLM_PROVIDER".into(), "anthropic".into());
+        values.insert("LLM_API_KEY".into(), "key".into());
+
+        save_config_yaml(&yaml_path, &values).unwrap();
+        let s = fs::read_to_string(&yaml_path).unwrap();
+        assert!(s.contains("  telegram:\n"));
+        assert!(s.contains("    accounts:\n"));
+        assert!(s.contains("      main:\n"));
+        assert!(s.contains("        bot_token: tg_main\n"));
+        assert!(s.contains("      ops:\n"));
+        assert!(s.contains("        bot_token: tg_ops\n"));
+        assert!(s.contains("  discord:\n"));
+        assert!(s.contains("        bot_token: dc_main\n"));
+        assert!(s.contains("        allowed_channels:\n"));
+        assert!(s.contains("111"));
+
+        let _ = fs::remove_file(&yaml_path);
+    }
+
+    #[test]
     fn test_enable_sandbox_in_config_updates_mode() {
         let _guard = env_lock();
         let path = std::env::temp_dir().join(format!(
@@ -2943,6 +3248,40 @@ sandbox:
         assert!(err
             .to_string()
             .contains("TELEGRAM_ACCOUNT_ID must use only letters, numbers, '_' or '-'"));
+    }
+
+    #[test]
+    fn test_validate_local_accepts_accounts_json_without_legacy_tokens() {
+        let mut app = SetupApp::new();
+        if let Some(field) = app.fields.iter_mut().find(|f| f.key == "ENABLED_CHANNELS") {
+            field.value = "telegram,discord".to_string();
+        }
+        if let Some(field) = app.fields.iter_mut().find(|f| f.key == "BOT_USERNAME") {
+            field.value = "botname".to_string();
+        }
+        if let Some(field) = app
+            .fields
+            .iter_mut()
+            .find(|f| f.key == "TELEGRAM_ACCOUNTS_JSON")
+        {
+            field.value =
+                r#"{"main":{"enabled":true,"bot_token":"123456:token","bot_username":"botname"}}"#
+                    .to_string();
+        }
+        if let Some(field) = app
+            .fields
+            .iter_mut()
+            .find(|f| f.key == "DISCORD_ACCOUNTS_JSON")
+        {
+            field.value =
+                r#"{"main":{"enabled":true,"bot_token":"discord_token_123"}}"#.to_string();
+        }
+        if let Some(field) = app.fields.iter_mut().find(|f| f.key == "LLM_API_KEY") {
+            field.value = "key".to_string();
+        }
+
+        let result = app.validate_local();
+        assert!(result.is_ok(), "validate_local failed: {result:?}");
     }
 
     #[test]

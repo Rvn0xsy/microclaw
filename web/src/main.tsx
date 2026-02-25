@@ -498,6 +498,18 @@ function defaultAccountConfig(channelCfg: unknown): Record<string, unknown> {
   return account && typeof account === 'object' ? (account as Record<string, unknown>) : {}
 }
 
+function accountsJsonFromChannelConfig(channelCfg: unknown): string {
+  if (!channelCfg || typeof channelCfg !== 'object') return ''
+  const cfg = channelCfg as Record<string, unknown>
+  const accounts = cfg.accounts
+  if (!accounts || typeof accounts !== 'object') return ''
+  try {
+    return JSON.stringify(accounts, null, 2)
+  } catch {
+    return ''
+  }
+}
+
 function readAppearance(): Appearance {
   const saved = localStorage.getItem('microclaw_appearance')
   return saved === 'light' ? 'light' : 'dark'
@@ -1647,15 +1659,17 @@ function App() {
         telegram_account_id: telegramDefaultAccount,
         telegram_bot_username: String(telegramAccountCfg.bot_username || telegramCfg.bot_username || ''),
         telegram_model: String(telegramAccountCfg.model || telegramCfg.model || ''),
+        telegram_accounts_json: accountsJsonFromChannelConfig(telegramCfg),
         discord_bot_token: '',
         discord_account_id: discordDefaultAccount,
         discord_bot_username: String(discordAccountCfg.bot_username || discordCfg.bot_username || ''),
         discord_model: String(discordAccountCfg.model || discordCfg.model || ''),
+        discord_accounts_json: accountsJsonFromChannelConfig(discordCfg),
         discord_allowed_channels_csv: Array.isArray(data.config?.discord_allowed_channels)
           ? (data.config?.discord_allowed_channels as number[]).join(',')
           : Array.isArray(discordAccountCfg.allowed_channels)
             ? (discordAccountCfg.allowed_channels as number[]).join(',')
-          : '',
+            : '',
         irc_server: String(ircCfg.server || ''),
         irc_port: String(ircCfg.port || ''),
         irc_nick: String(ircCfg.nick || ''),
@@ -1694,6 +1708,7 @@ function App() {
             const chAccountCfg = defaultAccountConfig(chCfg)
             const pairs: Array<[string, unknown]> = [
               [`${ch.name}__account_id`, defaultAccountIdFromChannelConfig(chCfg)],
+              [`${ch.name}__accounts_json`, accountsJsonFromChannelConfig(chCfg)],
             ]
             for (const f of ch.fields) {
               pairs.push([
@@ -1811,6 +1826,9 @@ function App() {
         case 'telegram_model':
           next.telegram_model = ''
           break
+        case 'telegram_accounts_json':
+          next.telegram_accounts_json = ''
+          break
         case 'discord_bot_token':
           next.discord_bot_token = ''
           break
@@ -1822,6 +1840,9 @@ function App() {
           break
         case 'discord_model':
           next.discord_model = ''
+          break
+        case 'discord_accounts_json':
+          next.discord_accounts_json = ''
           break
         case 'discord_allowed_channels_csv':
           next.discord_allowed_channels_csv = ''
@@ -1914,8 +1935,12 @@ function App() {
           // Handle dynamic channel fields
           for (const ch of DYNAMIC_CHANNELS) {
             const accountKey = `${ch.name}__account_id`
+            const accountsJsonKey = `${ch.name}__accounts_json`
             if (field === accountKey) {
               next[accountKey] = 'main'
+            }
+            if (field === accountsJsonKey) {
+              next[accountsJsonKey] = ''
             }
             for (const f of ch.fields) {
               const key = `${ch.name}__${f.yamlKey}`
@@ -1932,6 +1957,21 @@ function App() {
 
   async function saveConfigChanges(): Promise<void> {
     try {
+      const parseAccountsJson = (field: string, raw: string): Record<string, unknown> | null => {
+        const trimmed = raw.trim()
+        if (!trimmed) return null
+        let parsed: unknown
+        try {
+          parsed = JSON.parse(trimmed)
+        } catch (e) {
+          throw new Error(`${field} must be valid JSON object: ${e instanceof Error ? e.message : String(e)}`)
+        }
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          throw new Error(`${field} must be a JSON object keyed by account id`)
+        }
+        return parsed as Record<string, unknown>
+      }
+
       const provider = String(configDraft.llm_provider || '').trim().toLowerCase()
       if (provider === 'openai-codex') {
         const apiKey = String(configDraft.api_key || '').trim()
@@ -1987,6 +2027,10 @@ function App() {
       const telegramAccountId = normalizeAccountId(configDraft.telegram_account_id)
       const telegramBotUsername = String(configDraft.telegram_bot_username || '').trim()
       const telegramModel = String(configDraft.telegram_model || '').trim()
+      const telegramAccounts = parseAccountsJson(
+        'telegram_accounts_json',
+        String(configDraft.telegram_accounts_json || ''),
+      )
 
       const discordToken = String(configDraft.discord_bot_token || '').trim()
       const discordAccountId = normalizeAccountId(configDraft.discord_account_id)
@@ -1995,6 +2039,10 @@ function App() {
       )
       const discordBotUsername = String(configDraft.discord_bot_username || '').trim()
       const discordModel = String(configDraft.discord_model || '').trim()
+      const discordAccounts = parseAccountsJson(
+        'discord_accounts_json',
+        String(configDraft.discord_accounts_json || ''),
+      )
       const ircServer = String(configDraft.irc_server || '').trim()
       const ircPort = String(configDraft.irc_port || '').trim()
       const ircNick = String(configDraft.irc_nick || '').trim()
@@ -2013,7 +2061,12 @@ function App() {
 
       // Build generic channel_configs from dynamic channel definitions
       const channelConfigs: Record<string, Record<string, unknown>> = {}
-      if (tg || telegramBotUsername || telegramModel) {
+      if (telegramAccounts) {
+        channelConfigs.telegram = {
+          default_account: telegramAccountId,
+          accounts: telegramAccounts,
+        }
+      } else if (tg || telegramBotUsername || telegramModel) {
         channelConfigs.telegram = {
           default_account: telegramAccountId,
           accounts: {
@@ -2026,7 +2079,12 @@ function App() {
           },
         }
       }
-      if (discordToken || discordAllowedChannels.length > 0 || discordBotUsername || discordModel) {
+      if (discordAccounts) {
+        channelConfigs.discord = {
+          default_account: discordAccountId,
+          accounts: discordAccounts,
+        }
+      } else if (discordToken || discordAllowedChannels.length > 0 || discordBotUsername || discordModel) {
         channelConfigs.discord = {
           default_account: discordAccountId,
           accounts: {
@@ -2075,6 +2133,17 @@ function App() {
       }
       for (const ch of DYNAMIC_CHANNELS) {
         const accountId = normalizeAccountId(configDraft[`${ch.name}__account_id`])
+        const accountsJson = parseAccountsJson(
+          `${ch.name}_accounts_json`,
+          String(configDraft[`${ch.name}__accounts_json`] || ''),
+        )
+        if (accountsJson) {
+          channelConfigs[ch.name] = {
+            default_account: accountId,
+            accounts: accountsJson,
+          }
+          continue
+        }
         const fields: Record<string, unknown> = {}
         let hasAny = false
         for (const f of ch.fields) {
@@ -2790,6 +2859,15 @@ function App() {
                               placeholder="claude-sonnet-4-5-20250929"
                             />
                           </ConfigFieldCard>
+                          <ConfigFieldCard label="telegram_accounts_json" description={<>Optional multi-bot config JSON for <code>channels.telegram.accounts</code>. When set, this takes precedence over single-account fields above.</>}>
+                            <textarea
+                              className="mt-2 w-full rounded border border-[color:var(--gray-a6)] bg-transparent px-3 py-2 font-mono text-xs"
+                              rows={8}
+                              value={String(configDraft.telegram_accounts_json || '')}
+                              onChange={(e) => setConfigField('telegram_accounts_json', e.target.value)}
+                              placeholder={'{"main":{"enabled":true,"bot_token":"123:AA...","bot_username":"my_bot"}}'}
+                            />
+                          </ConfigFieldCard>
                         </div>
                       </div>
                     </Tabs.Content>
@@ -2848,6 +2926,15 @@ function App() {
                               value={String(configDraft.discord_model || '')}
                               onChange={(e) => setConfigField('discord_model', e.target.value)}
                               placeholder="claude-sonnet-4-5-20250929"
+                            />
+                          </ConfigFieldCard>
+                          <ConfigFieldCard label="discord_accounts_json" description={<>Optional multi-bot config JSON for <code>channels.discord.accounts</code>. When set, this takes precedence over single-account fields above.</>}>
+                            <textarea
+                              className="mt-2 w-full rounded border border-[color:var(--gray-a6)] bg-transparent px-3 py-2 font-mono text-xs"
+                              rows={8}
+                              value={String(configDraft.discord_accounts_json || '')}
+                              onChange={(e) => setConfigField('discord_accounts_json', e.target.value)}
+                              placeholder={'{"main":{"enabled":true,"bot_token":"MTAx...","allowed_channels":[1234567890]}}'}
                             />
                           </ConfigFieldCard>
                         </div>
@@ -2985,6 +3072,19 @@ function App() {
                                 value={String(configDraft[`${ch.name}__account_id`] || 'main')}
                                 onChange={(e) => setConfigField(`${ch.name}__account_id`, e.target.value)}
                                 placeholder="main"
+                              />
+                            </ConfigFieldCard>
+                            <ConfigFieldCard
+                              key={`${ch.name}__accounts_json`}
+                              label={`${ch.name}_accounts_json`}
+                              description={<>Optional multi-bot config JSON for <code>channels.{ch.name}.accounts</code>. When set, it takes precedence over single-account fields below.</>}
+                            >
+                              <textarea
+                                className="mt-2 w-full rounded border border-[color:var(--gray-a6)] bg-transparent px-3 py-2 font-mono text-xs"
+                                rows={8}
+                                value={String(configDraft[`${ch.name}__accounts_json`] || '')}
+                                onChange={(e) => setConfigField(`${ch.name}__accounts_json`, e.target.value)}
+                                placeholder={`{"main":{"enabled":true}}`}
                               />
                             </ConfigFieldCard>
                             {ch.fields.map((f) => {
