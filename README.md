@@ -696,10 +696,12 @@ bot_username: "my_bot"
 #       main:
 #         app_id: "cli_xxx"
 #         app_secret: "xxx"
+#         topic_mode: true    # optional; only supported for domain feishu/lark
 #       intl:
 #         app_id: "cli_yyy"
 #         app_secret: "yyy"
 #         domain: "lark"
+#         topic_mode: true    # optional; only supported for domain feishu/lark
 # recommended IRC mode:
 # channels:
 #   irc:
@@ -824,6 +826,7 @@ All configuration is via `microclaw.config.yaml`:
 | `channels.feishu.accounts.<id>.domain` | No | `feishu` | Feishu domain for that account (`feishu`, `lark`, or custom URL) |
 | `channels.feishu.accounts.<id>.allowed_chats` | No | `[]` | Optional Feishu chat allowlist scoped to one account |
 | `channels.feishu.accounts.<id>.model` | No | unset | Optional per-bot model override for that Feishu/Lark account |
+| `channels.feishu.accounts.<id>.topic_mode` | No | `false` | Optional per-bot threaded reply mode; only supported when account domain is `feishu` or `lark` |
 | `channels.irc.server` | No* | unset | IRC server host/IP |
 | `channels.irc.port` | No | `"6667"` | IRC server port |
 | `channels.irc.nick` | No* | unset | IRC bot nick |
