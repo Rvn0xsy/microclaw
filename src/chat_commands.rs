@@ -108,6 +108,10 @@ pub async fn handle_chat_command(
         );
     }
 
+    if trimmed == "/start" {
+        return Some("Hello MicroClaw :)".to_string());
+    }
+
     if trimmed == "/model" || trimmed.starts_with("/model ") {
         return Some(build_model_response(
             &state.config,
