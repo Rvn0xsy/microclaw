@@ -137,9 +137,39 @@ fn parse_accounts_json_value(
     let parsed: serde_json::Value = serde_json::from_str(trimmed).map_err(|e| {
         MicroClawError::Config(format!("{field_key} must be valid JSON object: {e}"))
     })?;
-    let Some(obj) = parsed.as_object() else {
+    let obj = if let Some(map_obj) = parsed.as_object() {
+        map_obj.clone()
+    } else if let Some(items) = parsed.as_array() {
+        let mut out = serde_json::Map::new();
+        for (idx, item) in items.iter().enumerate() {
+            let Some(entry) = item.as_object() else {
+                return Err(MicroClawError::Config(format!(
+                    "{field_key}[{idx}] must be an object with at least 'id'"
+                )));
+            };
+            let id = entry
+                .get("id")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| {
+                    MicroClawError::Config(format!(
+                        "{field_key}[{idx}] is missing required string field 'id'"
+                    ))
+                })?;
+            if !is_valid_account_id(id) {
+                return Err(MicroClawError::Config(format!(
+                    "{field_key}[{idx}] has invalid id '{id}' (allowed: letters, numbers, '_' or '-')"
+                )));
+            }
+            let mut account = entry.clone();
+            account.remove("id");
+            out.insert(id.to_string(), serde_json::Value::Object(account));
+        }
+        out
+    } else {
         return Err(MicroClawError::Config(format!(
-            "{field_key} must be a JSON object with account ids as keys"
+            "{field_key} must be a JSON object {{id: config}} or JSON array [{{id, ...config}}]"
         )));
     };
     for account_id in obj.keys() {
@@ -149,7 +179,7 @@ fn parse_accounts_json_value(
             )));
         }
     }
-    Ok(Some(obj.clone()))
+    Ok(Some(obj))
 }
 
 fn append_yaml_value(yaml: &mut String, indent: usize, value: &serde_yaml::Value) {
@@ -521,14 +551,24 @@ impl SetupApp {
                     secret: false,
                 },
                 Field {
+                    key: "TELEGRAM_MULTIBOT".into(),
+                    label: "Telegram multibot mode (true/false)".into(),
+                    value: existing
+                        .get("TELEGRAM_MULTIBOT")
+                        .cloned()
+                        .unwrap_or_else(|| "false".into()),
+                    required: false,
+                    secret: false,
+                },
+                Field {
                     key: "TELEGRAM_ACCOUNTS_JSON".into(),
-                    label: "Telegram accounts JSON (optional, multi-bot)".into(),
+                    label: "Telegram bots JSON array/object (multi-bot)".into(),
                     value: existing
                         .get("TELEGRAM_ACCOUNTS_JSON")
                         .cloned()
                         .unwrap_or_default(),
                     required: false,
-                    secret: true,
+                    secret: false,
                 },
                 Field {
                     key: "DISCORD_BOT_TOKEN".into(),
@@ -562,7 +602,7 @@ impl SetupApp {
                         .cloned()
                         .unwrap_or_default(),
                     required: false,
-                    secret: true,
+                    secret: false,
                 },
                 Field {
                     key: "LLM_PROVIDER".into(),
@@ -735,7 +775,7 @@ impl SetupApp {
                     .cloned()
                     .unwrap_or_default(),
                 required: false,
-                secret: true,
+                secret: false,
             });
             for f in ch.fields {
                 let key = dynamic_field_key(ch.name, f.yaml_key);
@@ -820,6 +860,13 @@ impl SetupApp {
                         .and_then(|ch_cfg| ch_cfg.get("accounts"))
                         .and_then(compact_json_string)
                         .unwrap_or_default();
+                    let telegram_multibot = config
+                        .channels
+                        .get("telegram")
+                        .and_then(|ch_cfg| ch_cfg.get("accounts"))
+                        .and_then(|v| v.as_mapping())
+                        .map(|m| m.len() > 1)
+                        .unwrap_or(false);
                     let bot_username = if !config.bot_username.trim().is_empty() {
                         config.bot_username
                     } else if let Some(ch_cfg) = config.channels.get("telegram") {
@@ -882,6 +929,7 @@ impl SetupApp {
                     map.insert("TELEGRAM_BOT_TOKEN".into(), telegram_bot_token);
                     map.insert("TELEGRAM_ACCOUNT_ID".into(), telegram_account_id);
                     map.insert("TELEGRAM_MODEL".into(), telegram_model);
+                    map.insert("TELEGRAM_MULTIBOT".into(), telegram_multibot.to_string());
                     map.insert("TELEGRAM_ACCOUNTS_JSON".into(), telegram_accounts_json);
                     map.insert("BOT_USERNAME".into(), bot_username);
                     map.insert("DISCORD_BOT_TOKEN".into(), discord_bot_token);
@@ -1050,6 +1098,11 @@ impl SetupApp {
         self.enabled_channels().iter().any(|c| c == channel)
     }
 
+    fn telegram_multibot_enabled(&self) -> bool {
+        let raw = self.field_value("TELEGRAM_MULTIBOT").to_ascii_lowercase();
+        matches!(raw.as_str(), "true" | "1" | "yes")
+    }
+
     fn dynamic_field_channel(key: &str) -> Option<&'static str> {
         for ch in DYNAMIC_CHANNELS {
             if key == dynamic_account_id_field_key(ch.name) {
@@ -1073,7 +1126,10 @@ impl SetupApp {
             | "BOT_USERNAME"
             | "TELEGRAM_ACCOUNT_ID"
             | "TELEGRAM_MODEL"
-            | "TELEGRAM_ACCOUNTS_JSON" => self.channel_enabled("telegram"),
+            | "TELEGRAM_MULTIBOT" => self.channel_enabled("telegram"),
+            "TELEGRAM_ACCOUNTS_JSON" => {
+                self.channel_enabled("telegram") && self.telegram_multibot_enabled()
+            }
             "DISCORD_BOT_TOKEN"
             | "DISCORD_ACCOUNT_ID"
             | "DISCORD_MODEL"
@@ -1147,6 +1203,16 @@ impl SetupApp {
         }
 
         if self.channel_enabled("telegram") {
+            let multibot_raw = self.field_value("TELEGRAM_MULTIBOT");
+            if !multibot_raw.is_empty() {
+                let lower = multibot_raw.to_ascii_lowercase();
+                let valid = matches!(lower.as_str(), "true" | "false" | "1" | "0" | "yes" | "no");
+                if !valid {
+                    return Err(MicroClawError::Config(
+                        "TELEGRAM_MULTIBOT must be true/false (or 1/0)".into(),
+                    ));
+                }
+            }
             let account_id = account_id_from_value(&self.field_value("TELEGRAM_ACCOUNT_ID"));
             if !is_valid_account_id(&account_id) {
                 return Err(MicroClawError::Config(
@@ -1170,6 +1236,11 @@ impl SetupApp {
                     })
                 })
                 .unwrap_or(false);
+            if self.telegram_multibot_enabled() && telegram_accounts.is_none() {
+                return Err(MicroClawError::Config(
+                    "TELEGRAM_ACCOUNTS_JSON is required when TELEGRAM_MULTIBOT is enabled".into(),
+                ));
+            }
             if self.field_value("TELEGRAM_BOT_TOKEN").is_empty() && !telegram_has_account_token {
                 return Err(MicroClawError::Config(
                     "TELEGRAM_BOT_TOKEN or TELEGRAM_ACCOUNTS_JSON(bot_token) is required when telegram is enabled".into(),
@@ -1651,6 +1722,7 @@ impl SetupApp {
             | "DISCORD_MODEL"
             | "DISCORD_ACCOUNTS_JSON"
             | "LLM_API_KEY" => String::new(),
+            "TELEGRAM_MULTIBOT" => "false".into(),
             "LLM_PROVIDER" => "anthropic".into(),
             "LLM_MODEL" => default_model_for_provider(&provider).into(),
             "LLM_BASE_URL" => find_provider_preset(&provider)
@@ -1712,6 +1784,7 @@ impl SetupApp {
             | "BOT_USERNAME"
             | "TELEGRAM_ACCOUNT_ID"
             | "TELEGRAM_MODEL"
+            | "TELEGRAM_MULTIBOT"
             | "TELEGRAM_ACCOUNTS_JSON"
             | "DISCORD_BOT_TOKEN"
             | "DISCORD_ACCOUNT_ID"
@@ -1758,11 +1831,12 @@ impl SetupApp {
             "BOT_USERNAME" => 12,
             "TELEGRAM_ACCOUNT_ID" => 13,
             "TELEGRAM_MODEL" => 14,
-            "TELEGRAM_ACCOUNTS_JSON" => 15,
-            "DISCORD_BOT_TOKEN" => 16,
-            "DISCORD_ACCOUNT_ID" => 17,
-            "DISCORD_MODEL" => 18,
-            "DISCORD_ACCOUNTS_JSON" => 19,
+            "TELEGRAM_MULTIBOT" => 15,
+            "TELEGRAM_ACCOUNTS_JSON" => 16,
+            "DISCORD_BOT_TOKEN" => 17,
+            "DISCORD_ACCOUNT_ID" => 18,
+            "DISCORD_MODEL" => 19,
+            "DISCORD_ACCOUNTS_JSON" => 20,
             // 3) App
             "DATA_DIR" => 40,
             "TIMEZONE" => 41,
@@ -3256,6 +3330,9 @@ sandbox:
         if let Some(field) = app.fields.iter_mut().find(|f| f.key == "ENABLED_CHANNELS") {
             field.value = "telegram,discord".to_string();
         }
+        if let Some(field) = app.fields.iter_mut().find(|f| f.key == "TELEGRAM_MULTIBOT") {
+            field.value = "true".to_string();
+        }
         if let Some(field) = app.fields.iter_mut().find(|f| f.key == "BOT_USERNAME") {
             field.value = "botname".to_string();
         }
@@ -3282,6 +3359,67 @@ sandbox:
 
         let result = app.validate_local();
         assert!(result.is_ok(), "validate_local failed: {result:?}");
+    }
+
+    #[test]
+    fn test_validate_local_accepts_telegram_accounts_array_json() {
+        let mut app = SetupApp::new();
+        if let Some(field) = app.fields.iter_mut().find(|f| f.key == "ENABLED_CHANNELS") {
+            field.value = "telegram".to_string();
+        }
+        if let Some(field) = app.fields.iter_mut().find(|f| f.key == "TELEGRAM_MULTIBOT") {
+            field.value = "true".to_string();
+        }
+        if let Some(field) = app.fields.iter_mut().find(|f| f.key == "BOT_USERNAME") {
+            field.value = "botname".to_string();
+        }
+        if let Some(field) = app
+            .fields
+            .iter_mut()
+            .find(|f| f.key == "TELEGRAM_ACCOUNTS_JSON")
+        {
+            field.value = r#"[{"id":"main","enabled":true,"bot_token":"123456:token","bot_username":"botname"},{"id":"support","enabled":true,"bot_token":"999:token2"}]"#.to_string();
+        }
+        if let Some(field) = app.fields.iter_mut().find(|f| f.key == "LLM_API_KEY") {
+            field.value = "key".to_string();
+        }
+        let result = app.validate_local();
+        assert!(result.is_ok(), "validate_local failed: {result:?}");
+    }
+
+    #[test]
+    fn test_validate_local_requires_accounts_json_when_telegram_multibot_enabled() {
+        let mut app = SetupApp::new();
+        if let Some(field) = app.fields.iter_mut().find(|f| f.key == "ENABLED_CHANNELS") {
+            field.value = "telegram".to_string();
+        }
+        if let Some(field) = app.fields.iter_mut().find(|f| f.key == "TELEGRAM_MULTIBOT") {
+            field.value = "true".to_string();
+        }
+        if let Some(field) = app.fields.iter_mut().find(|f| f.key == "BOT_USERNAME") {
+            field.value = "botname".to_string();
+        }
+        if let Some(field) = app
+            .fields
+            .iter_mut()
+            .find(|f| f.key == "TELEGRAM_BOT_TOKEN")
+        {
+            field.value.clear();
+        }
+        if let Some(field) = app
+            .fields
+            .iter_mut()
+            .find(|f| f.key == "TELEGRAM_ACCOUNTS_JSON")
+        {
+            field.value.clear();
+        }
+        if let Some(field) = app.fields.iter_mut().find(|f| f.key == "LLM_API_KEY") {
+            field.value = "key".to_string();
+        }
+        let err = app.validate_local().unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("TELEGRAM_ACCOUNTS_JSON is required when TELEGRAM_MULTIBOT is enabled"));
     }
 
     #[test]
