@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use serde_json::Value;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{info, warn};
 
@@ -139,6 +140,21 @@ pub async fn process_with_agent_with_events(
     };
     run_control::unregister_run(context.caller_channel, context.chat_id, run_id).await;
     result
+}
+
+fn with_high_risk_approval_marker(input: &Value) -> Value {
+    let mut approved_input = input.clone();
+    if let Some(obj) = approved_input.as_object_mut() {
+        obj.insert(
+            "__microclaw_high_risk_approved".to_string(),
+            Value::Bool(true),
+        );
+        return approved_input;
+    }
+    serde_json::json!({
+        "__microclaw_high_risk_approved": true,
+        "__microclaw_original_input": input,
+    })
 }
 
 pub fn should_suppress_user_error(err: &anyhow::Error) -> bool {
@@ -777,17 +793,19 @@ pub(crate) async fn process_with_agent_impl(
                     }
                     info!("Executing tool: {} (iteration {})", name, iteration + 1);
                     let started = std::time::Instant::now();
+                    let mut executed_input = effective_input.clone();
                     let mut result = state
                         .tools
-                        .execute_with_auth(name, effective_input.clone(), &tool_auth)
+                        .execute_with_auth(name, executed_input.clone(), &tool_auth)
                         .await;
-                    // Auto-retry on approval_required — the second call auto-approves
+                    // Auto-retry on approval_required with explicit approval marker.
                     if result.is_error && result.error_type.as_deref() == Some("approval_required")
                     {
+                        executed_input = with_high_risk_approval_marker(&effective_input);
                         info!("Auto-retrying tool '{}' after approval gate", name);
                         result = state
                             .tools
-                            .execute_with_auth(name, effective_input.clone(), &tool_auth)
+                            .execute_with_auth(name, executed_input.clone(), &tool_auth)
                             .await;
                     }
                     if let Ok(hook_outcome) = state
@@ -797,7 +815,7 @@ pub(crate) async fn process_with_agent_impl(
                             context.caller_channel,
                             iteration + 1,
                             name,
-                            &effective_input,
+                            &executed_input,
                             &result,
                         )
                         .await
@@ -1682,7 +1700,8 @@ mod tests {
         Message, MessagesResponse, ResponseContentBlock, ToolDefinition,
     };
     use microclaw_storage::db::{Database, StoredMessage};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use serde_json::json;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
 
     struct DummyLlm;
@@ -1740,6 +1759,93 @@ mod tests {
             };
             Ok(MessagesResponse {
                 content: vec![ResponseContentBlock::Text { text }],
+                stop_reason: Some("end_turn".to_string()),
+                usage: None,
+            })
+        }
+    }
+
+    struct ApprovalLoopUntilSuccessfulToolLlm {
+        calls: Arc<AtomicUsize>,
+        saw_successful_tool_result: Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for ApprovalLoopUntilSuccessfulToolLlm {
+        async fn send_message(
+            &self,
+            _system: &str,
+            messages: Vec<Message>,
+            _tools: Option<Vec<ToolDefinition>>,
+        ) -> Result<MessagesResponse, MicroClawError> {
+            let idx = self.calls.fetch_add(1, Ordering::SeqCst);
+            if idx == 0 {
+                return Ok(MessagesResponse {
+                    content: vec![ResponseContentBlock::ToolUse {
+                        id: "tool-bash-1".to_string(),
+                        name: "bash".to_string(),
+                        input: json!({"command": "printf approved"}),
+                    }],
+                    stop_reason: Some("tool_use".to_string()),
+                    usage: None,
+                });
+            }
+
+            let mut approval_failed = false;
+            let mut approval_succeeded = false;
+            for msg in messages.iter().rev() {
+                if msg.role != "user" {
+                    continue;
+                }
+                if let microclaw_core::llm_types::MessageContent::Blocks(blocks) = &msg.content {
+                    for block in blocks {
+                        if let microclaw_core::llm_types::ContentBlock::ToolResult {
+                            content,
+                            is_error,
+                            ..
+                        } = block
+                        {
+                            if is_error.unwrap_or(false)
+                                && content.contains("Approval required for high-risk tool")
+                            {
+                                approval_failed = true;
+                            } else if !is_error.unwrap_or(false) && content.contains("approved") {
+                                approval_succeeded = true;
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+
+            if approval_succeeded {
+                self.saw_successful_tool_result
+                    .store(true, Ordering::SeqCst);
+                return Ok(MessagesResponse {
+                    content: vec![ResponseContentBlock::Text {
+                        text: "approval loop resolved".to_string(),
+                    }],
+                    stop_reason: Some("end_turn".to_string()),
+                    usage: None,
+                });
+            }
+
+            if approval_failed {
+                return Ok(MessagesResponse {
+                    content: vec![ResponseContentBlock::ToolUse {
+                        id: format!("tool-bash-retry-{idx}"),
+                        name: "bash".to_string(),
+                        input: json!({"command": "printf approved"}),
+                    }],
+                    stop_reason: Some("tool_use".to_string()),
+                    usage: None,
+                });
+            }
+
+            Ok(MessagesResponse {
+                content: vec![ResponseContentBlock::Text {
+                    text: "unexpected state".to_string(),
+                }],
                 stop_reason: Some("end_turn".to_string()),
                 usage: None,
             })
@@ -2038,6 +2144,45 @@ mod tests {
         .unwrap();
 
         assert_eq!(reply, "Visible retry answer.");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        drop(state);
+        let _ = std::fs::remove_dir_all(&base_dir);
+    }
+
+    #[tokio::test]
+    async fn test_high_risk_tool_auto_retry_injects_approval_marker() {
+        let base_dir =
+            std::env::temp_dir().join(format!("mc_agent_tool_approval_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&base_dir).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let saw_successful_tool_result = Arc::new(AtomicBool::new(false));
+        let llm = ApprovalLoopUntilSuccessfulToolLlm {
+            calls: calls.clone(),
+            saw_successful_tool_result: saw_successful_tool_result.clone(),
+        };
+        let state = test_state_with_llm(&base_dir, Box::new(llm));
+        let chat_id = state
+            .db
+            .resolve_or_create_chat_id("web", "approval-retry-chat", Some("approval"), "web")
+            .unwrap();
+        store_user_message(&state.db, chat_id, "run bash");
+
+        let reply = process_with_agent(
+            &state,
+            AgentRequestContext {
+                caller_channel: "web",
+                chat_id,
+                chat_type: "web",
+            },
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(reply, "approval loop resolved");
+        assert!(saw_successful_tool_result.load(Ordering::SeqCst));
         assert_eq!(calls.load(Ordering::SeqCst), 2);
 
         drop(state);
