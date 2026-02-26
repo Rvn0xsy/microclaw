@@ -3943,8 +3943,8 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, app: &SetupApp) {
         Line::from("• Ctrl+D / Del: clear field"),
         Line::from("• Ctrl+R: restore field default"),
         Line::from("• F2: validate + online checks"),
-        Line::from("• s: save with online validation"),
-        Line::from("• Ctrl+S / Ctrl+Shift+S: save without online model validation"),
+        Line::from("• s / Ctrl+S: save with online validation"),
+        Line::from("• Ctrl+Shift+S: save without online model validation"),
     ])
     .block(
         Block::default()
@@ -4497,7 +4497,12 @@ fn run_wizard(mut terminal: DefaultTerminal) -> Result<bool, MicroClawError> {
                     Err(e) => app.status = format!("Validation failed: {e}"),
                 },
                 KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    try_save_skip_online(&mut terminal, &mut app)?;
+                    if key.modifiers.contains(KeyModifiers::SHIFT) || key.code == KeyCode::Char('S')
+                    {
+                        try_save_skip_online(&mut terminal, &mut app)?;
+                    } else {
+                        try_save(&mut terminal, &mut app)?;
+                    }
                 }
                 KeyCode::Char('S') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     try_save_skip_online(&mut terminal, &mut app)?;
