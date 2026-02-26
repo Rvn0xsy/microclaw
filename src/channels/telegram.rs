@@ -330,6 +330,14 @@ pub async fn start_telegram_bot(
     bot: Bot,
     mut ctx: TelegramRuntimeContext,
 ) -> anyhow::Result<()> {
+    // Ensure polling mode works even if this token was previously configured with webhook mode.
+    if let Err(err) = bot.delete_webhook().drop_pending_updates(false).await {
+        warn!(
+            "Telegram channel '{}' failed to clear webhook before polling: {:?}",
+            ctx.channel_name, err
+        );
+    }
+
     if let Ok(me) = bot.get_me().await {
         ctx.bot_user_id = Some(me.user.id.0);
         if let Some(actual_username) = me.user.username {
