@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 use std::{cell::Cell, cell::RefCell};
@@ -63,6 +63,8 @@ fn dynamic_accounts_json_field_key(channel: &str) -> String {
 const MAX_BOT_SLOTS: usize = 10;
 const TELEGRAM_DEFAULT_BOT_COUNT: usize = 1;
 const UI_FIELD_WINDOW: usize = 14;
+const CONFIG_BACKUP_DIR_NAME: &str = "microclaw.config.backups";
+const MAX_CONFIG_BACKUPS: usize = 50;
 
 fn telegram_slot_id_key(slot: usize) -> String {
     format!("TELEGRAM_BOT{}_ID", slot)
@@ -3287,17 +3289,60 @@ fn mask_secret(s: &str) -> String {
     format!("{}***{}", &s[..left], &s[right_start..])
 }
 
+fn config_backup_dir_for(path: &Path) -> PathBuf {
+    path.parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(CONFIG_BACKUP_DIR_NAME)
+}
+
+fn prune_old_config_backups(
+    backup_dir: &Path,
+    file_name: &str,
+    keep_latest: usize,
+) -> Result<(), MicroClawError> {
+    let prefix = format!("{file_name}.bak.");
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(backup_dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with(&prefix) {
+            continue;
+        }
+        let modified = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        entries.push((modified, entry.path()));
+    }
+    entries.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, path) in entries.into_iter().skip(keep_latest) {
+        let _ = fs::remove_file(path);
+    }
+    Ok(())
+}
+
+fn create_config_backup(path: &Path) -> Result<Option<String>, MicroClawError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("microclaw.config.yaml");
+    let backup_dir = config_backup_dir_for(path);
+    fs::create_dir_all(&backup_dir)?;
+    let ts = Utc::now().format("%Y%m%d%H%M%S").to_string();
+    let backup_path = backup_dir.join(format!("{file_name}.bak.{ts}"));
+    fs::copy(path, &backup_path)?;
+    let _ = prune_old_config_backups(&backup_dir, file_name, MAX_CONFIG_BACKUPS);
+    Ok(Some(backup_path.display().to_string()))
+}
+
 fn save_config_yaml(
     path: &Path,
     values: &HashMap<String, String>,
 ) -> Result<Option<String>, MicroClawError> {
-    let mut backup = None;
-    if path.exists() {
-        let ts = Utc::now().format("%Y%m%d%H%M%S").to_string();
-        let backup_path = format!("{}.bak.{ts}", path.display());
-        fs::copy(path, &backup_path)?;
-        backup = Some(backup_path);
-    }
+    let backup = create_config_backup(path)?;
 
     let get = |key: &str| values.get(key).cloned().unwrap_or_default();
 
@@ -4681,8 +4726,13 @@ mod tests {
         // Save again to test backup
         let backup2 = save_config_yaml(&yaml_path, &values).unwrap();
         assert!(backup2.is_some());
+        let backup2_path = backup2.unwrap();
+        assert!(backup2_path.contains(CONFIG_BACKUP_DIR_NAME));
+        assert!(Path::new(&backup2_path).exists());
 
         let _ = fs::remove_file(&yaml_path);
+        let _ = fs::remove_file(&backup2_path);
+        let _ = fs::remove_dir(config_backup_dir_for(&yaml_path));
     }
 
     #[test]
