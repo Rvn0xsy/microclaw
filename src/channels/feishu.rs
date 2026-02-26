@@ -91,7 +91,6 @@ fn default_webhook_path() -> String {
     "/feishu/events".into()
 }
 
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct FeishuAccountConfig {
     pub app_id: String,
@@ -1626,8 +1625,16 @@ async fn handle_feishu_message(
         if let Some(reply) =
             handle_chat_command(&app_state, chat_id, &runtime.channel_name, trimmed).await
         {
-            let _ = send_feishu_response(&http_client, base_url, &token, external_chat_id, &reply, message_id, topic_mode)
-                .await;
+            let _ = send_feishu_response(
+                &http_client,
+                base_url,
+                &token,
+                external_chat_id,
+                &reply,
+                message_id,
+                topic_mode,
+            )
+            .await;
             return;
         }
         if let Some(plugin_response) =
