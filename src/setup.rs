@@ -1476,15 +1476,23 @@ impl SetupApp {
                                         enabled.to_string(),
                                     );
                                     for f in ch.fields {
-                                        if let Some(v) = account
-                                            .and_then(|a| a.get(f.yaml_key))
-                                            .and_then(|v| v.as_str())
-                                            .map(str::trim)
-                                            .filter(|v| !v.is_empty())
-                                        {
+                                        let value =
+                                            account.and_then(|a| a.get(f.yaml_key)).and_then(|v| {
+                                                if let Some(s) = v.as_str() {
+                                                    let trimmed = s.trim();
+                                                    if trimmed.is_empty() {
+                                                        None
+                                                    } else {
+                                                        Some(trimmed.to_string())
+                                                    }
+                                                } else {
+                                                    v.as_bool().map(|b| b.to_string())
+                                                }
+                                            });
+                                        if let Some(v) = value {
                                             map.insert(
                                                 dynamic_slot_field_key(ch.name, slot, f.yaml_key),
-                                                v.to_string(),
+                                                v,
                                             );
                                         }
                                     }
@@ -1526,12 +1534,18 @@ impl SetupApp {
                             for f in ch.fields {
                                 let value = channel_default_account_str_value(ch_map, f.yaml_key)
                                     .or_else(|| {
-                                        ch_map
-                                            .get(f.yaml_key)
-                                            .and_then(|v| v.as_str())
-                                            .map(str::trim)
-                                            .filter(|v| !v.is_empty())
-                                            .map(ToOwned::to_owned)
+                                        ch_map.get(f.yaml_key).and_then(|v| {
+                                            if let Some(s) = v.as_str() {
+                                                let trimmed = s.trim();
+                                                if trimmed.is_empty() {
+                                                    None
+                                                } else {
+                                                    Some(trimmed.to_string())
+                                                }
+                                            } else {
+                                                v.as_bool().map(|b| b.to_string())
+                                            }
+                                        })
                                     });
                                 if let Some(v) = value {
                                     let key = dynamic_field_key(ch.name, f.yaml_key);
@@ -2320,6 +2334,35 @@ impl SetupApp {
                             enabled_key
                         ))
                     })?;
+                    if ch.name == "feishu" {
+                        let topic_key = dynamic_slot_field_key(ch.name, slot, "topic_mode");
+                        let topic_raw = self.field_value(&topic_key);
+                        let topic_mode = if topic_raw.trim().is_empty() {
+                            false
+                        } else {
+                            parse_boolish(&topic_raw, false).map_err(|_| {
+                                MicroClawError::Config(format!(
+                                    "{} must be true/false (or 1/0)",
+                                    topic_key
+                                ))
+                            })?
+                        };
+                        if topic_mode {
+                            let domain_key = dynamic_slot_field_key(ch.name, slot, "domain");
+                            let domain = self.field_value(&domain_key).trim().to_ascii_lowercase();
+                            let domain = if domain.is_empty() {
+                                "feishu"
+                            } else {
+                                domain.as_str()
+                            };
+                            if domain != "feishu" && domain != "lark" {
+                                return Err(MicroClawError::Config(format!(
+                                    "{} topic_mode is only supported when domain is feishu or lark",
+                                    id_key
+                                )));
+                            }
+                        }
+                    }
                     for f in ch.fields {
                         if !f.required {
                             continue;
@@ -3578,10 +3621,41 @@ fn save_config_yaml(
                 if v.trim().is_empty() {
                     continue;
                 }
-                account.insert(
-                    f.yaml_key.to_string(),
-                    serde_json::Value::String(v.trim().to_string()),
-                );
+                if f.yaml_key == "topic_mode" {
+                    let parsed = parse_boolish(v.trim(), false).map_err(|_| {
+                        MicroClawError::Config(format!(
+                            "{} must be true/false (or 1/0)",
+                            dynamic_slot_field_key(ch.name, slot, f.yaml_key)
+                        ))
+                    })?;
+                    account.insert(f.yaml_key.to_string(), serde_json::Value::Bool(parsed));
+                } else {
+                    account.insert(
+                        f.yaml_key.to_string(),
+                        serde_json::Value::String(v.trim().to_string()),
+                    );
+                }
+            }
+            if ch.name == "feishu" {
+                let topic_mode = account
+                    .get("topic_mode")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if topic_mode {
+                    let domain = account
+                        .get("domain")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty())
+                        .unwrap_or("feishu")
+                        .to_ascii_lowercase();
+                    if domain != "feishu" && domain != "lark" {
+                        return Err(MicroClawError::Config(format!(
+                            "{} topic_mode is only supported when domain is feishu or lark",
+                            dynamic_slot_id_field_key(ch.name, slot)
+                        )));
+                    }
+                }
             }
             let llm_provider = get(&dynamic_slot_llm_provider_key(ch.name, slot));
             if !llm_provider.trim().is_empty() {
@@ -4904,6 +4978,43 @@ sandbox:
     }
 
     #[test]
+    fn test_save_config_yaml_writes_feishu_topic_mode_as_bool() {
+        let yaml_path = std::env::temp_dir().join(format!(
+            "microclaw_setup_feishu_topic_mode_test_{}.yaml",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+
+        let mut values = HashMap::new();
+        values.insert("ENABLED_CHANNELS".into(), "feishu".into());
+        values.insert(dynamic_bot_count_field_key("feishu"), "1".into());
+        values.insert(dynamic_slot_id_field_key("feishu", 1), "ops".into());
+        values.insert(
+            dynamic_slot_field_key("feishu", 1, "app_id"),
+            "app_id_1".into(),
+        );
+        values.insert(
+            dynamic_slot_field_key("feishu", 1, "app_secret"),
+            "app_secret_1".into(),
+        );
+        values.insert(
+            dynamic_slot_field_key("feishu", 1, "domain"),
+            "feishu".into(),
+        );
+        values.insert(
+            dynamic_slot_field_key("feishu", 1, "topic_mode"),
+            "true".into(),
+        );
+        values.insert("LLM_PROVIDER".into(), "anthropic".into());
+        values.insert("LLM_API_KEY".into(), "key".into());
+
+        save_config_yaml(&yaml_path, &values).unwrap();
+        let s = fs::read_to_string(&yaml_path).unwrap();
+        assert!(s.contains("topic_mode: true"));
+
+        let _ = fs::remove_file(&yaml_path);
+    }
+
+    #[test]
     fn test_validate_local_rejects_invalid_account_id() {
         let mut app = SetupApp::new();
         if let Some(field) = app.fields.iter_mut().find(|f| f.key == "ENABLED_CHANNELS") {
@@ -4988,6 +5099,62 @@ sandbox:
 
         let result = app.validate_local();
         assert!(result.is_ok(), "validate_local failed: {result:?}");
+    }
+
+    #[test]
+    fn test_validate_local_rejects_feishu_topic_mode_on_custom_domain() {
+        let mut app = SetupApp::new();
+        if let Some(field) = app.fields.iter_mut().find(|f| f.key == "ENABLED_CHANNELS") {
+            field.value = "feishu".to_string();
+        }
+        if let Some(field) = app
+            .fields
+            .iter_mut()
+            .find(|f| f.key == dynamic_bot_count_field_key("feishu"))
+        {
+            field.value = "1".to_string();
+        }
+        if let Some(field) = app
+            .fields
+            .iter_mut()
+            .find(|f| f.key == dynamic_slot_id_field_key("feishu", 1))
+        {
+            field.value = "main".to_string();
+        }
+        if let Some(field) = app
+            .fields
+            .iter_mut()
+            .find(|f| f.key == dynamic_slot_field_key("feishu", 1, "app_id"))
+        {
+            field.value = "app_id_1".to_string();
+        }
+        if let Some(field) = app
+            .fields
+            .iter_mut()
+            .find(|f| f.key == dynamic_slot_field_key("feishu", 1, "app_secret"))
+        {
+            field.value = "app_secret_1".to_string();
+        }
+        if let Some(field) = app
+            .fields
+            .iter_mut()
+            .find(|f| f.key == dynamic_slot_field_key("feishu", 1, "domain"))
+        {
+            field.value = "custom.example.com".to_string();
+        }
+        if let Some(field) = app
+            .fields
+            .iter_mut()
+            .find(|f| f.key == dynamic_slot_field_key("feishu", 1, "topic_mode"))
+        {
+            field.value = "true".to_string();
+        }
+        if let Some(field) = app.fields.iter_mut().find(|f| f.key == "LLM_API_KEY") {
+            field.value = "key".to_string();
+        }
+
+        let err = app.validate_local().unwrap_err();
+        assert!(err.to_string().contains("topic_mode is only supported"));
     }
 
     #[test]

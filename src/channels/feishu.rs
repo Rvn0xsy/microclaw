@@ -74,6 +74,13 @@ pub const SETUP_DEF: DynamicChannelDef = DynamicChannelDef {
             secret: false,
             required: false,
         },
+        ChannelFieldDef {
+            yaml_key: "topic_mode",
+            label: "Feishu topic mode (true/false, feishu/lark only)",
+            default: "false",
+            secret: false,
+            required: false,
+        },
     ],
 };
 
@@ -112,7 +119,7 @@ pub struct FeishuAccountConfig {
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
-    pub topic_mode: bool,
+    pub topic_mode: Option<bool>,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
 }
@@ -147,6 +154,13 @@ pub struct FeishuChannelConfig {
     pub accounts: HashMap<String, FeishuAccountConfig>,
     #[serde(default)]
     pub default_account: Option<String>,
+}
+
+fn domain_supports_topic_mode(domain: &str) -> bool {
+    matches!(
+        domain.trim().to_ascii_lowercase().as_str(),
+        "feishu" | "lark"
+    )
 }
 
 fn pick_default_account_id(
@@ -208,7 +222,7 @@ pub fn build_feishu_runtime_contexts(config: &crate::config::Config) -> Vec<Feis
             verification_token: account_cfg.verification_token.clone(),
             encrypt_key: account_cfg.encrypt_key.clone(),
             model: account_cfg.model.clone(),
-            topic_mode: account_cfg.topic_mode,
+            topic_mode: account_cfg.topic_mode.unwrap_or(feishu_cfg.topic_mode),
             accounts: HashMap::new(),
             default_account: None,
         };
@@ -1591,7 +1605,7 @@ async fn handle_feishu_message(
 
     let trimmed = text.trim();
     let should_respond = is_dm || is_mentioned;
-    let topic_mode = feishu_cfg.topic_mode;
+    let topic_mode = feishu_cfg.topic_mode && domain_supports_topic_mode(&feishu_cfg.domain);
     let inbound_message_id = if message_id.is_empty() {
         uuid::Uuid::new_v4().to_string()
     } else {
@@ -1878,5 +1892,36 @@ commands:
         let out = maybe_plugin_slash_response(&cfg, "/feishuplug", 1, "feishu").await;
         assert_eq!(out.as_deref(), Some("feishu-ok"));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn test_domain_supports_topic_mode_only_for_feishu_lark() {
+        assert!(domain_supports_topic_mode("feishu"));
+        assert!(domain_supports_topic_mode("lark"));
+        assert!(!domain_supports_topic_mode("custom"));
+    }
+
+    #[test]
+    fn test_build_runtime_inherits_channel_topic_mode_when_account_not_set() {
+        let mut cfg = crate::config::Config::test_defaults();
+        cfg.channels.insert(
+            "feishu".into(),
+            serde_yaml::from_str(
+                r#"
+enabled: true
+topic_mode: true
+accounts:
+  main:
+    enabled: true
+    app_id: "a"
+    app_secret: "b"
+"#,
+            )
+            .unwrap(),
+        );
+
+        let runtimes = build_feishu_runtime_contexts(&cfg);
+        assert_eq!(runtimes.len(), 1);
+        assert!(runtimes[0].config.topic_mode);
     }
 }
