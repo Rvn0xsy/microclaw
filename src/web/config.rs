@@ -1,6 +1,43 @@
 use super::*;
 use microclaw_tools::runtime::{tool_execution_policy, tool_risk};
 
+fn merge_yaml_value(
+    target: &mut serde_yaml::Value,
+    incoming: &serde_yaml::Value,
+    parent_key: Option<&str>,
+) {
+    if parent_key.is_some_and(is_sensitive_config_key)
+        && incoming
+            .as_str()
+            .map(|s| s.trim() == "***")
+            .unwrap_or(false)
+    {
+        // Frontend redacts secrets in /api/config as "***"; keep existing value when unchanged.
+        return;
+    }
+
+    match incoming {
+        serde_yaml::Value::Mapping(incoming_map) => {
+            if !target.is_mapping() {
+                *target = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+            }
+            let Some(target_map) = target.as_mapping_mut() else {
+                return;
+            };
+            for (k, v) in incoming_map {
+                let key_name = k.as_str();
+                let entry = target_map
+                    .entry(k.clone())
+                    .or_insert(serde_yaml::Value::Null);
+                merge_yaml_value(entry, v, key_name);
+            }
+        }
+        _ => {
+            *target = incoming.clone();
+        }
+    }
+}
+
 pub(super) async fn api_get_config(
     headers: HeaderMap,
     State(state): State<WebState>,
@@ -511,7 +548,9 @@ pub(super) async fn api_update_config(
                         }
                     }
                     let yaml_val = json_to_yaml_value(&json_val);
-                    map.insert(serde_yaml::Value::String(field_key), yaml_val);
+                    let key = serde_yaml::Value::String(field_key.clone());
+                    let target = map.entry(key).or_insert(serde_yaml::Value::Null);
+                    merge_yaml_value(target, &yaml_val, Some(&field_key));
                 }
             }
         }
