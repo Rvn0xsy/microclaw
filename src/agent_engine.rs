@@ -815,6 +815,8 @@ pub(crate) async fn process_with_agent_impl(
             });
 
             let mut tool_results = Vec::new();
+            let mut waiting_for_user_approval = false;
+            let mut waiting_approval_tool: Option<String> = None;
             for block in &response.content {
                 if let ResponseContentBlock::ToolUse { id, name, input } = block {
                     let mut effective_input = input.clone();
@@ -881,6 +883,9 @@ pub(crate) async fn process_with_agent_impl(
                                 .tools
                                 .execute_with_auth(name, executed_input.clone(), &tool_auth)
                                 .await;
+                        } else if state.config.high_risk_tool_user_confirmation_required {
+                            waiting_for_user_approval = true;
+                            waiting_approval_tool = Some(name.clone());
                         }
                     }
                     if let Ok(hook_outcome) = state
@@ -979,6 +984,23 @@ pub(crate) async fn process_with_agent_impl(
                 role: "user".into(),
                 content: MessageContent::Blocks(tool_results),
             });
+            if waiting_for_user_approval {
+                strip_images_for_session(&mut messages);
+                strip_images_for_session(&mut messages);
+                if let Ok(json) = serde_json::to_string(&messages) {
+                    let _ =
+                        call_blocking(state.db.clone(), move |db| db.save_session(chat_id, &json))
+                            .await;
+                }
+                let tool_name = waiting_approval_tool.unwrap_or_else(|| "this tool".to_string());
+                let text = format!(
+                    "High-risk tool '{tool_name}' is waiting for your confirmation. Reply with \"批准\" or \"approve\" to continue."
+                );
+                if let Some(tx) = event_tx {
+                    let _ = tx.send(AgentEvent::FinalResponse { text: text.clone() });
+                }
+                return Ok(text);
+            }
 
             continue;
         }
@@ -2365,8 +2387,8 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(reply, "need explicit approval");
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(reply.contains("waiting for your confirmation"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
 
         drop(state);
         let _ = std::fs::remove_dir_all(&base_dir);
