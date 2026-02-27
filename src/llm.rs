@@ -1472,8 +1472,7 @@ fn translate_messages_to_oai_with_reasoning(
     include_reasoning_for_tool_calls: bool,
 ) -> Vec<serde_json::Value> {
     let mut out: Vec<serde_json::Value> = Vec::new();
-    let mut pending_tool_ids: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    let mut pending_tool_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // System message
     if !system.is_empty() {
@@ -1649,8 +1648,7 @@ fn translate_tools_to_oai_responses(tools: &[ToolDefinition]) -> Vec<serde_json:
 
 fn translate_messages_to_oai_responses_input(messages: &[Message]) -> Vec<serde_json::Value> {
     let mut out: Vec<serde_json::Value> = Vec::new();
-    let mut pending_tool_ids: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    let mut pending_tool_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     for msg in messages {
         match &msg.content {
             MessageContent::Text(text) => {

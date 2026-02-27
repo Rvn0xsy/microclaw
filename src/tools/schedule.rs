@@ -24,7 +24,10 @@ fn compute_next_run(cron_expr: &str, tz_name: &str) -> Result<String, String> {
     Ok(next.with_timezone(&chrono::Utc).to_rfc3339())
 }
 
-fn parse_once_schedule_value(schedule_value: &str, tz_name: &str) -> Result<chrono::DateTime<Utc>, String> {
+fn parse_once_schedule_value(
+    schedule_value: &str,
+    tz_name: &str,
+) -> Result<chrono::DateTime<Utc>, String> {
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(schedule_value) {
         return Ok(dt.with_timezone(&Utc));
     }

@@ -183,7 +183,7 @@ pub struct AuditLogRecord {
 pub type SessionMetaRow = (String, String, Option<String>, Option<i64>);
 pub type SessionTreeRow = (i64, Option<String>, Option<i64>, String);
 
-const SCHEMA_VERSION_CURRENT: i64 = 10;
+const SCHEMA_VERSION_CURRENT: i64 = 11;
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -607,6 +607,13 @@ fn apply_schema_migrations(conn: &Connection) -> Result<(), MicroClawError> {
         }
         set_schema_version(conn, 10)?;
         version = 10;
+    }
+    if version < 11 {
+        if !table_has_column(conn, "sessions", "skill_envs_json")? {
+            conn.execute("ALTER TABLE sessions ADD COLUMN skill_envs_json TEXT", [])?;
+        }
+        set_schema_version(conn, 11)?;
+        version = 11;
     }
     if version != SCHEMA_VERSION_CURRENT {
         set_schema_version(conn, SCHEMA_VERSION_CURRENT)?;
@@ -1635,7 +1642,7 @@ impl Database {
     // --- Sessions ---
 
     pub fn save_session(&self, chat_id: i64, messages_json: &str) -> Result<(), MicroClawError> {
-        self.save_session_with_meta(chat_id, messages_json, None, None)
+        self.save_session_with_meta(chat_id, messages_json, None, None, None)
     }
 
     pub fn save_session_with_meta(
@@ -1644,18 +1651,33 @@ impl Database {
         messages_json: &str,
         parent_session_key: Option<&str>,
         fork_point: Option<i64>,
+        skill_envs_json: Option<&str>,
     ) -> Result<(), MicroClawError> {
         let conn = self.lock_conn();
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
-            "INSERT INTO sessions (chat_id, messages_json, updated_at, parent_session_key, fork_point)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO sessions (chat_id, messages_json, updated_at, parent_session_key, fork_point, skill_envs_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(chat_id) DO UPDATE SET
                 messages_json = ?2,
                 updated_at = ?3,
                 parent_session_key = COALESCE(?4, parent_session_key),
-                fork_point = COALESCE(?5, fork_point)",
-            params![chat_id, messages_json, now, parent_session_key, fork_point],
+                fork_point = COALESCE(?5, fork_point),
+                skill_envs_json = COALESCE(?6, skill_envs_json)",
+            params![chat_id, messages_json, now, parent_session_key, fork_point, skill_envs_json],
+        )?;
+        Ok(())
+    }
+
+    pub fn save_session_skill_envs(
+        &self,
+        chat_id: i64,
+        skill_envs_json: &str,
+    ) -> Result<(), MicroClawError> {
+        let conn = self.lock_conn();
+        conn.execute(
+            "UPDATE sessions SET skill_envs_json = ?2 WHERE chat_id = ?1",
+            params![chat_id, skill_envs_json],
         )?;
         Ok(())
     }
@@ -1669,6 +1691,20 @@ impl Database {
         );
         match result {
             Ok(pair) => Ok(Some(pair)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn load_session_skill_envs(&self, chat_id: i64) -> Result<Option<String>, MicroClawError> {
+        let conn = self.lock_conn();
+        let result = conn.query_row(
+            "SELECT skill_envs_json FROM sessions WHERE chat_id = ?1",
+            params![chat_id],
+            |row| row.get::<_, Option<String>>(0),
+        );
+        match result {
+            Ok(v) => Ok(v),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }

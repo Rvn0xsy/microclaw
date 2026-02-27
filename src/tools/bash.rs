@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use serde_json::json;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::info;
@@ -44,6 +45,18 @@ impl BashTool {
         self.sandbox_router = Some(router);
         self
     }
+}
+
+fn extract_envs(input: &serde_json::Value) -> HashMap<String, String> {
+    input
+        .get("__microclaw_envs")
+        .and_then(|v| v.as_object())
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn contains_explicit_tmp_absolute_path(command: &str) -> bool {
@@ -127,9 +140,11 @@ impl Tool for BashTool {
         let session_key = super::auth_context_from_input(&input)
             .map(|auth| format!("{}-{}", auth.caller_channel, auth.caller_chat_id))
             .unwrap_or_else(|| "shared".to_string());
+        let envs = extract_envs(&input);
         let exec_opts = SandboxExecOptions {
             timeout: std::time::Duration::from_secs(timeout_secs),
             working_dir: Some(working_dir.clone()),
+            envs,
         };
         let result = if let Some(router) = &self.sandbox_router {
             router.exec(&session_key, command, &exec_opts).await
@@ -213,6 +228,14 @@ mod tests {
             format!("New-Item -ItemType File -Path '{file_name}' -Force | Out-Null")
         } else {
             format!("touch '{file_name}'")
+        }
+    }
+
+    fn echo_env_command(var_name: &str) -> String {
+        if cfg!(target_os = "windows") {
+            format!("$env:{var_name}")
+        } else {
+            format!("echo ${var_name}")
         }
     }
 
@@ -333,6 +356,49 @@ mod tests {
             .join("tmp")
             .join(marker);
         assert!(expected_marker.exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_extract_envs_from_input() {
+        let input = json!({
+            "command": "echo hi",
+            "__microclaw_envs": {
+                "API_KEY": "secret",
+                "BASE_URL": "https://example.com"
+            }
+        });
+        let envs = extract_envs(&input);
+        assert_eq!(envs.get("API_KEY").unwrap(), "secret");
+        assert_eq!(envs.get("BASE_URL").unwrap(), "https://example.com");
+    }
+
+    #[test]
+    fn test_extract_envs_empty_when_absent() {
+        let input = json!({"command": "echo hi"});
+        let envs = extract_envs(&input);
+        assert!(envs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_bash_injects_envs_into_execution() {
+        let root =
+            std::env::temp_dir().join(format!("microclaw_bash_env_{}", uuid::Uuid::new_v4()));
+        let work = root.join("workspace");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let tool = BashTool::new(work.to_str().unwrap());
+        let result = tool
+            .execute(json!({
+                "command": echo_env_command("TEST_SKILL_VAR"),
+                "__microclaw_envs": {
+                    "TEST_SKILL_VAR": "skill_value_42"
+                }
+            }))
+            .await;
+        assert!(!result.is_error);
+        assert!(result.content.contains("skill_value_42"));
 
         let _ = std::fs::remove_dir_all(&root);
     }

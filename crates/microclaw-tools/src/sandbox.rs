@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -133,6 +134,8 @@ impl Default for SandboxConfig {
 pub struct SandboxExecOptions {
     pub timeout: Duration,
     pub working_dir: Option<PathBuf>,
+    #[allow(clippy::zero_sized_map_values)]
+    pub envs: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -314,8 +317,12 @@ impl Sandbox for DockerSandbox {
     ) -> Result<SandboxExecResult> {
         let name = self.container_name(session_key);
         let mut args = vec!["exec".to_string()];
+
         if let Some(dir) = &opts.working_dir {
             args.extend(["-w".to_string(), dir.display().to_string()]);
+        }
+        for (k, v) in &opts.envs {
+            args.extend(["-e".to_string(), format!("{k}={v}")]);
         }
         args.push(name);
         args.extend(["sh".to_string(), "-c".to_string(), command.to_string()]);
@@ -416,6 +423,9 @@ pub async fn exec_host_command(
 ) -> Result<SandboxExecResult> {
     let spec = shell_command(command);
     let mut cmd = build_command(&spec, opts.working_dir.as_deref());
+    for (k, v) in &opts.envs {
+        cmd.env(k, v);
+    }
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
     cmd.stdin(std::process::Stdio::null());
@@ -613,6 +623,7 @@ mod tests {
         let opts = SandboxExecOptions {
             timeout: Duration::from_secs(2),
             working_dir: None,
+            envs: HashMap::new(),
         };
         let out = router.exec("chat-1", "printf microclaw-smoke", &opts).await;
         let out = out.expect("expected host fallback execution");
@@ -632,6 +643,7 @@ mod tests {
         let opts = SandboxExecOptions {
             timeout: Duration::from_secs(2),
             working_dir: None,
+            envs: HashMap::new(),
         };
         let err = router.exec("chat-1", "echo hi", &opts).await.unwrap_err();
         assert!(err

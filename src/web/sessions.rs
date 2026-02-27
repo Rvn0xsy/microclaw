@@ -232,6 +232,7 @@ pub(super) async fn api_sessions_fork(
             "[]",
             Some(&source_session_key_for_save),
             Some(fork_point as i64),
+            None,
         )
     })
     .await

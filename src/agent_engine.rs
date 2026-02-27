@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use serde_json::Value;
+use std::collections::HashMap;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{info, warn};
 
@@ -640,6 +641,13 @@ pub(crate) async fn process_with_agent_impl(
     let mut seen_failed_tool_details: std::collections::HashSet<String> =
         std::collections::HashSet::new();
     let mut empty_visible_reply_retry_attempted = false;
+    let mut skill_envs: HashMap<String, String> = {
+        let db = state.db.clone();
+        call_blocking(db, move |db| db.load_session_skill_envs(chat_id))
+            .await?
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default()
+    };
     let effective_model = state
         .llm_model_overrides
         .get(context.caller_channel)
@@ -899,6 +907,14 @@ pub(crate) async fn process_with_agent_impl(
                             }
                         }
                     }
+                    if !skill_envs.is_empty() {
+                        if let Value::Object(ref mut map) = effective_input {
+                            map.insert(
+                                "__microclaw_envs".to_string(),
+                                serde_json::to_value(&skill_envs).unwrap_or_default(),
+                            );
+                        }
+                    }
                     if let Some(tx) = event_tx {
                         let _ = tx.send(AgentEvent::ToolStart {
                             name: name.clone(),
@@ -935,6 +951,24 @@ pub(crate) async fn process_with_agent_impl(
                         } else if state.config.high_risk_tool_user_confirmation_required {
                             waiting_for_user_approval = true;
                             waiting_approval_tool = Some(name.clone());
+                        }
+                    }
+                    if name == "activate_skill" && !result.is_error {
+                        if let Some(meta) = &result.metadata {
+                            if let Some(envs) = meta.get("skill_envs").and_then(|v| v.as_object()) {
+                                for (k, v) in envs {
+                                    if let Some(s) = v.as_str() {
+                                        skill_envs.insert(k.clone(), s.to_string());
+                                    }
+                                }
+                                if let Ok(envs_json) = serde_json::to_string(&skill_envs) {
+                                    let db = state.db.clone();
+                                    let _ = call_blocking(db, move |db| {
+                                        db.save_session_skill_envs(chat_id, &envs_json)
+                                    })
+                                    .await;
+                                }
+                            }
                         }
                     }
                     if let Ok(hook_outcome) = state

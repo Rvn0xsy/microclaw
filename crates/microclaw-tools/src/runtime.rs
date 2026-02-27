@@ -14,6 +14,7 @@ pub struct ToolResult {
     pub bytes: usize,
     pub duration_ms: Option<u128>,
     pub error_type: Option<String>,
+    pub metadata: Option<serde_json::Value>,
 }
 
 impl ToolResult {
@@ -26,6 +27,7 @@ impl ToolResult {
             bytes,
             duration_ms: None,
             error_type: None,
+            metadata: None,
         }
     }
 
@@ -38,6 +40,7 @@ impl ToolResult {
             bytes,
             duration_ms: None,
             error_type: Some("tool_error".to_string()),
+            metadata: None,
         }
     }
 
@@ -48,6 +51,11 @@ impl ToolResult {
 
     pub fn with_error_type(mut self, error_type: impl Into<String>) -> Self {
         self.error_type = Some(error_type.into());
+        self
+    }
+
+    pub fn with_metadata(mut self, metadata: serde_json::Value) -> Self {
+        self.metadata = Some(metadata);
         self
     }
 }
