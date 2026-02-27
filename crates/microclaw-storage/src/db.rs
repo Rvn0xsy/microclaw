@@ -1727,11 +1727,21 @@ impl Database {
     }
 
     /// Clear conversational context for a chat without deleting chat metadata or memories.
-    /// This removes resumable session state and historical messages used to rebuild context.
+    /// This removes resumable session state, historical messages, and scheduled task state
+    /// that can otherwise continue producing messages after a reset.
     pub fn clear_chat_context(&self, chat_id: i64) -> Result<bool, MicroClawError> {
         let conn = self.lock_conn();
         let tx = conn.unchecked_transaction()?;
         let mut affected = 0usize;
+        affected += tx.execute("DELETE FROM task_run_logs WHERE chat_id = ?1", params![chat_id])?;
+        affected += tx.execute(
+            "DELETE FROM scheduled_task_dlq WHERE chat_id = ?1",
+            params![chat_id],
+        )?;
+        affected += tx.execute(
+            "DELETE FROM scheduled_tasks WHERE chat_id = ?1",
+            params![chat_id],
+        )?;
         affected += tx.execute("DELETE FROM sessions WHERE chat_id = ?1", params![chat_id])?;
         affected += tx.execute("DELETE FROM messages WHERE chat_id = ?1", params![chat_id])?;
         tx.commit()?;
@@ -4204,7 +4214,7 @@ mod tests {
     }
 
     #[test]
-    fn test_clear_chat_context_removes_session_and_messages_only() {
+    fn test_clear_chat_context_removes_session_messages_and_scheduled_tasks() {
         let (db, dir) = test_db();
         db.upsert_chat(100, Some("chat-100"), "private").unwrap();
         db.save_session(100, r#"[{"role":"user","content":"hi"}]"#)
@@ -4220,10 +4230,45 @@ mod tests {
         .unwrap();
         db.insert_memory(Some(100), "User likes Rust", "PROFILE")
             .unwrap();
+        let task_id = db
+            .create_scheduled_task(
+                100,
+                "daily summary",
+                "cron",
+                "0 0 8 * * *",
+                "2099-01-01T08:00:00Z",
+            )
+            .unwrap();
+        db.log_task_run(
+            task_id,
+            100,
+            "2024-01-01T08:00:00Z",
+            "2024-01-01T08:00:01Z",
+            1000,
+            true,
+            Some("ok"),
+        )
+        .unwrap();
+        db.insert_scheduled_task_dlq(
+            task_id,
+            100,
+            "2024-01-01T09:00:00Z",
+            "2024-01-01T09:00:01Z",
+            1000,
+            Some("failure"),
+        )
+        .unwrap();
 
         assert!(db.clear_chat_context(100).unwrap());
         assert!(db.load_session(100).unwrap().is_none());
         assert!(db.get_recent_messages(100, 10).unwrap().is_empty());
+        assert!(db.get_tasks_for_chat(100).unwrap().is_empty());
+        assert!(db.get_task_run_logs(task_id, 10).unwrap().is_empty());
+        assert!(
+            db.list_scheduled_task_dlq(Some(100), Some(task_id), true, 10)
+                .unwrap()
+                .is_empty()
+        );
         assert!(!db.search_memories(100, "Rust", 10).unwrap().is_empty());
         assert!(db.get_chat_type(100).unwrap().is_some());
 
