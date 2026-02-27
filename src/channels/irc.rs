@@ -537,7 +537,7 @@ async fn handle_irc_message(
             drop(event_tx);
             let mut used_send_message_tool = false;
             while let Some(event) = event_rx.recv().await {
-                if let AgentEvent::ToolStart { name } = event {
+                if let AgentEvent::ToolStart { name, .. } = event {
                     if name == "send_message" {
                         used_send_message_tool = true;
                     }

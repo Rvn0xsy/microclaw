@@ -119,7 +119,9 @@ pub struct FeishuAccountConfig {
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
-    pub topic_mode: Option<bool>,
+    pub topic_mode: bool,
+    #[serde(default)]
+    pub show_progress: bool,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
 }
@@ -151,16 +153,11 @@ pub struct FeishuChannelConfig {
     #[serde(default)]
     pub topic_mode: bool,
     #[serde(default)]
+    pub show_progress: bool,
+    #[serde(default)]
     pub accounts: HashMap<String, FeishuAccountConfig>,
     #[serde(default)]
     pub default_account: Option<String>,
-}
-
-fn domain_supports_topic_mode(domain: &str) -> bool {
-    matches!(
-        domain.trim().to_ascii_lowercase().as_str(),
-        "feishu" | "lark"
-    )
 }
 
 fn pick_default_account_id(
@@ -222,7 +219,8 @@ pub fn build_feishu_runtime_contexts(config: &crate::config::Config) -> Vec<Feis
             verification_token: account_cfg.verification_token.clone(),
             encrypt_key: account_cfg.encrypt_key.clone(),
             model: account_cfg.model.clone(),
-            topic_mode: account_cfg.topic_mode.unwrap_or(feishu_cfg.topic_mode),
+            topic_mode: account_cfg.topic_mode,
+            show_progress: account_cfg.show_progress,
             accounts: HashMap::new(),
             default_account: None,
         };
@@ -980,6 +978,153 @@ async fn send_feishu_response(
     Ok(())
 }
 
+async fn reply_feishu_thread(
+    http_client: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+    reply_to_message_id: &str,
+    text: &str,
+) -> Result<String, String> {
+    let content = serde_json::json!({ "text": text }).to_string();
+    let url = format!("{base_url}/open-apis/im/v1/messages/{reply_to_message_id}/reply");
+    let body = serde_json::json!({
+        "msg_type": "text",
+        "content": content,
+        "reply_in_thread": true,
+    });
+
+    let resp = http_client
+        .post(&url)
+        .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Feishu reply_thread send failed: {e}"))?;
+
+    let resp_json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Feishu reply_thread parse failed: {e}"))?;
+    let code = resp_json.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
+    if code != 0 {
+        let msg = resp_json
+            .get("msg")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        return Err(format!("Feishu reply_thread error: code={code} msg={msg}"));
+    }
+
+    resp_json
+        .pointer("/data/message_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .ok_or_else(|| "Feishu reply_thread: missing message_id".into())
+}
+
+async fn update_feishu_message(
+    http_client: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+    message_id: &str,
+    text: &str,
+) -> Result<(), String> {
+    let url = format!("{base_url}/open-apis/im/v1/messages/{message_id}");
+    let content = serde_json::json!({ "text": text }).to_string();
+    let body = serde_json::json!({
+        "msg_type": "text",
+        "content": content,
+    });
+
+    let resp = http_client
+        .put(&url)
+        .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Feishu update_message failed: {e}"))?;
+
+    let resp_json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Feishu update_message parse failed: {e}"))?;
+    let code = resp_json.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
+    if code != 0 {
+        let msg = resp_json
+            .get("msg")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        return Err(format!(
+            "Feishu update_message error: code={code} msg={msg}"
+        ));
+    }
+    Ok(())
+}
+
+fn format_tool_input_summary(name: &str, input: &serde_json::Value) -> String {
+    match name {
+        "bash" => {
+            let cmd = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
+            if cmd.is_empty() {
+                "bash".into()
+            } else if cmd.len() > 200 {
+                format!("bash: {}...", &cmd[..200])
+            } else {
+                format!("bash: {}", cmd)
+            }
+        }
+        "read_file" => {
+            let path = input
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            format!("read_file: {}", path)
+        }
+        "write_file" => {
+            let path = input
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            format!("write_file: {}", path)
+        }
+        "edit_file" => {
+            let path = input
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            format!("edit_file: {}", path)
+        }
+        "glob" => {
+            let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("?");
+            format!("glob: {}", pattern)
+        }
+        "grep" => {
+            let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("?");
+            format!("grep: {}", pattern)
+        }
+        "web_search" => {
+            let query = input.get("query").and_then(|v| v.as_str()).unwrap_or("?");
+            format!("web_search: {}", query)
+        }
+        "web_fetch" => {
+            let url = input.get("url").and_then(|v| v.as_str()).unwrap_or("?");
+            format!("web_fetch: {}", url)
+        }
+        _ => {
+            let compact = serde_json::to_string(input).unwrap_or_default();
+            if compact.len() > 200 {
+                format!("{}: {}...", name, &compact[..200])
+            } else if compact == "{}" || compact == "null" {
+                name.to_string()
+            } else {
+                format!("{}: {}", name, compact)
+            }
+        }
+    }
+}
+
 /// Parse Feishu message content JSON. Text messages have `{"text":"..."}`.
 fn parse_message_content(content: &str, message_type: &str) -> String {
     match message_type {
@@ -1605,7 +1750,8 @@ async fn handle_feishu_message(
 
     let trimmed = text.trim();
     let should_respond = is_dm || is_mentioned;
-    let topic_mode = feishu_cfg.topic_mode && domain_supports_topic_mode(&feishu_cfg.domain);
+    let topic_mode = feishu_cfg.topic_mode;
+    let show_progress = feishu_cfg.show_progress;
     let inbound_message_id = if message_id.is_empty() {
         uuid::Uuid::new_v4().to_string()
     } else {
@@ -1703,101 +1849,331 @@ async fn handle_feishu_message(
 
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
 
-    match process_with_agent_with_events(
-        &app_state,
-        AgentRequestContext {
-            caller_channel: &runtime.channel_name,
-            chat_id,
-            chat_type: if is_dm { "private" } else { "group" },
-        },
-        None,
-        None,
-        Some(&event_tx),
-    )
-    .await
-    {
-        Ok(response) => {
-            drop(event_tx);
+    if topic_mode && show_progress && !message_id.is_empty() {
+        let progress_http = http_client.clone();
+        let progress_base = base_url.to_string();
+        let progress_token = token.clone();
+        let progress_reply_to = message_id.to_string();
+
+        struct ProgressState {
+            used_send_message_tool: bool,
+        }
+
+        let (progress_done_tx, progress_done_rx) = tokio::sync::oneshot::channel::<ProgressState>();
+
+        let progress_handle = tokio::spawn(async move {
+            let mut status_msg_id: Option<String> = None;
+            let mut lines: Vec<String> = Vec::new();
+            let mut dirty = false;
             let mut used_send_message_tool = false;
-            while let Some(event) = event_rx.recv().await {
-                if let AgentEvent::ToolStart { name } = event {
-                    if name == "send_message" {
-                        used_send_message_tool = true;
+            // Feishu: max 20 edits per message; reserve 1 for the final status
+            const MAX_EDITS: u32 = 19;
+            let mut edit_count: u32 = 0;
+
+            let debounce = Duration::from_millis(1500);
+            let mut last_flush = Instant::now();
+
+            loop {
+                let event = tokio::time::timeout(debounce, event_rx.recv()).await;
+
+                match event {
+                    Ok(Some(AgentEvent::ToolStart { name, input })) => {
+                        if name == "send_message" {
+                            used_send_message_tool = true;
+                        }
+                        let summary = format_tool_input_summary(&name, &input);
+                        lines.push(format!("▶ Executing tool: {}", summary));
+                        dirty = true;
                     }
+                    Ok(Some(AgentEvent::ToolResult {
+                        name,
+                        is_error,
+                        preview,
+                        duration_ms,
+                        ..
+                    })) => {
+                        if is_error {
+                            lines.push(format!(
+                                "✗ Tool '{}' failed ({}ms): {}",
+                                name, duration_ms, preview
+                            ));
+                        } else {
+                            lines.push(format!("✓ {} ({}ms)", name, duration_ms));
+                        }
+                        dirty = true;
+                    }
+                    Ok(Some(AgentEvent::Iteration { iteration })) => {
+                        if iteration > 1 {
+                            lines.push(format!("── iteration {} ──", iteration));
+                            dirty = true;
+                        }
+                    }
+                    Ok(Some(_)) => {}
+                    Ok(None) => break,
+                    Err(_) => {}
+                }
+
+                if dirty && last_flush.elapsed() >= debounce {
+                    let text = format!("⏳ Processing...\n{}", lines.join("\n"));
+
+                    if let Some(ref mid) = status_msg_id {
+                        if edit_count < MAX_EDITS {
+                            if let Err(e) = update_feishu_message(
+                                &progress_http,
+                                &progress_base,
+                                &progress_token,
+                                mid,
+                                &text,
+                            )
+                            .await
+                            {
+                                warn!("Feishu: progress update failed: {e}");
+                            } else {
+                                edit_count += 1;
+                            }
+                        }
+                    } else {
+                        match reply_feishu_thread(
+                            &progress_http,
+                            &progress_base,
+                            &progress_token,
+                            &progress_reply_to,
+                            &text,
+                        )
+                        .await
+                        {
+                            Ok(mid) => {
+                                status_msg_id = Some(mid);
+                                edit_count = 0;
+                            }
+                            Err(e) => {
+                                warn!("Feishu: failed to create status message: {e}");
+                            }
+                        }
+                    }
+
+                    dirty = false;
+                    last_flush = Instant::now();
                 }
             }
 
-            if used_send_message_tool {
-                if !response.is_empty() {
-                    info!(
-                        "Feishu: suppressing final response for chat {} because send_message already delivered output",
-                        chat_id
-                    );
+            if let Some(ref mid) = status_msg_id {
+                let text = format!("✅ Done\n{}", lines.join("\n"));
+                if edit_count < MAX_EDITS {
+                    let _ = update_feishu_message(
+                        &progress_http,
+                        &progress_base,
+                        &progress_token,
+                        mid,
+                        &text,
+                    )
+                    .await;
                 }
-            } else if !response.is_empty() {
-                if let Err(e) = send_feishu_response(
-                    &http_client,
-                    base_url,
-                    &token,
-                    external_chat_id,
-                    &response,
-                    message_id,
-                    topic_mode,
-                )
-                .await
-                {
-                    error!("Feishu: failed to send response: {e}");
+            }
+
+            let _ = progress_done_tx.send(ProgressState {
+                used_send_message_tool,
+            });
+        });
+
+        match process_with_agent_with_events(
+            &app_state,
+            AgentRequestContext {
+                caller_channel: &runtime.channel_name,
+                chat_id,
+                chat_type: if is_dm { "private" } else { "group" },
+            },
+            None,
+            None,
+            Some(&event_tx),
+        )
+        .await
+        {
+            Ok(response) => {
+                drop(event_tx);
+                let _ = progress_handle.await;
+                let used_send_message_tool = progress_done_rx
+                    .await
+                    .map(|s| s.used_send_message_tool)
+                    .unwrap_or(false);
+
+                if used_send_message_tool {
+                    if !response.is_empty() {
+                        info!(
+                            "Feishu: suppressing final response for chat {} because send_message already delivered output",
+                            chat_id
+                        );
+                    }
+                } else if !response.is_empty() {
+                    if let Err(e) = send_feishu_response(
+                        &http_client,
+                        base_url,
+                        &token,
+                        external_chat_id,
+                        &response,
+                        message_id,
+                        topic_mode,
+                    )
+                    .await
+                    {
+                        error!("Feishu: failed to send response: {e}");
+                    }
+
+                    let bot_msg = StoredMessage {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        chat_id,
+                        sender_name: runtime.bot_username.clone(),
+                        content: response,
+                        is_from_bot: true,
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                    };
+                    let _ =
+                        call_blocking(app_state.db.clone(), move |db| db.store_message(&bot_msg))
+                            .await;
+                } else {
+                    let fallback =
+                        "I couldn't produce a visible reply after an automatic retry. Please try again.";
+                    let _ = send_feishu_response(
+                        &http_client,
+                        base_url,
+                        &token,
+                        external_chat_id,
+                        fallback,
+                        message_id,
+                        topic_mode,
+                    )
+                    .await;
+
+                    let bot_msg = StoredMessage {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        chat_id,
+                        sender_name: runtime.bot_username.clone(),
+                        content: fallback.to_string(),
+                        is_from_bot: true,
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                    };
+                    let _ =
+                        call_blocking(app_state.db.clone(), move |db| db.store_message(&bot_msg))
+                            .await;
                 }
-
-                let bot_msg = StoredMessage {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    chat_id,
-                    sender_name: runtime.bot_username.clone(),
-                    content: response,
-                    is_from_bot: true,
-                    timestamp: chrono::Utc::now().to_rfc3339(),
-                };
-                let _ =
-                    call_blocking(app_state.db.clone(), move |db| db.store_message(&bot_msg)).await;
-            } else {
-                let fallback =
-                    "I couldn't produce a visible reply after an automatic retry. Please try again.";
-                let _ = send_feishu_response(
-                    &http_client,
-                    base_url,
-                    &token,
-                    external_chat_id,
-                    fallback,
-                    message_id,
-                    topic_mode,
-                )
-                .await;
-
-                let bot_msg = StoredMessage {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    chat_id,
-                    sender_name: runtime.bot_username.clone(),
-                    content: fallback.to_string(),
-                    is_from_bot: true,
-                    timestamp: chrono::Utc::now().to_rfc3339(),
-                };
-                let _ =
-                    call_blocking(app_state.db.clone(), move |db| db.store_message(&bot_msg)).await;
+            }
+            Err(e) => {
+                drop(event_tx);
+                let _ = progress_handle.await;
+                error!("Error processing Feishu message: {e}");
+                if !should_suppress_user_error(&e) {
+                    let _ = send_feishu_response(
+                        &http_client,
+                        base_url,
+                        &token,
+                        external_chat_id,
+                        &format!("Error: {e}"),
+                        message_id,
+                        topic_mode,
+                    )
+                    .await;
+                }
             }
         }
-        Err(e) => {
-            error!("Error processing Feishu message: {e}");
-            if !should_suppress_user_error(&e) {
-                let _ = send_feishu_response(
-                    &http_client,
-                    base_url,
-                    &token,
-                    external_chat_id,
-                    &format!("Error: {e}"),
-                    message_id,
-                    topic_mode,
-                )
-                .await;
+    } else {
+        match process_with_agent_with_events(
+            &app_state,
+            AgentRequestContext {
+                caller_channel: &runtime.channel_name,
+                chat_id,
+                chat_type: if is_dm { "private" } else { "group" },
+            },
+            None,
+            None,
+            Some(&event_tx),
+        )
+        .await
+        {
+            Ok(response) => {
+                drop(event_tx);
+                let mut used_send_message_tool = false;
+                while let Some(event) = event_rx.recv().await {
+                    if let AgentEvent::ToolStart { name, .. } = event {
+                        if name == "send_message" {
+                            used_send_message_tool = true;
+                        }
+                    }
+                }
+
+                if used_send_message_tool {
+                    if !response.is_empty() {
+                        info!(
+                            "Feishu: suppressing final response for chat {} because send_message already delivered output",
+                            chat_id
+                        );
+                    }
+                } else if !response.is_empty() {
+                    if let Err(e) = send_feishu_response(
+                        &http_client,
+                        base_url,
+                        &token,
+                        external_chat_id,
+                        &response,
+                        message_id,
+                        topic_mode,
+                    )
+                    .await
+                    {
+                        error!("Feishu: failed to send response: {e}");
+                    }
+
+                    let bot_msg = StoredMessage {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        chat_id,
+                        sender_name: runtime.bot_username.clone(),
+                        content: response,
+                        is_from_bot: true,
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                    };
+                    let _ =
+                        call_blocking(app_state.db.clone(), move |db| db.store_message(&bot_msg))
+                            .await;
+                } else {
+                    let fallback =
+                        "I couldn't produce a visible reply after an automatic retry. Please try again.";
+                    let _ = send_feishu_response(
+                        &http_client,
+                        base_url,
+                        &token,
+                        external_chat_id,
+                        fallback,
+                        message_id,
+                        topic_mode,
+                    )
+                    .await;
+
+                    let bot_msg = StoredMessage {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        chat_id,
+                        sender_name: runtime.bot_username.clone(),
+                        content: fallback.to_string(),
+                        is_from_bot: true,
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                    };
+                    let _ =
+                        call_blocking(app_state.db.clone(), move |db| db.store_message(&bot_msg))
+                            .await;
+                }
+            }
+            Err(e) => {
+                error!("Error processing Feishu message: {e}");
+                if !should_suppress_user_error(&e) {
+                    let _ = send_feishu_response(
+                        &http_client,
+                        base_url,
+                        &token,
+                        external_chat_id,
+                        &format!("Error: {e}"),
+                        message_id,
+                        topic_mode,
+                    )
+                    .await;
+                }
             }
         }
     }
@@ -1901,13 +2277,6 @@ commands:
     }
 
     #[test]
-    fn test_domain_supports_topic_mode_only_for_feishu_lark() {
-        assert!(domain_supports_topic_mode("feishu"));
-        assert!(domain_supports_topic_mode("lark"));
-        assert!(!domain_supports_topic_mode("custom"));
-    }
-
-    #[test]
     fn test_build_runtime_inherits_channel_topic_mode_when_account_not_set() {
         let mut cfg = crate::config::Config::test_defaults();
         cfg.channels.insert(
@@ -1915,12 +2284,12 @@ commands:
             serde_yaml::from_str(
                 r#"
 enabled: true
-topic_mode: true
 accounts:
   main:
     enabled: true
     app_id: "a"
     app_secret: "b"
+    topic_mode: true
 "#,
             )
             .unwrap(),

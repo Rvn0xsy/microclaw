@@ -567,7 +567,7 @@ async fn metrics_record_request_result(state: &WebState, ok: bool, latency_ms: i
 async fn metrics_apply_agent_event(state: &WebState, evt: &AgentEvent) {
     let mut m = state.metrics.lock().await;
     match evt {
-        AgentEvent::ToolStart { name } => {
+        AgentEvent::ToolStart { name, .. } => {
             m.tool_executions += 1;
             if name.starts_with("mcp") {
                 m.mcp_calls += 1;

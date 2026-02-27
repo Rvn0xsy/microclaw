@@ -2610,8 +2610,7 @@ impl SetupApp {
             let valid = matches!(lower.as_str(), "true" | "false" | "1" | "0" | "yes" | "no");
             if !valid {
                 return Err(MicroClawError::Config(
-                    "HIGH_RISK_TOOL_USER_CONFIRMATION_REQUIRED must be true/false (or 1/0)"
-                        .into(),
+                    "HIGH_RISK_TOOL_USER_CONFIRMATION_REQUIRED must be true/false (or 1/0)".into(),
                 ));
             }
         }

@@ -28,6 +28,7 @@ pub enum AgentEvent {
     },
     ToolStart {
         name: String,
+        input: serde_json::Value,
     },
     ToolResult {
         name: String,
@@ -899,7 +900,10 @@ pub(crate) async fn process_with_agent_impl(
                         }
                     }
                     if let Some(tx) = event_tx {
-                        let _ = tx.send(AgentEvent::ToolStart { name: name.clone() });
+                        let _ = tx.send(AgentEvent::ToolStart {
+                            name: name.clone(),
+                            input: effective_input.clone(),
+                        });
                     }
                     info!("Executing tool: {} (iteration {})", name, iteration + 1);
                     let started = std::time::Instant::now();
@@ -2483,8 +2487,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_failed_tool_note_includes_bash_command_details() {
-        let base_dir =
-            std::env::temp_dir().join(format!("mc_agent_failed_tool_note_{}", uuid::Uuid::new_v4()));
+        let base_dir = std::env::temp_dir().join(format!(
+            "mc_agent_failed_tool_note_{}",
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir_all(&base_dir).unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
         let llm = FailedBashThenAnswerLlm {
@@ -2513,7 +2519,9 @@ mod tests {
         assert!(reply.contains("build step completed"));
         assert!(reply.contains("Execution note: some tool actions failed in this request (bash)."));
         assert!(reply.contains("Failed actions:"));
-        assert!(reply.contains("bash `git clone https://github.com/naamfung/zua.git /tmp/zua` failed:"));
+        assert!(
+            reply.contains("bash `git clone https://github.com/naamfung/zua.git /tmp/zua` failed:")
+        );
         assert!(reply.contains("Command contains absolute /tmp path"));
         assert_eq!(calls.load(Ordering::SeqCst), 2);
 

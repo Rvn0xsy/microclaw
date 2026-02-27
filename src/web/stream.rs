@@ -86,10 +86,13 @@ pub(super) async fn api_send_stream(
                                 )
                                 .await;
                         }
-                        AgentEvent::ToolStart { name } => {
+                        AgentEvent::ToolStart { name, .. } => {
                             super::metrics_apply_agent_event(
                                 &state_for_events,
-                                &AgentEvent::ToolStart { name: name.clone() },
+                                &AgentEvent::ToolStart {
+                                    name: name.clone(),
+                                    input: serde_json::Value::Null,
+                                },
                             )
                             .await;
                             run_hub
