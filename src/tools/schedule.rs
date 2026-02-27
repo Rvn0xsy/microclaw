@@ -2,7 +2,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{NaiveDateTime, TimeZone, Utc};
 use serde_json::json;
 
 use super::{authorize_chat_access, schema_object, Tool, ToolResult};
@@ -22,6 +22,38 @@ fn compute_next_run(cron_expr: &str, tz_name: &str) -> Result<String, String> {
         .next()
         .ok_or_else(|| "No upcoming run found for this cron expression".to_string())?;
     Ok(next.with_timezone(&chrono::Utc).to_rfc3339())
+}
+
+fn parse_once_schedule_value(schedule_value: &str, tz_name: &str) -> Result<chrono::DateTime<Utc>, String> {
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(schedule_value) {
+        return Ok(dt.with_timezone(&Utc));
+    }
+
+    // Be tolerant to common model outputs without explicit timezone.
+    let tz: chrono_tz::Tz = tz_name
+        .parse()
+        .map_err(|_| format!("Invalid timezone: {tz_name}"))?;
+    let candidate_formats = [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M",
+    ];
+    for fmt in candidate_formats {
+        if let Ok(naive) = NaiveDateTime::parse_from_str(schedule_value, fmt) {
+            let local = tz.from_local_datetime(&naive).single().ok_or_else(|| {
+                format!(
+                    "Ambiguous/non-existent local time for timezone {tz_name}: {schedule_value}"
+                )
+            })?;
+            return Ok(local.with_timezone(&Utc));
+        }
+    }
+
+    Err(
+        "Invalid ISO 8601 timestamp for one-time schedule. Use RFC3339, e.g. 2026-02-27T14:25:00+08:00 or 2026-02-27T06:25:00Z."
+            .to_string(),
+    )
 }
 
 fn parse_cron_fields(cron_expr: &str) -> Vec<&str> {
@@ -188,23 +220,17 @@ impl Tool for ScheduleTaskTool {
                 Err(e) => return ToolResult::error(e),
             },
             "once" => {
-                // Validate and normalize to UTC for consistent SQLite string comparison
-                match chrono::DateTime::parse_from_rfc3339(schedule_value) {
-                    Ok(dt) => {
-                        let dt_utc = dt.with_timezone(&chrono::Utc);
-                        if dt_utc <= Utc::now() {
-                            return ToolResult::error(
-                                "One-time schedule timestamp must be in the future".into(),
-                            );
-                        }
-                        dt_utc.to_rfc3339()
-                    }
-                    Err(_) => {
-                        return ToolResult::error(
-                            "Invalid ISO 8601 timestamp for one-time schedule".into(),
-                        );
-                    }
+                // Validate and normalize to UTC for consistent SQLite string comparison.
+                let dt_utc = match parse_once_schedule_value(schedule_value, tz_name) {
+                    Ok(dt) => dt,
+                    Err(e) => return ToolResult::error(e),
+                };
+                if dt_utc <= Utc::now() {
+                    return ToolResult::error(
+                        "One-time schedule timestamp must be in the future".into(),
+                    );
                 }
+                dt_utc.to_rfc3339()
             }
             _ => return ToolResult::error("schedule_type must be 'cron' or 'once'".into()),
         };
@@ -939,6 +965,24 @@ mod tests {
                 "prompt": "one time thing",
                 "schedule_type": "once",
                 "schedule_value": "2099-12-31T23:59:59+00:00"
+            }))
+            .await;
+        assert!(!result.is_error, "Error: {}", result.content);
+        assert!(result.content.contains("scheduled"));
+        cleanup(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_schedule_task_once_accepts_naive_datetime_with_timezone() {
+        let (db, dir) = test_db();
+        let tool = ScheduleTaskTool::new(test_registry(), db, "UTC".into());
+        let result = tool
+            .execute(json!({
+                "chat_id": 100,
+                "prompt": "one time thing",
+                "schedule_type": "once",
+                "schedule_value": "2099-12-31 23:59:59",
+                "timezone": "Asia/Shanghai"
             }))
             .await;
         assert!(!result.is_error, "Error: {}", result.content);
