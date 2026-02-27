@@ -486,6 +486,9 @@ async fn main() -> anyhow::Result<()> {
 
     let mut runtime_config = config.clone();
     runtime_config.data_dir = runtime_data_dir;
+    // Keep tool-side skill resolution aligned with the already-resolved skills directory.
+    // Otherwise, changing data_dir to runtime/ would make tools default to runtime/skills.
+    runtime_config.skills_dir = Some(skills_data_dir);
 
     runtime::run(
         runtime_config,
@@ -502,6 +505,7 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::migrate_legacy_runtime_layout;
+    use microclaw::config::Config;
     use std::path::Path;
 
     fn unique_temp_dir() -> std::path::PathBuf {
@@ -535,6 +539,23 @@ mod tests {
         migrate_legacy_runtime_layout(&root, Path::new(&runtime_dir));
 
         assert!(!runtime_dir.exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn runtime_config_keeps_resolved_skills_dir_after_data_dir_swap() {
+        let root = unique_temp_dir();
+        let mut config: Config = serde_yaml::from_str("{}").expect("default config from yaml");
+        config.data_dir = root.to_string_lossy().to_string();
+
+        let runtime_data_dir = config.runtime_data_dir();
+        let resolved_skills_dir = config.skills_data_dir();
+
+        let mut runtime_config = config.clone();
+        runtime_config.data_dir = runtime_data_dir;
+        runtime_config.skills_dir = Some(resolved_skills_dir.clone());
+
+        assert_eq!(runtime_config.skills_data_dir(), resolved_skills_dir);
         let _ = std::fs::remove_dir_all(root);
     }
 }
