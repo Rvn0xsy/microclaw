@@ -20,8 +20,8 @@ pub fn init_logging(runtime_data_dir: &str) -> Result<()> {
     let writer = HourlyLogWriter::new(log_dir, LOG_RETENTION_DAYS)?;
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into()),
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .with_ansi(false)
         .with_writer(writer)
@@ -33,8 +33,8 @@ pub fn init_logging(runtime_data_dir: &str) -> Result<()> {
 pub fn init_console_logging() {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into()),
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
 }

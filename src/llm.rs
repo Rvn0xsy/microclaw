@@ -3,7 +3,7 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::mpsc::UnboundedSender;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -269,6 +269,14 @@ impl AnthropicProvider {
     ) -> Result<MessagesResponse, MicroClawError> {
         let mut streamed_request = request.clone();
         streamed_request.stream = Some(true);
+
+        debug!(
+            provider = "anthropic",
+            model = %request.model,
+            url = %self.base_url,
+            messages_count = request.messages.len(),
+            "Sending LLM stream request"
+        );
 
         let response = self
             .http
@@ -550,6 +558,9 @@ fn process_openai_stream_event(
 
     if let Some(piece) = delta.get("reasoning_content").and_then(|t| t.as_str()) {
         if !piece.is_empty() {
+            if reasoning_text.is_empty() {
+                debug!("AI started generating reasoning_content");
+            }
             reasoning_text.push_str(piece);
         }
     }
@@ -1224,6 +1235,14 @@ impl LlmProvider for OpenAiProvider {
                 body["tools"] = json!(translate_tools_to_oai(tool_defs));
             }
         }
+
+        debug!(
+            provider = %self.provider,
+            model = %model,
+            url = %self.chat_url,
+            messages_count = messages.len(),
+            "Sending LLM stream request"
+        );
 
         let response = loop {
             let mut req = self
