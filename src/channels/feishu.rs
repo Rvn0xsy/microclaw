@@ -920,7 +920,6 @@ mod pb {
 const FRAME_METHOD_CONTROL: i32 = 0;
 const FRAME_METHOD_DATA: i32 = 1;
 const MSG_TYPE_EVENT: &str = "event";
-const MSG_TYPE_ACK: &str = "ack";
 const MSG_TYPE_PING: &str = "ping";
 
 // ---------------------------------------------------------------------------
@@ -1588,9 +1587,10 @@ async fn run_ws_connection(
 }
 
 async fn send_ack(write: &WsSink, request_frame: &pb::Frame) {
-    let resp_payload =
-        serde_json::json!({ "code": 0, "msg": "success", "StatusCode": 0 }).to_string();
-    let mut headers: Vec<pb::Header> = request_frame
+    // Feishu long-connection ACK payload follows HTTP semantics in official SDKs:
+    // {"code":200}. Returning {"code":0} can be treated as failed delivery.
+    let resp_payload = serde_json::json!({ "code": 200 }).to_string();
+    let headers: Vec<pb::Header> = request_frame
         .headers
         .iter()
         .map(|h| pb::Header {
@@ -1598,19 +1598,6 @@ async fn send_ack(write: &WsSink, request_frame: &pb::Frame) {
             value: h.value.clone(),
         })
         .collect();
-    let mut has_type = false;
-    for h in &mut headers {
-        if h.key == "type" {
-            h.value = MSG_TYPE_ACK.to_string();
-            has_type = true;
-        }
-    }
-    if !has_type {
-        headers.push(pb::Header {
-            key: "type".into(),
-            value: MSG_TYPE_ACK.into(),
-        });
-    }
     let ack_frame = pb::Frame {
         seq_id: request_frame.seq_id,
         log_id: request_frame.log_id,
