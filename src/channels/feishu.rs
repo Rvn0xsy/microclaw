@@ -1551,8 +1551,18 @@ async fn run_ws_connection(
                     let cfg = feishu_cfg.clone();
                     let base = base_url.to_string();
                     let runtime_ctx = runtime.clone();
+                    let client_clone = http_client.clone();
                     tokio::spawn(async move {
-                        handle_feishu_event(state, runtime_ctx, &cfg, &base, &bot_id, &event).await;
+                        handle_feishu_event(
+                            state,
+                            client_clone,
+                            runtime_ctx,
+                            &cfg,
+                            &base,
+                            &bot_id,
+                            &event,
+                        )
+                        .await;
                     });
                 } else if frame.method == FRAME_METHOD_CONTROL {
                     // pong or other control frames — no action needed
@@ -1610,6 +1620,7 @@ async fn send_ack(write: &WsSink, request_frame: &pb::Frame) {
 /// Handle a Feishu event envelope. Dispatches im.message.receive_v1 events.
 async fn handle_feishu_event(
     app_state: Arc<AppState>,
+    http_client: reqwest::Client,
     runtime: FeishuRuntimeContext,
     feishu_cfg: &FeishuChannelConfig,
     base_url: &str,
@@ -1743,6 +1754,7 @@ async fn handle_feishu_event(
 
     handle_feishu_message(
         app_state,
+        http_client,
         runtime,
         feishu_cfg,
         base_url,
@@ -1762,6 +1774,7 @@ async fn handle_feishu_event(
 #[allow(clippy::too_many_arguments)]
 async fn handle_feishu_message(
     app_state: Arc<AppState>,
+    http_client: reqwest::Client,
     runtime: FeishuRuntimeContext,
     feishu_cfg: &FeishuChannelConfig,
     base_url: &str,
@@ -1794,7 +1807,6 @@ async fn handle_feishu_message(
     }
 
     // Handle slash commands
-    let http_client = reqwest::Client::new();
     let token = match get_token(
         &http_client,
         base_url,
@@ -2443,11 +2455,21 @@ pub fn register_feishu_webhook(router: axum::Router, app_state: Arc<AppState>) -
                     }
 
                     let bot_id = runtime_bot_open_id(&runtime_ctx.channel_name).unwrap_or_default();
+                    let http_client = reqwest::Client::new();
 
                     // Process the event
                     let event = body.0;
                     tokio::spawn(async move {
-                        handle_feishu_event(state, runtime_ctx, &cfg, &base, &bot_id, &event).await;
+                        handle_feishu_event(
+                            state,
+                            http_client,
+                            runtime_ctx,
+                            &cfg,
+                            &base,
+                            &bot_id,
+                            &event,
+                        )
+                        .await;
                     });
 
                     axum::Json(serde_json::json!({"code": 0}))

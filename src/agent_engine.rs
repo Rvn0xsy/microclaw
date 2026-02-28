@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
 use tokio::sync::mpsc::UnboundedSender;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::embedding::EmbeddingProvider;
 use crate::hooks::HookOutcome;
@@ -475,11 +475,25 @@ pub(crate) async fn process_with_agent_impl(
     event_tx: Option<&UnboundedSender<AgentEvent>>,
 ) -> anyhow::Result<String> {
     let chat_id = context.chat_id;
+    let request_start = std::time::Instant::now();
+    info!(
+        chat_id,
+        channel = context.caller_channel,
+        chat_type = context.chat_type,
+        has_override_prompt = override_prompt.is_some(),
+        has_image = image_data.is_some(),
+        "Agent request started"
+    );
 
     if let Some(reply) =
         maybe_handle_explicit_memory_command(state, chat_id, override_prompt, image_data.clone())
             .await?
     {
+        info!(
+            chat_id,
+            fast_path = "explicit_memory",
+            "Agent request completed via fast path"
+        );
         return Ok(reply);
     }
 
@@ -493,6 +507,7 @@ pub(crate) async fn process_with_agent_impl(
 
         if session_messages.is_empty() {
             // Corrupted session, fall back to DB history
+            info!(chat_id, "Session corrupted, falling back to DB history");
             load_messages_from_db(state, chat_id, context.chat_type, context.caller_channel).await?
         } else {
             // Get new user messages since session was last saved
@@ -501,6 +516,12 @@ pub(crate) async fn process_with_agent_impl(
                 db.get_new_user_messages_since(chat_id, &updated_at_cloned)
             })
             .await?;
+            info!(
+                chat_id,
+                session_messages = session_messages.len(),
+                new_messages = new_msgs.len(),
+                "Session resumed"
+            );
             for stored_msg in &new_msgs {
                 if run_control::is_aborted_source_message(
                     context.caller_channel,
@@ -534,6 +555,7 @@ pub(crate) async fn process_with_agent_impl(
         }
     } else {
         // No session — build from DB history
+        info!(chat_id, "No existing session, building from DB history");
         load_messages_from_db(state, chat_id, context.chat_type, context.caller_channel).await?
     };
 
@@ -604,6 +626,15 @@ pub(crate) async fn process_with_agent_impl(
     .await;
     append_plugin_context_sections(&mut system_prompt, &plugin_context);
 
+    debug!(
+        chat_id,
+        system_prompt_len = system_prompt.len(),
+        memory_context_len = memory_context.len(),
+        skills_catalog_len = skills_catalog.len(),
+        plugin_context_len = plugin_context.len(),
+        "System prompt constructed"
+    );
+
     // If image_data is present, convert the last user message to a blocks-based message with the image
     if let Some((base64_data, media_type)) = image_data {
         if let Some(last_msg) = messages.last_mut() {
@@ -634,6 +665,7 @@ pub(crate) async fn process_with_agent_impl(
 
     // Compact if messages exceed threshold
     if messages.len() > state.config.max_session_messages {
+        let msg_count_before = messages.len();
         archive_conversation(
             &state.config.data_dir,
             context.caller_channel,
@@ -648,6 +680,12 @@ pub(crate) async fn process_with_agent_impl(
             state.config.compact_keep_recent,
         )
         .await;
+        info!(
+            chat_id,
+            messages_before = msg_count_before,
+            messages_after = messages.len(),
+            "Context compacted"
+        );
     }
 
     let tool_defs = state.tools.definitions().to_vec();
@@ -769,11 +807,19 @@ pub(crate) async fn process_with_agent_impl(
         }
 
         let stop_reason = response.stop_reason.as_deref().unwrap_or("end_turn");
+        let (in_tok, out_tok) = response
+            .usage
+            .as_ref()
+            .map(|u| (u.input_tokens, u.output_tokens))
+            .unwrap_or((0, 0));
+
         info!(
-            "Agent iteration {} stop_reason={} chat_id={}",
-            iteration + 1,
+            chat_id,
+            iteration = iteration + 1,
             stop_reason,
-            chat_id
+            input_tokens = in_tok,
+            output_tokens = out_tok,
+            "Agent iteration completed"
         );
 
         if stop_reason == "end_turn" || stop_reason == "max_tokens" {
@@ -786,6 +832,15 @@ pub(crate) async fn process_with_agent_impl(
                 })
                 .collect::<Vec<_>>()
                 .join("");
+
+            if text.contains("<think>") {
+                let stripped_len = strip_thinking(&text).len();
+                let thinking_chars = text.len().saturating_sub(stripped_len);
+                debug!(
+                    chat_id,
+                    thinking_chars, "AI thinking content received at end of turn"
+                );
+            }
 
             // Strip <think> blocks unless show_thinking is enabled
             let display_text = if state.config.show_thinking {
@@ -859,6 +914,14 @@ pub(crate) async fn process_with_agent_impl(
                     text: final_text.clone(),
                 });
             }
+            info!(
+                chat_id,
+                channel = context.caller_channel,
+                iterations = iteration + 1,
+                duration_ms = request_start.elapsed().as_millis(),
+                response_len = final_text.len(),
+                "Agent request completed"
+            );
             return Ok(final_text);
         }
 
@@ -868,6 +931,14 @@ pub(crate) async fn process_with_agent_impl(
                 .iter()
                 .filter_map(|block| match block {
                     ResponseContentBlock::Text { text } => {
+                        if text.contains("<think>") {
+                            let stripped_len = strip_thinking(text).len();
+                            let thinking_chars = text.len().saturating_sub(stripped_len);
+                            debug!(
+                                chat_id,
+                                thinking_chars, "AI thinking content received during tool use turn"
+                            );
+                        }
                         Some(ContentBlock::Text { text: text.clone() })
                     }
                     ResponseContentBlock::ToolUse { id, name, input } => {
@@ -939,7 +1010,12 @@ pub(crate) async fn process_with_agent_impl(
                             input: effective_input.clone(),
                         });
                     }
-                    info!("Executing tool: {} (iteration {})", name, iteration + 1);
+                    info!(
+                        chat_id,
+                        tool = %name,
+                        iteration = iteration + 1,
+                        "Executing tool"
+                    );
                     let started = std::time::Instant::now();
                     let mut executed_input = effective_input.clone();
                     let mut result = state
@@ -1053,9 +1129,11 @@ pub(crate) async fn process_with_agent_impl(
                             result.content.clone()
                         };
                         warn!(
-                            "Tool '{}' failed (iteration {}): {}",
-                            name,
-                            iteration + 1,
+                            chat_id,
+                            tool = %name,
+                            iteration = iteration + 1,
+                            error_type = ?result.error_type,
+                            "Tool execution failed: {}",
                             preview
                         );
                     }
