@@ -160,7 +160,7 @@ sqlite3 <data_dir>/runtime/microclaw.db "SELECT id, chat_id, chat_channel, exter
 - **会话中发消息** -- 智能体可以在最终回复前发送中间进度消息
 - **提及追赶（Telegram 群）** -- 在 Telegram 群里被 @ 时，机器人会读取上次回复以来的所有消息
 - **持续输入指示** -- 处理期间持续显示"正在输入"状态
-- **持久化记忆** -- 全局和每个聊天的 AGENTS.md 文件，每次请求都会加载
+- **持久化记忆** -- 全局、bot/账号级、每聊天三级 AGENTS.md 文件，每次请求都会加载
 - **消息分割** -- 长回复自动在换行处分割，适配不同平台长度限制（Telegram 4096 / Discord 2000 / Slack 4000 / 飞书 4000）
 
 ## 工具列表
@@ -173,7 +173,7 @@ sqlite3 <data_dir>/runtime/microclaw.db "SELECT id, chat_id, chat_channel, exter
 | `edit_file` | 查找替换编辑，带唯一性验证 |
 | `glob` | 按模式查找文件（`**/*.rs`、`src/**/*.ts`） |
 | `grep` | 正则搜索文件内容 |
-| `read_memory` | 读取持久化 AGENTS.md 记忆（全局或每聊天） |
+| `read_memory` | 读取持久化 AGENTS.md 记忆（`global` / `bot` / `chat`） |
 | `write_memory` | 写入持久化 AGENTS.md 记忆 |
 | `web_search` | 通过 DuckDuckGo 搜索（返回标题、URL、摘要） |
 | `web_fetch` | 抓取 URL 并返回纯文本（去 HTML，最大 20KB） |
@@ -202,8 +202,10 @@ MicroClaw 通过 `AGENTS.md` 文件维护持久化记忆：
 ```
 <data_dir>/runtime/groups/
     AGENTS.md                 # 全局记忆（所有聊天共享）
-    {chat_id}/
-        AGENTS.md             # 每聊天记忆
+    {channel}/
+        AGENTS.md             # 该渠道下 bot/账号级记忆
+        {chat_id}/
+            AGENTS.md         # 每聊天记忆（按渠道隔离）
 ```
 
 记忆在每次请求时加载到系统提示中。模型可以通过工具读写记忆 -- 告诉它"记住我喜欢用 Python"，它就会跨会话保存。

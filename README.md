@@ -163,7 +163,7 @@ For a deeper dive into the architecture and design decisions, read: **[Building 
 - **Mid-conversation messaging** -- the agent can send intermediate messages before its final response
 - **Mention catch-up (Telegram groups)** -- when mentioned in a Telegram group, the bot reads all messages since its last reply (not just the last N)
 - **Continuous typing indicator** -- typing indicator stays active for the full duration of processing
-- **Persistent memory** -- AGENTS.md files at global and per-chat scopes, loaded into every request
+- **Persistent memory** -- AGENTS.md files at global, bot/account, and per-chat scopes, loaded into every request
 - **Message splitting** -- long responses are automatically split at newline boundaries to fit channel limits (Telegram 4096 / Discord 2000 / Slack 4000 / Feishu 4000 / IRC ~380)
 
 ## Tools
@@ -176,7 +176,7 @@ For a deeper dive into the architecture and design decisions, read: **[Building 
 | `edit_file` | Find-and-replace editing with uniqueness validation |
 | `glob` | Find files by pattern (`**/*.rs`, `src/**/*.ts`) |
 | `grep` | Regex search across file contents |
-| `read_memory` | Read persistent AGENTS.md memory (global or per-chat) |
+| `read_memory` | Read persistent AGENTS.md memory (`global`, `bot`, or `chat`) |
 | `write_memory` | Write persistent AGENTS.md memory |
 | `web_search` | Search the web via DuckDuckGo (returns titles, URLs, snippets) |
 | `web_fetch` | Fetch a URL and return plain text (HTML stripped, max 20KB) |
@@ -215,8 +215,10 @@ MicroClaw maintains persistent memory via `AGENTS.md` files:
 ```
 <data_dir>/runtime/groups/
     AGENTS.md                 # Global memory (shared across all chats)
-    {chat_id}/
-        AGENTS.md             # Per-chat memory
+    {channel}/
+        AGENTS.md             # Bot/account memory for this channel
+        {chat_id}/
+            AGENTS.md         # Per-chat memory (namespaced by channel)
 ```
 
 Memory is loaded into the system prompt on every request. The model can read and update memory through tools -- tell it to "remember that I prefer Python" and it will persist across sessions.
