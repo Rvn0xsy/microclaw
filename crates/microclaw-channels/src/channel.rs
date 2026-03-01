@@ -43,6 +43,49 @@ pub fn parse_chat_routing(registry: &ChannelRegistry, db_chat_type: &str) -> Opt
     })
 }
 
+fn infer_channel_from_chat_type(chat_type: &str) -> Option<&'static str> {
+    if chat_type.starts_with("telegram_") {
+        return Some("telegram");
+    }
+    if chat_type.starts_with("discord_") {
+        return Some("discord");
+    }
+    if chat_type.starts_with("slack_") {
+        return Some("slack");
+    }
+    if chat_type.starts_with("feishu_") {
+        return Some("feishu");
+    }
+    if chat_type.starts_with("matrix_") {
+        return Some("matrix");
+    }
+    if chat_type.starts_with("whatsapp_") {
+        return Some("whatsapp");
+    }
+    if chat_type.starts_with("imessage_") {
+        return Some("imessage");
+    }
+    if chat_type.starts_with("email_") {
+        return Some("email");
+    }
+    if chat_type.starts_with("nostr_") {
+        return Some("nostr");
+    }
+    if chat_type.starts_with("signal_") {
+        return Some("signal");
+    }
+    if chat_type.starts_with("dingtalk_") {
+        return Some("dingtalk");
+    }
+    if chat_type.starts_with("qq_") {
+        return Some("qq");
+    }
+    if chat_type.starts_with("irc_") {
+        return Some("irc");
+    }
+    None
+}
+
 pub async fn get_chat_type_raw(db: Arc<Database>, chat_id: i64) -> Result<Option<String>, String> {
     call_blocking(db, move |d| d.get_chat_type(chat_id))
         .await
@@ -94,9 +137,27 @@ pub async fn get_required_chat_routing(
     let chat_type = get_chat_type_raw(db.clone(), chat_id)
         .await?
         .ok_or_else(|| format!("target chat {chat_id} not found"))?;
-    get_chat_routing(registry, db, chat_id)
+    if let Some(routing) = get_chat_routing(registry, db.clone(), chat_id).await? {
+        return Ok(routing);
+    }
+
+    let hinted_channel = get_chat_channel_raw(db, chat_id)
         .await?
-        .ok_or_else(|| format!("unsupported chat type '{chat_type}' for chat {chat_id}"))
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .or_else(|| infer_channel_from_chat_type(&chat_type).map(ToOwned::to_owned));
+
+    if let Some(channel_name) = hinted_channel {
+        if registry.get(&channel_name).is_none() {
+            return Err(format!(
+                "channel '{channel_name}' is not enabled for chat {chat_id} (chat_type='{chat_type}')"
+            ));
+        }
+    }
+
+    Err(format!(
+        "unsupported chat type '{chat_type}' for chat {chat_id}"
+    ))
 }
 
 pub fn session_source_for_chat(
@@ -188,4 +249,24 @@ pub async fn deliver_and_store_bot_message(
     call_blocking(db.clone(), move |d| d.store_message(&msg))
         .await
         .map_err(|e| format!("Failed to store sent message: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::infer_channel_from_chat_type;
+
+    #[test]
+    fn test_infer_channel_from_prefixed_chat_type() {
+        assert_eq!(
+            infer_channel_from_chat_type("telegram_private"),
+            Some("telegram")
+        );
+        assert_eq!(infer_channel_from_chat_type("discord_dm"), Some("discord"));
+    }
+
+    #[test]
+    fn test_infer_channel_from_unknown_chat_type() {
+        assert_eq!(infer_channel_from_chat_type("private"), None);
+        assert_eq!(infer_channel_from_chat_type("group"), None);
+    }
 }
