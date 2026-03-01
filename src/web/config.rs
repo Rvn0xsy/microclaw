@@ -6,7 +6,6 @@ fn list_available_soul_files(config: &crate::config::Config) -> Vec<String> {
 
     let mut roots = vec![std::path::PathBuf::from("souls")];
     roots.push(std::path::PathBuf::from(&config.data_dir).join("souls"));
-    roots.push(std::path::PathBuf::from(config.runtime_data_dir()).join("souls"));
 
     for root in roots {
         let Ok(entries) = std::fs::read_dir(&root) else {

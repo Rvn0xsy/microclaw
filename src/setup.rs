@@ -439,7 +439,6 @@ fn soul_picker_file_names(data_dir: Option<&str>) -> Vec<String> {
         let trimmed = dir.trim();
         if !trimmed.is_empty() {
             roots.push(Path::new(trimmed).join("souls"));
-            roots.push(Path::new(trimmed).join("runtime").join("souls"));
         }
     }
 

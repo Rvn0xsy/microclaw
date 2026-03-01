@@ -1450,21 +1450,13 @@ pub(crate) async fn build_db_memory_context(
 fn configured_soul_candidate_paths(
     path: &str,
     data_dir: &str,
-    runtime_data_dir: &str,
 ) -> Vec<std::path::PathBuf> {
     let configured = std::path::PathBuf::from(path);
     let mut candidates = vec![configured.clone()];
     if configured.is_relative() {
         let data_dir_candidate = std::path::PathBuf::from(data_dir).join(&configured);
-        let runtime_candidate = std::path::PathBuf::from(runtime_data_dir).join(&configured);
-        let has_data_dir_candidate = data_dir_candidate != configured;
-        if has_data_dir_candidate {
-            candidates.push(data_dir_candidate.clone());
-        }
-        if runtime_candidate != configured
-            && (!has_data_dir_candidate || runtime_candidate != data_dir_candidate)
-        {
-            candidates.push(runtime_candidate);
+        if data_dir_candidate != configured {
+            candidates.push(data_dir_candidate);
         }
     }
     candidates
@@ -1473,10 +1465,9 @@ fn configured_soul_candidate_paths(
 fn read_configured_soul_with_fallback(
     configured_path: &str,
     data_dir: &str,
-    runtime_data_dir: &str,
 ) -> Result<(String, String), String> {
     let mut errors = Vec::new();
-    for candidate in configured_soul_candidate_paths(configured_path, data_dir, runtime_data_dir) {
+    for candidate in configured_soul_candidate_paths(configured_path, data_dir) {
         let rendered = candidate.display().to_string();
         match std::fs::read_to_string(&candidate) {
             Ok(content) => {
@@ -1501,8 +1492,7 @@ pub(crate) fn load_soul_content(
 
     // 1. Per-channel/account path from config (channels.<name>.soul_path or accounts.<id>.soul_path)
     if let Some(path) = config.soul_path_for_channel(caller_channel) {
-        match read_configured_soul_with_fallback(&path, &config.data_dir, &config.runtime_data_dir())
-        {
+        match read_configured_soul_with_fallback(&path, &config.data_dir) {
             Ok((content, resolved_path)) => {
                 info!(
                     "SOUL loaded from configured channel/account path; caller_channel={}, chat_id={}, configured_path={}, resolved_path={}",
@@ -1522,11 +1512,7 @@ pub(crate) fn load_soul_content(
     // 2. Explicit global path from config
     if let Some(ref path) = config.soul_path {
         if global_soul.is_none() {
-            match read_configured_soul_with_fallback(
-                path,
-                &config.data_dir,
-                &config.runtime_data_dir(),
-            ) {
+            match read_configured_soul_with_fallback(path, &config.data_dir) {
                 Ok((content, resolved_path)) => {
                     info!(
                         "SOUL loaded from configured global path; caller_channel={}, chat_id={}, configured_path={}, resolved_path={}",
@@ -1614,6 +1600,11 @@ Your name is {bot_username}. Current channel: {caller_channel}."#
 
     let mut prompt = format!(
         r#"{identity}
+
+Identity rules (highest priority unless unsafe):
+- Your public name is "{bot_username}".
+- If asked "你叫什么/你是谁/what is your name", answer with your public name first.
+- Do not claim you have no name.
 
 You have access to the following capabilities:
 - Execute bash commands using the `bash` tool — NOT by writing commands as text. When you need to run a command, call the bash tool with the command parameter.
@@ -2977,37 +2968,6 @@ mod tests {
 
         let soul = super::load_soul_content(&config, "feishu", 99);
         assert_eq!(soul.as_deref(), Some("relative account soul"));
-
-        let _ = std::fs::remove_dir_all(&base_dir);
-    }
-
-    #[test]
-    fn test_load_soul_content_channel_account_relative_path_under_runtime_data_dir() {
-        let base_dir = std::env::temp_dir().join(format!(
-            "mc_soul_channel_runtime_relative_{}",
-            uuid::Uuid::new_v4()
-        ));
-        let rel_name = format!("__mc_soul_{}.md", uuid::Uuid::new_v4());
-        let rel_path = format!("souls/{rel_name}");
-        let runtime_dir = base_dir.join("runtime");
-        std::fs::create_dir_all(runtime_dir.join("souls")).unwrap();
-        std::fs::write(runtime_dir.join(&rel_path), "runtime relative account soul").unwrap();
-
-        let mut config = Config::test_defaults();
-        config.data_dir = base_dir.to_string_lossy().to_string();
-        config.channels = serde_yaml::from_str(&format!(
-            r#"feishu:
-  default_account: main
-  accounts:
-    main:
-      soul_path: "{}"
-"#,
-            rel_path
-        ))
-        .unwrap();
-
-        let soul = super::load_soul_content(&config, "feishu", 100);
-        assert_eq!(soul.as_deref(), Some("runtime relative account soul"));
 
         let _ = std::fs::remove_dir_all(&base_dir);
     }
