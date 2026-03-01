@@ -254,7 +254,7 @@ export function SessionSidebar({
                     : undefined
                 }
               >
-                <span className="max-w-[220px] truncate text-sm font-medium">{item.label}</span>
+                <span className="max-w-full truncate text-sm font-medium">{item.label}</span>
                 <span className={isDark ? 'mt-0.5 text-[11px] uppercase tracking-wide text-slate-500' : 'mt-0.5 text-[11px] uppercase tracking-wide text-slate-400'}>
                   {item.chat_type}
                 </span>

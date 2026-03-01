@@ -1232,6 +1232,7 @@ function ConfigStepsCard({ title = 'Setup Steps', steps }: ConfigStepsCardProps)
 function App() {
   const [appearance, setAppearance] = useState<Appearance>(readAppearance())
   const [uiTheme, setUiTheme] = useState<UiTheme>(readUiTheme())
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState<boolean>(false)
   const [sessions, setSessions] = useState<SessionItem[]>([])
   const [extraSessions, setExtraSessions] = useState<SessionItem[]>([])
   const [sessionKey, setSessionKey] = useState<string>(() => makeSessionKey())
@@ -2597,24 +2598,83 @@ function App() {
             : 'h-screen w-screen bg-[radial-gradient(1200px_560px_at_-8%_-10%,#d1fae5_0%,transparent_58%),radial-gradient(1200px_560px_at_108%_-12%,#e0f2fe_0%,transparent_58%),#f8fafc]'
         }
       >
-        <div className="grid h-full min-h-0 grid-cols-[320px_minmax(0,1fr)]">
-          <SessionSidebar
-            appearance={appearance}
-            onToggleAppearance={toggleAppearance}
-            uiTheme={uiTheme}
-            onUiThemeChange={(theme) => setUiTheme(theme as UiTheme)}
-            uiThemeOptions={UI_THEME_OPTIONS}
-            sessionItems={sessionItems}
-            selectedSessionKey={sessionKey}
-            onSessionSelect={(key) => setSessionKey(key)}
-            onRefreshSession={(key) => void onRefreshSessionByKey(key)}
-            onResetSession={(key) => void onResetSessionByKey(key)}
-            onDeleteSession={(key) => void onDeleteSessionByKey(key)}
-            onOpenConfig={openConfig}
-            onOpenUsage={() => openUsage(sessionKey)}
-            onNewSession={createSession}
-            appVersion={appVersion}
-          />
+        <div className="grid h-full min-h-0 grid-cols-1 md:grid-cols-[320px_minmax(0,1fr)]">
+          <div className="hidden md:block md:h-full">
+            <SessionSidebar
+              appearance={appearance}
+              onToggleAppearance={toggleAppearance}
+              uiTheme={uiTheme}
+              onUiThemeChange={(theme) => setUiTheme(theme as UiTheme)}
+              uiThemeOptions={UI_THEME_OPTIONS}
+              sessionItems={sessionItems}
+              selectedSessionKey={sessionKey}
+              onSessionSelect={(key) => setSessionKey(key)}
+              onRefreshSession={(key) => void onRefreshSessionByKey(key)}
+              onResetSession={(key) => void onResetSessionByKey(key)}
+              onDeleteSession={(key) => void onDeleteSessionByKey(key)}
+              onOpenConfig={openConfig}
+              onOpenUsage={() => openUsage(sessionKey)}
+              onNewSession={createSession}
+              appVersion={appVersion}
+            />
+          </div>
+
+          {mobileSidebarOpen ? (
+            <div className="fixed inset-0 z-40 md:hidden">
+              <button
+                type="button"
+                aria-label="Close sessions sidebar"
+                className="absolute inset-0 bg-black/45"
+                onClick={() => setMobileSidebarOpen(false)}
+              />
+              <div
+                className={
+                  appearance === 'dark'
+                    ? 'relative h-full w-[min(92vw,340px)] border-r border-[color:var(--mc-border-soft)] bg-[var(--mc-bg-sidebar)]'
+                    : 'relative h-full w-[min(92vw,340px)] border-r border-slate-200 bg-white'
+                }
+              >
+                <SessionSidebar
+                  appearance={appearance}
+                  onToggleAppearance={toggleAppearance}
+                  uiTheme={uiTheme}
+                  onUiThemeChange={(theme) => setUiTheme(theme as UiTheme)}
+                  uiThemeOptions={UI_THEME_OPTIONS}
+                  sessionItems={sessionItems}
+                  selectedSessionKey={sessionKey}
+                  onSessionSelect={(key) => {
+                    setSessionKey(key)
+                    setMobileSidebarOpen(false)
+                  }}
+                  onRefreshSession={(key) => {
+                    void onRefreshSessionByKey(key)
+                    setMobileSidebarOpen(false)
+                  }}
+                  onResetSession={(key) => {
+                    void onResetSessionByKey(key)
+                    setMobileSidebarOpen(false)
+                  }}
+                  onDeleteSession={(key) => {
+                    void onDeleteSessionByKey(key)
+                    setMobileSidebarOpen(false)
+                  }}
+                  onOpenConfig={async () => {
+                    setMobileSidebarOpen(false)
+                    await openConfig()
+                  }}
+                  onOpenUsage={async () => {
+                    setMobileSidebarOpen(false)
+                    await openUsage(sessionKey)
+                  }}
+                  onNewSession={() => {
+                    createSession()
+                    setMobileSidebarOpen(false)
+                  }}
+                  appVersion={appVersion}
+                />
+              </div>
+            </div>
+          ) : null}
 
           <main
             className={
@@ -2630,9 +2690,23 @@ function App() {
                   : 'sticky top-0 z-10 border-b border-slate-200 bg-white/92 px-4 py-3 backdrop-blur-sm'
               }
             >
-              <Heading size="6">
-                {selectedSessionLabel}
-              </Heading>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setMobileSidebarOpen(true)}
+                  aria-label="Open sessions sidebar"
+                  className={
+                    appearance === 'dark'
+                      ? 'inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-[color:var(--mc-border-soft)] text-slate-200 md:hidden'
+                      : 'inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-slate-300 text-slate-700 md:hidden'
+                  }
+                >
+                  ☰
+                </button>
+                <Heading size="6" className="min-w-0 truncate">
+                  {selectedSessionLabel}
+                </Heading>
+              </div>
             </header>
 
             <div
