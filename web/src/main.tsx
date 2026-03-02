@@ -2559,9 +2559,17 @@ function App() {
 
   useEffect(() => {
     if (!authAuthenticated) return
+    const existsOnServer = sessions.some((item) => item.session_key === sessionKey)
+    if (!existsOnServer) {
+      setHistorySeed([])
+      setHistoryCountBySession((prev) => ({ ...prev, [sessionKey]: 0 }))
+      setRuntimeNonce((x) => x + 1)
+      setError('')
+      return
+    }
     loadHistory(sessionKey).catch((e) => setError(e instanceof Error ? e.message : String(e)))
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionKey, authAuthenticated])
+  }, [sessionKey, authAuthenticated, sessions])
 
   useEffect(() => {
     if (!authAuthenticated) return
