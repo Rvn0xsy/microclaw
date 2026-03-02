@@ -716,7 +716,12 @@ impl McpServer {
             params,
         };
 
-        let mut req = inner.client.post(&inner.endpoint).json(&request);
+        let mut req = inner
+            .client
+            .post(&inner.endpoint)
+            .json(&request)
+            .header("accept", "application/json, text/event-stream")
+            .header("mcp-protocol-version", self.protocol_version());
         for (k, v) in &inner.headers {
             req = req.header(k, v);
         }
@@ -832,7 +837,12 @@ impl McpServer {
                     params,
                 };
 
-                let mut req = inner.client.post(&inner.endpoint).json(&request);
+                let mut req = inner
+                    .client
+                    .post(&inner.endpoint)
+                    .json(&request)
+                    .header("accept", "application/json, text/event-stream")
+                    .header("mcp-protocol-version", self.protocol_version());
                 for (k, v) in &inner.headers {
                     req = req.header(k, v);
                 }
