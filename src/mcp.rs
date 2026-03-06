@@ -23,6 +23,8 @@ const DEFAULT_CIRCUIT_BREAKER_COOLDOWN_SECS: u64 = 30;
 const DEFAULT_MAX_CONCURRENT_REQUESTS: u32 = 4;
 const DEFAULT_QUEUE_WAIT_MS: u64 = 200;
 const DEFAULT_RATE_LIMIT_PER_MINUTE: u32 = 120;
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 // --- MCP config types ---
 
@@ -260,6 +262,8 @@ impl McpServer {
                     cmd.args(&config.args);
                     cmd.envs(&config.env);
                     cmd.stderr(std::process::Stdio::null());
+                    #[cfg(windows)]
+                    hide_windows_subprocess_window_tokio(cmd);
                 }))
                 .map_err(|e| format!("Failed to spawn MCP server '{name}': {e}"))?;
 
@@ -718,16 +722,29 @@ fn build_client_info(requested_protocol: Option<String>) -> ClientInfo {
     info
 }
 
+#[cfg(windows)]
+fn hide_windows_subprocess_window_tokio(cmd: &mut tokio::process::Command) {
+    use std::os::windows::process::CommandExt;
+    cmd.as_std_mut().creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(windows)]
+fn hide_windows_subprocess_window_std(cmd: &mut std::process::Command) {
+    std::os::windows::process::CommandExt::creation_flags(cmd, CREATE_NO_WINDOW);
+}
+
 /// Resolve a command name to its full path.
 fn resolve_command(command: &str) -> String {
     if std::path::Path::new(command).is_absolute() {
         return command.to_string();
     }
 
-    if let Ok(output) = std::process::Command::new(if cfg!(windows) { "where" } else { "which" })
-        .arg(command)
-        .output()
-    {
+    let mut lookup = std::process::Command::new(if cfg!(windows) { "where" } else { "which" });
+    lookup.arg(command);
+    #[cfg(windows)]
+    hide_windows_subprocess_window_std(&mut lookup);
+
+    if let Ok(output) = lookup.output() {
         if output.status.success() {
             let resolved = String::from_utf8_lossy(&output.stdout)
                 .lines()
