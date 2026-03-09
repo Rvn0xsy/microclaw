@@ -1,6 +1,6 @@
 # RFC 0005: Session-Native Subagents Runtime (V1)
 
-- Status: Draft
+- Status: In Progress
 - Owner: runtime/storage
 - Created: 2026-03-09
 - Related: #205
@@ -37,6 +37,12 @@ OpenClaw and Spacebot both show stronger patterns:
 - `subagents_list(chat_id?, limit?)`
 - `subagents_info(run_id, chat_id?)`
 - `subagents_kill(run_id|"all", chat_id?)`
+- `subagents_log(run_id, chat_id?, limit?)`
+- `subagents_focus(run_id, chat_id?)`
+- `subagents_unfocus(chat_id?)`
+- `subagents_focused(chat_id?)`
+- `subagents_send(message, chat_id?)`
+- `subagents_retry_announces(batch?)`
 
 ### Runtime
 
@@ -103,6 +109,14 @@ subagents:
 2. Add depth-limited orchestrator mode (`max_spawn_depth=2`) for fan-out/fan-in.
 3. Add adapter-specific thread binding with auto-focus lifecycle.
 4. Add retryable announce queue persisted to DB for restart resilience.
+
+## Delivery Plan (5 incremental commits in one PR)
+
+1. Nested orchestration constraints: `max_spawn_depth`, `max_children_per_run`, parent-child run linkage.
+2. Reliable announce path: persisted announce queue + retry + manual flush tool.
+3. Observability: run event timeline and `subagents_log`.
+4. Practical binding: focus/unfocus/focused/send workflow for chat-level subagent continuity.
+5. Docs/regression/update generated artifacts and planning records.
 
 ## Testing Plan
 
