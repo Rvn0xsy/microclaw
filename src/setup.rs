@@ -2008,7 +2008,11 @@ impl SetupApp {
                     let telegram_llm_provider = config
                         .channels
                         .get("telegram")
-                        .and_then(|ch_cfg| ch_cfg.get("llm_provider"))
+                        .and_then(|ch_cfg| {
+                            ch_cfg
+                                .get("provider_preset")
+                                .or_else(|| ch_cfg.get("llm_provider"))
+                        })
                         .and_then(|v| v.as_str())
                         .map(str::trim)
                         .filter(|v| !v.is_empty())
@@ -2096,7 +2100,11 @@ impl SetupApp {
                     let discord_llm_provider = config
                         .channels
                         .get("discord")
-                        .and_then(|ch_cfg| ch_cfg.get("llm_provider"))
+                        .and_then(|ch_cfg| {
+                            ch_cfg
+                                .get("provider_preset")
+                                .or_else(|| ch_cfg.get("llm_provider"))
+                        })
                         .and_then(|v| v.as_str())
                         .map(str::trim)
                         .filter(|v| !v.is_empty())
@@ -2380,7 +2388,10 @@ impl SetupApp {
                                         );
                                     }
                                     if let Some(v) = account
-                                        .and_then(|a| a.get("llm_provider"))
+                                        .and_then(|a| {
+                                            a.get("provider_preset")
+                                                .or_else(|| a.get("llm_provider"))
+                                        })
                                         .and_then(|v| v.as_str())
                                         .map(str::trim)
                                         .filter(|v| !v.is_empty())
@@ -5352,7 +5363,7 @@ fn save_config_yaml(
         yaml.push_str(&format!("    enabled: {}\n", channel_selected("telegram")));
         if !telegram_llm_provider.trim().is_empty() {
             yaml.push_str(&format!(
-                "    llm_provider: \"{}\"\n",
+                "    provider_preset: \"{}\"\n",
                 telegram_llm_provider.trim()
             ));
         }
@@ -5420,7 +5431,7 @@ fn save_config_yaml(
         yaml.push_str(&format!("    enabled: {}\n", channel_selected("discord")));
         if !discord_llm_provider.trim().is_empty() {
             yaml.push_str(&format!(
-                "    llm_provider: \"{}\"\n",
+                "    provider_preset: \"{}\"\n",
                 discord_llm_provider.trim()
             ));
         }
@@ -5548,7 +5559,7 @@ fn save_config_yaml(
             let llm_provider = get(&dynamic_slot_llm_provider_key(ch.name, slot));
             if !llm_provider.trim().is_empty() {
                 account.insert(
-                    "llm_provider".into(),
+                    "provider_preset".into(),
                     serde_json::Value::String(llm_provider.trim().to_string()),
                 );
             }
@@ -5690,6 +5701,14 @@ fn save_config_yaml(
         yaml.push_str("# LLM HTTP User-Agent (optional)\n");
         yaml.push_str(&format!("llm_user_agent: \"{}\"\n", llm_user_agent));
     }
+    yaml.push_str("# Optional reusable provider presets for per-bot/channel selection\n");
+    yaml.push_str("# provider_presets:\n");
+    yaml.push_str("#   lab-openai:\n");
+    yaml.push_str("#     provider: \"openai\"\n");
+    yaml.push_str("#     api_key: \"sk-...\"\n");
+    yaml.push_str("#     llm_base_url: \"https://example.com/v1\"\n");
+    yaml.push_str("#     default_model: \"gpt-5.2\"\n");
+    yaml.push_str("#     models: [\"gpt-5.2\", \"gpt-5.2-mini\"]\n");
     let show_thinking = values
         .get("SHOW_THINKING")
         .map(|v| {

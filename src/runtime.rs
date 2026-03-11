@@ -424,6 +424,7 @@ pub async fn run(
     }
 
     let hooks = Arc::new(HookManager::from_config(&config).with_db(db.clone()));
+    let llm_provider_overrides = config.llm_provider_overrides();
 
     let state = Arc::new(AppState {
         config,
@@ -433,7 +434,7 @@ pub async fn run(
         skills,
         hooks,
         llm,
-        llm_provider_overrides: Arc::new(RwLock::new(HashMap::new())),
+        llm_provider_overrides: Arc::new(RwLock::new(llm_provider_overrides)),
         llm_model_overrides: Arc::new(RwLock::new(llm_model_overrides)),
         embedding,
         memory_backend,
