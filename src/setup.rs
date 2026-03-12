@@ -1458,7 +1458,7 @@ impl SetupApp {
                 },
                 Field {
                     key: llm_provider_presets_json_key().into(),
-                    label: "LLM provider presets JSON (optional)".into(),
+                    label: "LLM provider presets (optional)".into(),
                     value: existing
                         .get(llm_provider_presets_json_key())
                         .cloned()
@@ -4495,6 +4495,14 @@ impl SetupApp {
         }
     }
 
+    fn key_display(key: &str) -> String {
+        if key == llm_provider_presets_json_key() {
+            "LLM_PROVIDER_PRESETS".to_string()
+        } else {
+            key.to_string()
+        }
+    }
+
     fn move_picker(&mut self, direction: i32) {
         let Some(picker) = self.picker.as_ref() else {
             return;
@@ -4822,8 +4830,8 @@ impl SetupApp {
                 "Example: OpenClaw-Gateway/1.0",
             ),
             _ if key == llm_provider_presets_json_key() => (
-                "Reusable preset definitions keyed by preset id. Channels/bots pick these ids instead of repeating provider details.",
-                "Example: {\"1\":{\"provider\":\"openai\",\"api_key\":\"sk-...\",\"default_model\":\"gpt-5.2\"},\"deepseek-hk\":{\"provider\":\"deepseek\",\"api_key\":\"sk-...\"}}",
+                "Reusable preset definitions keyed by preset id. Press Enter to open the preset editor.",
+                "Example: create preset 1 for OpenAI, then let channels/bots select preset 1",
             ),
             "SHOW_THINKING" => (
                 "Show model reasoning/thinking text in channel output when provider supports it.",
@@ -6593,7 +6601,10 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, app: &SetupApp) {
     let mut help_lines = vec![
         Line::from(vec![
             Span::styled("Key: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(field.key.clone(), Style::default().fg(Color::Magenta)),
+            Span::styled(
+                SetupApp::key_display(&field.key),
+                Style::default().fg(Color::Magenta),
+            ),
         ]),
         Line::from(vec![
             Span::styled("Required: ", Style::default().fg(Color::DarkGray)),
@@ -7665,8 +7676,13 @@ fn run_wizard(mut terminal: DefaultTerminal) -> Result<bool, MicroClawError> {
                     }
                 }
                 KeyCode::Char('e') => {
-                    app.editing = true;
-                    app.status = format!("Editing {}", app.selected_field().key);
+                    if app.selected_field().key == llm_provider_presets_json_key() {
+                        app.open_provider_preset_page();
+                        app.status = "Editing provider presets".into();
+                    } else {
+                        app.editing = true;
+                        app.status = format!("Editing {}", app.selected_field().key);
+                    }
                 }
                 KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     app.clear_selected_field();
@@ -8226,6 +8242,14 @@ subagents:
                 .map(|page| page.entries.len())
                 .unwrap_or_default(),
             0
+        );
+    }
+
+    #[test]
+    fn test_key_display_hides_json_suffix_for_provider_presets() {
+        assert_eq!(
+            SetupApp::key_display(llm_provider_presets_json_key()),
+            "LLM_PROVIDER_PRESETS"
         );
     }
 
